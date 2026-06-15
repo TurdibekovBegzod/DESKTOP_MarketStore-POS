@@ -1,10 +1,13 @@
+from datetime import date, timedelta
+
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QTableWidget, QTableWidgetItem, QDialog,
     QFormLayout, QComboBox, QSpinBox, QDoubleSpinBox,
-    QMessageBox, QHeaderView, QFrame, QCheckBox, QScrollArea, QTabWidget
+    QMessageBox, QHeaderView, QFrame, QCheckBox, QScrollArea, QTabWidget,
+    QDateEdit, QCalendarWidget
 )
-from PyQt6.QtCore import Qt, QRectF, QSizeF, QMarginsF, QRegularExpression, QTimer
+from PyQt6.QtCore import Qt, QRectF, QSizeF, QMarginsF, QRegularExpression, QTimer, QDate
 from PyQt6.QtGui import (
     QColor, QPainter, QPen, QFont, QPageSize, QPageLayout,
     QDoubleValidator, QIcon, QRegularExpressionValidator
@@ -772,7 +775,6 @@ class BarcodeLabelWidget(QWidget):
         content = rect.adjusted(margin_x, margin_y, -margin_x, -margin_y)
 
         name = self.product["name"] or ""
-        price = self.product["price"] or 0
         barcode = self.product["barcode"] or ""
 
         painter.setPen(QColor("#111827"))
@@ -795,18 +797,9 @@ class BarcodeLabelWidget(QWidget):
 
         painter.setFont(QFont("Arial", 8))
         painter.drawText(
-            QRectF(content.left(), barcode_rect.bottom() + 2, content.width(), content.height() * 0.12),
+            QRectF(content.left(), barcode_rect.bottom() + 2, content.width(), content.height() * 0.22),
             Qt.AlignmentFlag.AlignCenter,
             barcode,
-        )
-
-        price_font = QFont("Arial", 9)
-        price_font.setBold(True)
-        painter.setFont(price_font)
-        painter.drawText(
-            QRectF(content.left(), content.bottom() - content.height() * 0.17, content.width(), content.height() * 0.16),
-            Qt.AlignmentFlag.AlignCenter,
-            f"{price:,.0f} so'm",
         )
 
         painter.setPen(QPen(QColor("#d1d5db"), 1))
@@ -1250,7 +1243,6 @@ class ProductsWidget(QWidget):
         """)
         self._load_display_currency_combo()
         self.display_currency_combo.currentIndexChanged.connect(lambda _: self.load_data())
-        toolbar.addWidget(self.display_currency_combo)
         toolbar.addStretch()
 
         templates_btn = QPushButton("Templatelar")
@@ -1293,13 +1285,82 @@ class ProductsWidget(QWidget):
         self.tabs = QTabWidget()
         self.table = self._create_products_table()
         self.process_table = self._create_process_table()
-        self.table.setColumnHidden(6, True)
+        self.table.setColumnHidden(5, True)
         self.sold_table = self._create_sold_table()
         self.tabs.addTab(self.table, "Bor mahsulotlar")
         self.tabs.addTab(self.process_table, "Jarayonda")
         self.tabs.addTab(self.sold_table, "Sotilganlar")
         self.tabs.currentChanged.connect(self._on_tab_changed)
         layout.addWidget(self.tabs)
+
+        self.date_lbl = QLabel("Sana:")
+        self.date_edit = QDateEdit()
+        self.date_edit.setDate(QDate.currentDate())
+        self.date_edit.setDateRange(QDate(2000, 1, 1), QDate.currentDate().addYears(10))
+        self.date_edit.setCalendarPopup(True)
+        calendar = QCalendarWidget(self)
+        calendar.setNavigationBarVisible(True)
+        calendar.setGridVisible(True)
+        calendar.setFirstDayOfWeek(Qt.DayOfWeek.Monday)
+        calendar.setMinimumSize(400, 300)
+        self.date_edit.setCalendarWidget(calendar)
+        self.date_edit.setDisplayFormat("dd.MM.yyyy")
+        self.date_edit.setFixedSize(210, 42)
+        self.date_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.date_edit.setStyleSheet("""
+            QDateEdit {
+                border:1px solid #d1d5db;
+                border-radius:6px;
+                padding:2px 34px 2px 10px;
+                background:white;
+                font-size:14px;
+            }
+            QDateEdit::drop-down { width:30px;border:none; }
+        """)
+        self.date_edit.dateChanged.connect(lambda _: self.load_data())
+
+        self.period_combo = QComboBox()
+        self.period_combo.addItem("Kunlik", "day")
+        self.period_combo.addItem("Haftalik", "week")
+        self.period_combo.addItem("Oylik", "month")
+        self.period_combo.addItem("Yillik", "year")
+        self.period_combo.setCurrentIndex(self.period_combo.findData("year"))
+        self.period_combo.setFixedHeight(36)
+        self.period_combo.setMinimumWidth(110)
+        self.period_combo.setStyleSheet("border:1px solid #d1d5db;border-radius:6px;padding:6px 10px;background:white;")
+        self.period_combo.currentIndexChanged.connect(lambda _: self.load_data())
+
+        period_button_style = """
+            QPushButton { background:white;color:#1e293b;border:1px solid #d1d5db;border-radius:6px;padding:0 12px;font-weight:bold; }
+            QPushButton:hover { background:#eff6ff;border-color:#93c5fd;color:#1d4ed8; }
+        """
+        self.prev_period_btn = QPushButton("<")
+        self.prev_period_btn.setFixedSize(36, 36)
+        self.prev_period_btn.setStyleSheet(period_button_style)
+        self.prev_period_btn.clicked.connect(lambda: self._shift_period(-1))
+        self.next_period_btn = QPushButton(">")
+        self.next_period_btn.setFixedSize(36, 36)
+        self.next_period_btn.setStyleSheet(period_button_style)
+        self.next_period_btn.clicked.connect(lambda: self._shift_period(1))
+        self.today_btn = QPushButton("Bugun")
+        self.today_btn.setFixedHeight(36)
+        self.today_btn.setMinimumWidth(82)
+        self.today_btn.setStyleSheet(period_button_style)
+        self.today_btn.clicked.connect(lambda: self.date_edit.setDate(QDate.currentDate()))
+        self.display_currency_combo.setFixedHeight(36)
+
+        period_controls = QHBoxLayout()
+        period_controls.setSpacing(8)
+        period_controls.addStretch()
+        period_controls.addWidget(self.prev_period_btn)
+        period_controls.addWidget(self.date_lbl)
+        period_controls.addWidget(self.date_edit)
+        period_controls.addWidget(self.period_combo)
+        period_controls.addWidget(self.next_period_btn)
+        period_controls.addWidget(self.today_btn)
+        period_controls.addWidget(self.display_currency_combo)
+        period_controls.addStretch()
+        layout.addLayout(period_controls)
         self._load_supplier_filter()
         self._load_template_filter()
         self._load_display_currency_combo()
@@ -1318,17 +1379,17 @@ class ProductsWidget(QWidget):
 
     def _create_products_table(self):
         table = QTableWidget()
-        table.setColumnCount(9)
+        table.setColumnCount(8)
         table.setHorizontalHeaderLabels([
-            "Nomi", "Template", "Shtrix-kod", "Xarid", "Narx", "Qoldiq", "Zaklad", "Amallar", "Copy"
+            "Nomi", "Template", "Shtrix-kod", "Narx", "Qoldiq", "Zaklad", "Amallar", "Copy"
         ])
         table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
         table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)
         table.horizontalHeader().setSectionResizeMode(7, QHeaderView.ResizeMode.Fixed)
-        table.horizontalHeader().setSectionResizeMode(8, QHeaderView.ResizeMode.Fixed)
-        table.setColumnWidth(6, 130)
-        table.setColumnWidth(7, 180)
-        table.setColumnWidth(8, 70)
+        table.setColumnWidth(5, 130)
+        table.setColumnWidth(6, 180)
+        table.setColumnWidth(7, 70)
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         table.setAlternatingRowColors(True)
@@ -1339,13 +1400,13 @@ class ProductsWidget(QWidget):
 
     def _create_process_table(self):
         table = QTableWidget()
-        table.setColumnCount(10)
+        table.setColumnCount(9)
         table.setHorizontalHeaderLabels([
-            "Nomi", "Template", "Shtrix-kod", "Xarid", "Narx",
-            "Qoldiq", "Zaklad", "Mijoz", "Telefon", "Amallar"
+            "Nomi", "Template", "Shtrix-kod", "Narx", "Qoldiq",
+            "Zaklad", "Mijoz", "Telefon", "Amallar"
         ])
         table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for column, width in [(6, 120), (7, 130), (8, 130), (9, 180)]:
+        for column, width in [(5, 120), (6, 130), (7, 130), (8, 180)]:
             table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
             table.setColumnWidth(column, width)
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -1358,15 +1419,15 @@ class ProductsWidget(QWidget):
 
     def _create_sold_table(self):
         table = QTableWidget()
-        table.setColumnCount(13)
+        table.setColumnCount(12)
         table.setHorizontalHeaderLabels([
             "Vaqt", "Sotuv", "Mahsulot", "Shtrix-kod", "Sotildi",
-            "Qaytdi", "Narx", "Chegirma", "Chegirmadan keyin", "To'lov", "Mijoz", "Telefon", "Amal"
+            "Narx", "Chegirma", "Chegirmadan keyin", "To'lov", "Mijoz", "Telefon", "Amal"
         ])
         table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         for column, width in [
-            (0, 150), (1, 70), (3, 110), (4, 80), (5, 80),
-            (6, 120), (7, 110), (8, 140), (9, 110), (10, 130), (11, 130), (12, 130)
+            (0, 150), (1, 70), (3, 110), (4, 80),
+            (5, 120), (6, 110), (7, 140), (8, 110), (9, 130), (10, 130), (11, 130)
         ]:
             table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
             table.setColumnWidth(column, width)
@@ -1457,13 +1518,16 @@ class ProductsWidget(QWidget):
             query = None
         if query is None:
             query = self.search_edit.text() if hasattr(self, 'search_edit') else ""
+        start_date, end_date = self._date_range()
 
         if self.isVisible():
             self._async_loader.start(
                 lambda: {
                     "query": query,
-                    "products": db.search_products(query) if query else db.get_all_products(),
-                    "sold_rows": [dict(row) for row in db.get_product_sales_archive(query)],
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "products": db.search_products(query, start_date, end_date) if query else db.get_all_products(start_date, end_date),
+                    "sold_rows": [dict(row) for row in db.get_product_sales_archive(query, start_date, end_date)],
                     "suppliers": db.get_all_suppliers(),
                     "templates": db.get_templates(),
                     "currencies": [dict(currency) for currency in db.get_currencies()],
@@ -1474,8 +1538,10 @@ class ProductsWidget(QWidget):
 
         self._apply_loaded_data({
             "query": query,
-            "products": db.search_products(query) if query else db.get_all_products(),
-            "sold_rows": [dict(row) for row in db.get_product_sales_archive(query)],
+            "start_date": start_date,
+            "end_date": end_date,
+            "products": db.search_products(query, start_date, end_date) if query else db.get_all_products(start_date, end_date),
+            "sold_rows": [dict(row) for row in db.get_product_sales_archive(query, start_date, end_date)],
             "suppliers": db.get_all_suppliers(),
             "templates": db.get_templates(),
             "currencies": [dict(currency) for currency in db.get_currencies()],
@@ -1507,6 +1573,39 @@ class ProductsWidget(QWidget):
         else:
             self._fill_products_table(self.table, available, "available")
         set_language(self, self.property("app_language") or "uz")
+
+    def _date_range(self):
+        if not hasattr(self, "date_edit"):
+            today = date.today().isoformat()
+            return today, today
+        selected = self.date_edit.date().toPyDate()
+        period = self.period_combo.currentData()
+        if period == "day":
+            start = end = selected
+        elif period == "week":
+            start = selected - timedelta(days=selected.weekday())
+            end = start + timedelta(days=6)
+        elif period == "month":
+            start = selected.replace(day=1)
+            next_month = selected.replace(year=selected.year + 1, month=1, day=1) if selected.month == 12 else selected.replace(month=selected.month + 1, day=1)
+            end = next_month - timedelta(days=1)
+        else:
+            start = selected.replace(month=1, day=1)
+            end = selected.replace(month=12, day=31)
+        return start.isoformat(), end.isoformat()
+
+    def _shift_period(self, direction):
+        current = self.date_edit.date()
+        period = self.period_combo.currentData()
+        if period == "day":
+            next_date = current.addDays(direction)
+        elif period == "week":
+            next_date = current.addDays(direction * 7)
+        elif period == "month":
+            next_date = current.addMonths(direction)
+        else:
+            next_date = current.addYears(direction)
+        self.date_edit.setDate(next_date)
 
     def _update_stats_label(self):
         available_count, processing_count, sold_count = getattr(self, "_stats_counts", (0, 0, 0))
@@ -1576,13 +1675,9 @@ class ProductsWidget(QWidget):
             table.setItem(row, 1, QTableWidgetItem(p["template_name"] or ""))
             table.setItem(row, 2, QTableWidgetItem(p["barcode"] or ""))
 
-            cost_item = QTableWidgetItem(self._money_display(p["cost"]))
-            cost_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            table.setItem(row, 3, cost_item)
-
             price_item = QTableWidgetItem(self._money_display(p["price"]))
             price_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            table.setItem(row, 4, price_item)
+            table.setItem(row, 3, price_item)
 
             stock_item = QTableWidgetItem(f"{p['stock']}")
             if mode == "available":
@@ -1592,17 +1687,17 @@ class ProductsWidget(QWidget):
             if p["stock"] <= 0:
                 stock_item.setForeground(QColor("#ef4444"))
                 stock_item.setBackground(QColor("#fef2f2"))
-            table.setItem(row, 5, stock_item)
+            table.setItem(row, 4, stock_item)
             deposit = _row_value(p, "process_deposit", 0) or 0
             deposit_currency = _row_value(p, "process_deposit_currency", "UZS") or "UZS"
             deposit_rate = getattr(self, "_currency_rates", {}).get(deposit_currency, 1) or 1
             deposit_text = self._money_display(deposit * deposit_rate) if mode == "process" else ""
-            table.setItem(row, 6, QTableWidgetItem(deposit_text))
-            action_column = 7
+            table.setItem(row, 5, QTableWidgetItem(deposit_text))
+            action_column = 6
             if mode == "process":
-                table.setItem(row, 7, QTableWidgetItem(_row_value(p, "process_customer_name", "") or ""))
-                table.setItem(row, 8, QTableWidgetItem(_row_value(p, "process_customer_phone", "") or ""))
-                action_column = 9
+                table.setItem(row, 6, QTableWidgetItem(_row_value(p, "process_customer_name", "") or ""))
+                table.setItem(row, 7, QTableWidgetItem(_row_value(p, "process_customer_phone", "") or ""))
+                action_column = 8
             elif mode == "available":
                 copy_wrap = QWidget()
                 copy_layout = QHBoxLayout(copy_wrap)
@@ -1620,7 +1715,7 @@ class ProductsWidget(QWidget):
                 """)
                 duplicate_btn.clicked.connect(lambda _, r=row, t=table: self._duplicate_product(r, t))
                 copy_layout.addWidget(duplicate_btn, alignment=Qt.AlignmentFlag.AlignCenter)
-                table.setCellWidget(row, 8, copy_wrap)
+                table.setCellWidget(row, 7, copy_wrap)
 
             actions_widget = QWidget()
             actions_widget.setStyleSheet("background: transparent;")
@@ -1715,7 +1810,6 @@ class ProductsWidget(QWidget):
                 data["product_name"] or "",
                 data["barcode"] or "",
                 str(data["quantity"]),
-                str(data["returned_quantity"]),
                 self._money_display(data["price"]),
                 self._money_display(data.get("item_discount", data.get("discount", 0)) or 0),
                 self._money_display(data.get("item_total_after_discount", data.get("active_subtotal", data.get("subtotal", 0))) or 0),
@@ -1727,10 +1821,10 @@ class ProductsWidget(QWidget):
                 item = QTableWidgetItem(value)
                 if column == 0:
                     item.setData(Qt.ItemDataRole.UserRole, data)
-                if column in (4, 5, 6, 7, 8):
+                if column in (4, 5, 6, 7):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 self.sold_table.setItem(row_index, column, item)
-            self.sold_table.setCellWidget(row_index, 12, self._sold_actions_widget(row_index))
+            self.sold_table.setCellWidget(row_index, 11, self._sold_actions_widget(row_index))
             self.sold_table.setRowHeight(row_index, 54)
 
     def _sold_actions_widget(self, row):

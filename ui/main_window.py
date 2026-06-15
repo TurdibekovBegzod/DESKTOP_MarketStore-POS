@@ -3,7 +3,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QLabel, QStackedWidget, QFrame, QMessageBox,
     QDialog, QFormLayout, QComboBox, QLineEdit, QApplication,
     QAbstractButton, QTableWidget, QHeaderView, QSpinBox, QDoubleSpinBox,
-    QTextEdit, QDateEdit, QTabWidget, QScrollArea
+    QTextEdit, QDateEdit, QTabWidget, QScrollArea, QCalendarWidget
 )
 from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtGui import QPixmap, QPainter
@@ -287,7 +287,14 @@ class MainWindow(QMainWindow):
                 )
 
         nav_layout.addStretch()
-        sb_layout.addWidget(nav_frame)
+        self.nav_scroll = QScrollArea()
+        self.nav_scroll.setWidgetResizable(True)
+        self.nav_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.nav_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.nav_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.nav_scroll.setStyleSheet("QScrollArea{background:transparent;border:none;}")
+        self.nav_scroll.setWidget(nav_frame)
+        sb_layout.addWidget(self.nav_scroll, 1)
 
         self.user_frame = QFrame()
         self.user_frame.setFixedHeight(110)
@@ -567,6 +574,33 @@ class MainWindow(QMainWindow):
             f"background:{theme['topbar']};border:1px solid {theme['border']};border-radius:8px;"
         )
         self.logo_lbl.setStyleSheet(f"color:{theme['nav_text']};font-size:17px;font-weight:bold;")
+        if hasattr(self, "nav_scroll"):
+            self.nav_scroll.setStyleSheet(f"""
+                QScrollArea {{
+                    background: {theme['sidebar']};
+                    border: none;
+                }}
+                QScrollBar:vertical {{
+                    background: transparent;
+                    width: 8px;
+                    margin: 4px 0 4px 0;
+                }}
+                QScrollBar::handle:vertical {{
+                    background: {theme['border']};
+                    border-radius: 4px;
+                    min-height: 24px;
+                }}
+                QScrollBar::add-line:vertical,
+                QScrollBar::sub-line:vertical {{
+                    height: 0;
+                    border: none;
+                    background: transparent;
+                }}
+                QScrollBar::add-page:vertical,
+                QScrollBar::sub-page:vertical {{
+                    background: transparent;
+                }}
+            """)
         self.user_frame.setStyleSheet(f"background:{theme['sidebar_alt']};border-top:1px solid {theme['border']};")
         self.uname.setStyleSheet(f"color:{theme['nav_text']};font-size:13px;")
         self.urole.setStyleSheet(f"color:{theme['muted']};font-size:11px;")
@@ -606,6 +640,8 @@ class MainWindow(QMainWindow):
         for widget in self.stack.findChildren(QWidget):
             if current_page and isinstance(current_page, SalesWidget) and current_page.isAncestorOf(widget):
                 continue
+            if self._inside_calendar(widget):
+                continue
             if isinstance(widget, QAbstractButton) and self._inside_table(widget):
                 continue
             if isinstance(widget, (QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QTextEdit, QDateEdit)):
@@ -626,6 +662,9 @@ class MainWindow(QMainWindow):
                 widget.setStyleSheet(self._panel_style(theme))
             elif isinstance(widget, QScrollArea):
                 widget.setStyleSheet(f"QScrollArea {{ background: {theme['content']}; border: none; }}")
+            elif isinstance(widget, QCalendarWidget):
+                widget.setMinimumSize(400, 300)
+                widget.setStyleSheet(self._calendar_style(theme))
             elif isinstance(widget, QLabel):
                 widget.setStyleSheet(self._label_style(theme))
         if isinstance(current_page, SalesWidget):
@@ -638,6 +677,54 @@ class MainWindow(QMainWindow):
                 return True
             parent = parent.parent()
         return False
+
+    def _inside_calendar(self, widget):
+        parent = widget.parent()
+        while parent is not None:
+            if isinstance(parent, QCalendarWidget):
+                return True
+            parent = parent.parent()
+        return False
+
+    def _calendar_style(self, theme):
+        return f"""
+            QCalendarWidget {{ background:{theme['topbar']}; color:{theme['title']}; }}
+            QCalendarWidget QWidget#qt_calendar_navigationbar {{
+                background:{theme['accent']};
+                min-height:42px;
+            }}
+            QCalendarWidget QToolButton {{
+                background:transparent;
+                color:white;
+                border:none;
+                border-radius:4px;
+                min-height:32px;
+                padding:2px 8px;
+                font-size:14px;
+                font-weight:bold;
+            }}
+            QCalendarWidget QToolButton#qt_calendar_monthbutton {{ min-width:100px; }}
+            QCalendarWidget QToolButton#qt_calendar_yearbutton {{ min-width:72px; }}
+            QCalendarWidget QToolButton#qt_calendar_prevmonth,
+            QCalendarWidget QToolButton#qt_calendar_nextmonth {{ min-width:32px; max-width:32px; }}
+            QCalendarWidget QToolButton:hover {{ background:rgba(255,255,255,0.18); }}
+            QCalendarWidget QSpinBox {{
+                background:white;
+                color:#111827;
+                border:1px solid #cbd5e1;
+                border-radius:4px;
+                padding:2px 6px;
+                min-width:76px;
+                font-size:14px;
+            }}
+            QCalendarWidget QAbstractItemView {{
+                background:{theme['topbar']};
+                color:{theme['title']};
+                selection-background-color:{theme['accent']};
+                selection-color:white;
+                outline:none;
+            }}
+        """
 
     def _apply_sales_theme(self, page, theme):
         page.setStyleSheet(f"background:{theme['content']};")

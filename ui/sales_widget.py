@@ -201,9 +201,10 @@ class SaleCustomerDialog(QDialog):
 
 
 class ProductInfoDialog(QDialog):
-    def __init__(self, parent=None, product=None):
+    def __init__(self, parent=None, product=None, show_cost=True):
         super().__init__(parent)
         self.product = product or {}
+        self.show_cost = show_cost
         self.language = (parent.property("app_language") if parent else None) or "uz"
         self.setWindowTitle(t("Mahsulot ma'lumotlari", self.language))
         self.setMinimumWidth(520)
@@ -273,15 +274,20 @@ class ProductInfoDialog(QDialog):
         cost_currency = product.get("cost_currency") or "UZS"
         price_original = product.get("price_original") or product.get("price") or 0
         cost_original = product.get("cost_original") or product.get("cost") or 0
-        return [
+        rows = [
             ("Shtrix-kod:", product.get("barcode") or "-"),
             ("Template:", product.get("template_name") or "-"),
             ("Ta'minotchi:", product.get("supplier_name") or "-"),
             ("Narx:", f"{product.get('price') or 0:,.0f} {money_unit} ({price_original:,.4f} {price_currency})"),
-            ("Xarid narxi:", f"{product.get('cost') or 0:,.0f} {money_unit} ({cost_original:,.4f} {cost_currency})"),
             ("Qoldiq:", product.get("stock") or 0),
             ("Jarayonda:", product.get("process_quantity") or 0),
         ]
+        if self.show_cost:
+            rows.insert(4, (
+                "Xarid narxi:",
+                f"{product.get('cost') or 0:,.0f} {money_unit} ({cost_original:,.4f} {cost_currency})",
+            ))
+        return rows
 
 
 class SalesWidget(QWidget):
@@ -489,7 +495,10 @@ class SalesWidget(QWidget):
         if products is None:
             products = db.search_products(query) if query else db.get_all_products()
 
-        self._render_products = list(products)
+        self._render_products = [
+            product for product in products
+            if self._available_stock(product) > 0
+        ]
         self._render_index = 0
         self._render_generation += 1
         self.products_table.setRowCount(0)
@@ -510,20 +519,19 @@ class SalesWidget(QWidget):
         end = min(self._render_index + batch_size, len(self._render_products))
         for row in range(self._render_index, end):
             p = self._render_products[row]
+            available_stock = self._available_stock(p)
             self.products_table.insertRow(row)
             self.products_table.setItem(row, 0, QTableWidgetItem(p["name"]))
             self.products_table.setItem(row, 1, QTableWidgetItem(p["barcode"] or ""))
             price_item = QTableWidgetItem(f"{p['price']:,.0f} so'm")
             price_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.products_table.setItem(row, 2, price_item)
-            stock_item = QTableWidgetItem(f"{p['stock']}")
-            if p["stock"] <= 0:
-                stock_item.setForeground(QColor("#ef4444"))
+            stock_item = QTableWidgetItem(f"{available_stock}")
             self.products_table.setItem(row, 3, stock_item)
 
             add_btn = QPushButton("+")
             add_btn.setToolTip("Savatga qo'shish")
-            add_btn.setEnabled(p["stock"] > 0)
+            add_btn.setEnabled(available_stock > 0)
             add_btn.setFixedSize(25, 25)
             add_btn.setStyleSheet(self._add_button_style())
             add_btn.clicked.connect(lambda _, r=row: self._add_to_cart(r))
@@ -651,7 +659,7 @@ class SalesWidget(QWidget):
                 self._show_product_info(dict(product))
 
     def _show_product_info(self, product):
-        dlg = ProductInfoDialog(self, product)
+        dlg = ProductInfoDialog(self, product, show_cost=False)
         dlg.exec()
 
     def _add_to_cart(self, row):
@@ -664,7 +672,8 @@ class SalesWidget(QWidget):
         self._add_product_to_cart(product)
 
     def _add_product_to_cart(self, product):
-        if product["stock"] <= 0:
+        available_stock = self._available_stock(product)
+        if available_stock <= 0:
             QMessageBox.warning(self, "Qoldiq yo'q", "Bu mahsulot omborda qolmagan.")
             return
 
@@ -688,9 +697,15 @@ class SalesWidget(QWidget):
             "price": product["price"],
             "quantity": 1,
             "subtotal": product["price"],
-            "stock": product["stock"],
+            "stock": available_stock,
         })
         self._refresh_cart()
+
+    @staticmethod
+    def _available_stock(product):
+        stock = product.get("stock", 0) or 0
+        process_quantity = product.get("process_quantity", 0) or 0
+        return max(0, stock - process_quantity)
 
     def _refresh_cart(self):
         self.cart_table.setRowCount(0)

@@ -577,20 +577,22 @@ def _product_select():
     )
 
 
-def get_all_products():
+def get_all_products(start_date=None, end_date=None):
     with session_scope() as session:
-        rows = session.execute(_product_select().order_by(Product.name)).all()
+        stmt = _product_select()
+        if start_date and end_date:
+            stmt = stmt.where(_date_expr(Product.created_at).between(start_date, end_date))
+        rows = session.execute(stmt.order_by(Product.name)).all()
         return [_product_row(p, c, t, s) for p, c, t, s in rows]
 
 
-def search_products(query):
+def search_products(query, start_date=None, end_date=None):
     pattern = f"%{query}%"
     with session_scope() as session:
-        rows = session.execute(
-            _product_select()
-            .where(or_(Product.name.like(pattern), Product.barcode.like(pattern)))
-            .order_by(Product.name)
-        ).all()
+        stmt = _product_select().where(or_(Product.name.like(pattern), Product.barcode.like(pattern)))
+        if start_date and end_date:
+            stmt = stmt.where(_date_expr(Product.created_at).between(start_date, end_date))
+        rows = session.execute(stmt.order_by(Product.name)).all()
         return [_product_row(p, c, t, s) for p, c, t, s in rows]
 
 
@@ -1123,7 +1125,7 @@ def get_sale_items(sale_id):
         return [_row_from_model(item, product_name=name) for item, name in rows]
 
 
-def get_product_sales_archive(query=""):
+def get_product_sales_archive(query="", start_date=None, end_date=None):
     pattern = f"%{query.strip()}%"
     with session_scope() as session:
         stmt = (
@@ -1142,6 +1144,8 @@ def get_product_sales_archive(query=""):
                 func.coalesce(Sale.customer_name, Customer.name).like(pattern),
                 func.coalesce(Sale.customer_phone, Customer.phone).like(pattern),
             ))
+        if start_date and end_date:
+            stmt = stmt.where(_date_expr(Sale.created_at).between(start_date, end_date))
         rows = session.execute(stmt.order_by(Sale.created_at.desc(), SaleItem.id.desc()).limit(1000)).all()
         result = []
         for item, sale, product, cashier_name, customer_name, customer_phone in rows:
