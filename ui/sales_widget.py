@@ -5,10 +5,20 @@ from PyQt6.QtWidgets import (
     QDialog, QFormLayout, QCheckBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QRegularExpression, QTimer
-from PyQt6.QtGui import QFont, QColor, QRegularExpressionValidator
+from PyQt6.QtGui import QFont, QColor, QPixmap, QRegularExpressionValidator
+from pathlib import Path
+import sys
 import database as db
 from ui.async_loader import AsyncDataLoader, make_progress_bar
 from ui.i18n import set_language, t
+
+
+def resource_path(relative_path):
+    base_path = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
+    return str(base_path / relative_path)
+
+
+SHOPPING_CART_ICON_PATH = resource_path("images/shopping-cart.png")
 
 
 class CurrencyDialog(QDialog):
@@ -354,9 +364,26 @@ class SalesWidget(QWidget):
         right = QVBoxLayout()
         right.setSpacing(10)
 
+        cart_title_row = QHBoxLayout()
+        cart_title_row.setSpacing(6)
+        cart_icon = QLabel()
+        cart_icon.setObjectName("salesCartIcon")
+        cart_icon.setFixedSize(18, 18)
+        cart_pixmap = QPixmap(SHOPPING_CART_ICON_PATH)
+        if not cart_pixmap.isNull():
+            cart_icon.setPixmap(cart_pixmap.scaled(
+                18,
+                18,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            ))
         cart_lbl = QLabel("Savat")
+        cart_lbl.setObjectName("salesCartTitle")
         cart_lbl.setStyleSheet("font-size: 15px; font-weight: bold; color: #1e293b;")
-        right.addWidget(cart_lbl)
+        cart_title_row.addWidget(cart_icon, 0, Qt.AlignmentFlag.AlignVCenter)
+        cart_title_row.addWidget(cart_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
+        cart_title_row.addStretch()
+        right.addLayout(cart_title_row)
 
         self.cart_table = QTableWidget()
         self.cart_table.setColumnCount(5)

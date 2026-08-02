@@ -1,13 +1,15 @@
 from datetime import date, timedelta
+from pathlib import Path
+import sys
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QTableWidget, QTableWidgetItem, QDialog,
     QFormLayout, QComboBox, QSpinBox, QDoubleSpinBox,
     QMessageBox, QHeaderView, QFrame, QCheckBox, QScrollArea, QTabWidget,
-    QDateEdit, QCalendarWidget
+    QDateEdit, QCalendarWidget, QGridLayout, QMenu, QSizePolicy
 )
-from PyQt6.QtCore import Qt, QRectF, QSizeF, QMarginsF, QRegularExpression, QTimer, QDate
+from PyQt6.QtCore import Qt, QRectF, QSize, QSizeF, QMarginsF, QRegularExpression, QTimer, QDate
 from PyQt6.QtGui import (
     QColor, QPainter, QPen, QFont, QPageSize, QPageLayout,
     QDoubleValidator, QIcon, QRegularExpressionValidator
@@ -19,7 +21,14 @@ from ui.i18n import set_language, t
 from ui.sales_widget import ProductInfoDialog
 
 
-COPY_ICON_PATH = "images/copy.png"
+def resource_path(relative_path):
+    base_path = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
+    return str(base_path / relative_path)
+
+
+COPY_ICON_PATH = resource_path("images/copy.png")
+TRASH_ICON_PATH = resource_path("images/trash.png")
+LEFT_ARROW_ICON_PATH = resource_path("images/left-arrow.png")
 
 
 def _row_value(row, key, default=None):
@@ -57,6 +66,75 @@ def _code128_values(text):
     values.append(checksum % 103)
     values.append(106)
     return values
+
+
+class ProductSectionDialog(QDialog):
+    def __init__(self, parent=None, section=None):
+        super().__init__(parent)
+        self.section = section
+        self.language = (parent.property("app_language") if parent else None) or "uz"
+        self.setWindowTitle(t("Bo'lim qo'shish" if not section else "Bo'limni tahrirlash", self.language))
+        self.setFixedWidth(360)
+        self._build_ui()
+        set_language(self, self.language)
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(12)
+
+        self.name_edit = QLineEdit(self.section["name"] if self.section else "")
+        self.name_edit.setPlaceholderText(t("Bo'lim nomi", self.language))
+        self.name_edit.setStyleSheet("border:1px solid #d1d5db;border-radius:6px;padding:8px 10px;background:white;")
+        layout.addWidget(self.name_edit)
+
+        btns = QHBoxLayout()
+        cancel_btn = QPushButton(t("Bekor", self.language))
+        cancel_btn.clicked.connect(self.reject)
+        save_btn = QPushButton(t("Saqlash", self.language))
+        save_btn.setStyleSheet("background:#3b82f6;color:white;border:none;border-radius:6px;padding:8px 16px;font-weight:bold;")
+        save_btn.clicked.connect(self._save)
+        btns.addStretch()
+        btns.addWidget(cancel_btn)
+        btns.addWidget(save_btn)
+        layout.addLayout(btns)
+
+    def _save(self):
+        if not self.name_edit.text().strip():
+            QMessageBox.warning(self, t("Xatolik", self.language), t("Bo'lim nomini kiriting!", self.language))
+            return
+        self.accept()
+
+
+class SectionTitleWidget(QWidget):
+    def __init__(self, text="", parent=None):
+        super().__init__(parent)
+        self._text = text
+        self.setObjectName("productsSectionTitle")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        self.setAutoFillBackground(False)
+        self.setMinimumHeight(28)
+
+    def setText(self, text):
+        self._text = text or ""
+        self.updateGeometry()
+        self.update()
+
+    def text(self):
+        return self._text
+
+    def sizeHint(self):
+        return QSize(220, 30)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        font = QFont("Segoe UI", 18)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(QColor("#1e293b"))
+        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, self._text)
+        painter.end()
 
 
 class TemplateDialog(QDialog):
@@ -158,8 +236,9 @@ class TemplateDialog(QDialog):
 
 
 class TemplateManagerDialog(QDialog):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, section_id=None):
         super().__init__(parent)
+        self.section_id = section_id
         self.language = (parent.property("app_language") if parent else None) or "uz"
         self.setWindowTitle(t("Product templatelar", self.language))
         self.setFixedSize(560, 420)
@@ -200,7 +279,7 @@ class TemplateManagerDialog(QDialog):
 
     def load_data(self):
         self.table.setRowCount(0)
-        for row, template in enumerate(db.get_templates()):
+        for row, template in enumerate(db.get_templates(self.section_id)):
             fields = db.get_template_fields(template["id"])
             self.table.insertRow(row)
             name_item = QTableWidgetItem(template["name"])
@@ -218,7 +297,7 @@ class TemplateManagerDialog(QDialog):
         dlg = TemplateDialog(self)
         if dlg.exec():
             try:
-                db.add_template(dlg.name_edit.text().strip(), dlg.get_fields())
+                db.add_template(dlg.name_edit.text().strip(), dlg.get_fields(), self.section_id)
                 self.load_data()
             except db.AppError as exc:
                 QMessageBox.warning(self, t("Saqlanmadi", self.language), t(str(exc), self.language))
@@ -879,10 +958,11 @@ class BarcodePrintDialog(QDialog):
 
 
 class ProductDialog(QDialog):
-    def __init__(self, parent=None, product=None, duplicate=False):
+    def __init__(self, parent=None, product=None, duplicate=False, section_id=None):
         super().__init__(parent)
         self.product = product
         self.duplicate = duplicate
+        self.section_id = section_id if section_id is not None else _row_value(product, "section_id")
         self.language = (parent.property("app_language") if parent else None) or "uz"
         self.attr_edits = {}
         self.attr_fields = {}
@@ -946,7 +1026,7 @@ class ProductDialog(QDialog):
 
         self.template_combo = QComboBox()
         self.template_combo.addItem("Template tanlanmagan", None)
-        for template in db.get_templates():
+        for template in db.get_templates(self.section_id):
             self.template_combo.addItem(template["name"], template["id"])
         template_id = _row_value(self.product, "template_id")
         if self.product and template_id:
@@ -1094,6 +1174,7 @@ class ProductDialog(QDialog):
         return {
             "barcode": self.barcode_edit.text().strip() or None,
             "name": self.name_edit.text().strip(),
+            "section_id": self.section_id,
             "template_id": self.template_combo.currentData(),
             "supplier_id": self.supplier_combo.currentData(),
             "category_id": None,
@@ -1187,7 +1268,15 @@ class ProductsWidget(QWidget):
         self._async_loader = None
         self._search_timer = None
         self._render_generation = 0
+        self.current_section = None
+        self._showing_trash = False
+        self._empty_state_panel = None
+        self._theme = {}
         self._build_ui()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_empty_state_panel()
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -1203,6 +1292,32 @@ class ProductsWidget(QWidget):
 
         # Toolbar
         toolbar = QHBoxLayout()
+        self.back_sections_btn = QPushButton()
+        self.back_sections_btn.setIcon(QIcon(LEFT_ARROW_ICON_PATH))
+        self.back_sections_btn.setIconSize(QSize(15, 15))
+        self.back_sections_btn.setFixedSize(32, 32)
+        self.back_sections_btn.setToolTip(t("Bo'limlar", self.property("app_language") or "uz"))
+        self.back_sections_btn.setStyleSheet("""
+            QPushButton { background:white;color:#1e293b;border:1px solid #d1d5db;border-radius:6px;font-weight:bold; }
+            QPushButton:hover { background:#eff6ff;border-color:#93c5fd;color:#1d4ed8; }
+        """)
+        self.back_sections_btn.clicked.connect(self._show_sections)
+        toolbar.addWidget(self.back_sections_btn)
+
+        self.trash_btn = QPushButton(t("Trash", self.property("app_language") or "uz"))
+        self.trash_btn.setIcon(QIcon(TRASH_ICON_PATH))
+        self.trash_btn.setIconSize(QSizeF(18, 18).toSize())
+        self.trash_btn.setFixedHeight(38)
+        self.trash_btn.setMinimumWidth(96)
+        self.trash_btn.setToolTip(t("Trash", self.property("app_language") or "uz"))
+        self.trash_btn.setStyleSheet("""
+            QPushButton { background:white;color:#334155;border:1px solid #cbd5e1;
+                          border-radius:6px;padding:0 14px;font-size:13px;font-weight:bold;text-align:center; }
+            QPushButton:hover { background:#f1f5f9;border-color:#94a3b8; }
+        """)
+        self.trash_btn.clicked.connect(self._show_trash)
+        toolbar.addWidget(self.trash_btn)
+
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Qidirish...")
         self.search_edit.setFixedHeight(38)
@@ -1245,25 +1360,35 @@ class ProductsWidget(QWidget):
         self.display_currency_combo.currentIndexChanged.connect(lambda _: self.load_data())
         toolbar.addStretch()
 
-        templates_btn = QPushButton("Templatelar")
-        templates_btn.setFixedHeight(38)
-        templates_btn.setStyleSheet("""
-            QPushButton { background: white; color: #1e293b; border: 1px solid #d1d5db;
-                          border-radius: 6px; padding: 0 14px; font-size: 13px; }
-            QPushButton:hover { background: #f8fafc; }
-        """)
-        templates_btn.clicked.connect(self._manage_templates)
-        toolbar.addWidget(templates_btn)
-
-        add_btn = QPushButton("+ Mahsulot qo'shish")
-        add_btn.setFixedHeight(38)
-        add_btn.setStyleSheet("""
+        self.section_add_btn = QPushButton("+ Bo'lim qo'shish")
+        self.section_add_btn.setFixedHeight(38)
+        self.section_add_btn.setStyleSheet("""
             QPushButton { background: #3b82f6; color: white; border: none;
                           border-radius: 6px; padding: 0 16px; font-size: 13px; font-weight: bold; }
             QPushButton:hover { background: #2563eb; }
         """)
-        add_btn.clicked.connect(self._add_product)
-        toolbar.addWidget(add_btn)
+        self.section_add_btn.clicked.connect(self._add_section)
+        toolbar.addWidget(self.section_add_btn)
+
+        self.templates_btn = QPushButton("Templatelar")
+        self.templates_btn.setFixedHeight(38)
+        self.templates_btn.setStyleSheet("""
+            QPushButton { background: white; color: #1e293b; border: 1px solid #d1d5db;
+                          border-radius: 6px; padding: 0 14px; font-size: 13px; }
+            QPushButton:hover { background: #f8fafc; }
+        """)
+        self.templates_btn.clicked.connect(self._manage_templates)
+        toolbar.addWidget(self.templates_btn)
+
+        self.add_btn = QPushButton("+ Mahsulot qo'shish")
+        self.add_btn.setFixedHeight(38)
+        self.add_btn.setStyleSheet("""
+            QPushButton { background: #3b82f6; color: white; border: none;
+                          border-radius: 6px; padding: 0 16px; font-size: 13px; font-weight: bold; }
+            QPushButton:hover { background: #2563eb; }
+        """)
+        self.add_btn.clicked.connect(self._add_product)
+        toolbar.addWidget(self.add_btn)
 
         self.clear_sold_btn = QPushButton("Sotilganlarni tozalash")
         self.clear_sold_btn.setObjectName("danger_clear_sold_btn")
@@ -1276,6 +1401,23 @@ class ProductsWidget(QWidget):
         self.clear_sold_btn.clicked.connect(self._clear_sold_history)
         toolbar.addWidget(self.clear_sold_btn)
         layout.addLayout(toolbar)
+
+        self.section_title_lbl = SectionTitleWidget()
+        self._apply_section_title_style()
+        layout.addWidget(self.section_title_lbl)
+
+        self.sections_scroll = QScrollArea()
+        self.sections_scroll.setWidgetResizable(True)
+        self.sections_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.sections_scroll.setStyleSheet("QScrollArea{background:transparent;border:none;}")
+        self.sections_content = QWidget()
+        self.sections_content.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.sections_grid = QGridLayout(self.sections_content)
+        self.sections_grid.setContentsMargins(0, 0, 0, 0)
+        self.sections_grid.setSpacing(12)
+        self.sections_grid.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self.sections_scroll.setWidget(self.sections_content)
+        layout.addWidget(self.sections_scroll, 1)
 
         # Stats bar
         self.stats_lbl = QLabel()
@@ -1361,10 +1503,339 @@ class ProductsWidget(QWidget):
         period_controls.addWidget(self.display_currency_combo)
         period_controls.addStretch()
         layout.addLayout(period_controls)
+        self.product_view_widgets = [self.stats_lbl, self.tabs]
+        self.period_widgets = [
+            self.prev_period_btn, self.date_lbl, self.date_edit,
+            self.period_combo, self.next_period_btn, self.today_btn,
+            self.display_currency_combo,
+        ]
         self._load_supplier_filter()
         self._load_template_filter()
         self._load_display_currency_combo()
         self._update_clear_sold_button()
+        self._show_sections()
+        QTimer.singleShot(0, self._apply_section_title_style)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._apply_section_title_style()
+
+    def _apply_section_title_style(self):
+        if not hasattr(self, "section_title_lbl"):
+            return
+        self.section_title_lbl.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        self.section_title_lbl.setStyleSheet("")
+        self.section_title_lbl.update()
+
+    def _set_products_mode(self, in_section, trash=False):
+        self._showing_trash = bool(trash)
+        section_widgets = [self.sections_scroll]
+        product_widgets = getattr(self, "product_view_widgets", [])
+        for widget in section_widgets:
+            widget.setVisible(not in_section)
+        for widget in product_widgets:
+            widget.setVisible(in_section)
+        for widget in [
+            self.search_edit, self.supplier_filter, self.template_filter,
+            self.templates_btn, self.add_btn, self.clear_sold_btn,
+            self.back_sections_btn,
+        ]:
+            widget.setVisible(in_section)
+        for widget in getattr(self, "period_widgets", []):
+            widget.setVisible(in_section)
+        self.section_add_btn.setVisible(not in_section and not trash)
+        self.trash_btn.setVisible(not in_section and not trash)
+        self.back_sections_btn.setVisible(in_section or trash)
+        self.section_title_lbl.setVisible(not in_section or trash)
+        if in_section:
+            self._update_clear_sold_button()
+        else:
+            self.clear_sold_btn.setVisible(False)
+
+    def apply_theme(self, _theme):
+        self._theme = _theme or {}
+        self._apply_section_title_style()
+        if self.current_section:
+            return
+        if self._showing_trash:
+            self._load_trash()
+        else:
+            self._load_sections()
+
+    def _show_sections(self):
+        self.current_section = None
+        self._set_products_mode(False)
+        self.section_title_lbl.setText(t("Bo'limlar", self.property("app_language") or "uz"))
+        self._apply_section_title_style()
+        self._load_sections()
+
+    def _show_trash(self):
+        self.current_section = None
+        self._set_products_mode(False, trash=True)
+        self.section_title_lbl.setText(t("Trash", self.property("app_language") or "uz"))
+        self._apply_section_title_style()
+        self._load_trash()
+
+    def _open_section(self, section):
+        self.current_section = dict(section)
+        self._set_products_mode(True)
+        self._apply_section_title_style()
+        self._load_template_filter()
+        self.load_data()
+
+    def _load_sections(self):
+        self._clear_sections_grid()
+        sections = db.get_product_sections()
+        if not sections:
+            self.sections_grid.setAlignment(Qt.AlignmentFlag(0))
+            empty = self._empty_sections_state(t("Bo'lim yo'q", self.property("app_language") or "uz"))
+            self.sections_grid.addWidget(empty, 0, 0, 1, 4)
+            for column in range(4):
+                self.sections_grid.setColumnStretch(column, 1)
+            self.sections_grid.setRowStretch(0, 1)
+            QTimer.singleShot(0, self._fit_empty_state_panel)
+            return
+        self.sections_grid.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        for index, section in enumerate(sections):
+            self.sections_grid.addWidget(self._section_card(section), index // 4, index % 4)
+        for column in range(4):
+            self.sections_grid.setColumnStretch(column, 0)
+        self.sections_grid.setRowStretch((len(sections) + 3) // 4, 1)
+
+    def _clear_sections_grid(self):
+        self._empty_state_panel = None
+        while self.sections_grid.count():
+            item = self.sections_grid.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+
+    def _empty_sections_state(self, text):
+        panel = QFrame()
+        panel.setObjectName("sectionsEmptyState")
+        panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        panel.setStyleSheet("""
+            QFrame#sectionsEmptyState {
+                background:#ffffff;
+                border:1px solid #dbeafe;
+                border-radius:8px;
+            }
+        """)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(16, 16, 16, 16)
+        label = QLabel(text)
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setStyleSheet("color:#475569;font-size:14px;border:none;background:transparent;")
+        layout.addWidget(label)
+        self._empty_state_panel = panel
+        self._fit_empty_state_panel(panel)
+        return panel
+
+    def _fit_empty_state_panel(self, panel=None):
+        panel = panel or self._empty_state_panel
+        if not panel or not hasattr(self, "sections_scroll"):
+            return
+        viewport = self.sections_scroll.viewport().size()
+        min_width = max((260 * 4) + (12 * 3), viewport.width() - 2)
+        min_height = max(300, viewport.height() - 2)
+        panel.setMinimumSize(min_width, min_height)
+
+    def _section_card_style(self):
+        accent = self._theme.get("accent", "#3b82f6")
+        border = QColor(accent).lighter(145).name()
+        hover_border = QColor(accent).name()
+        return f"""
+            QFrame#sectionCard {{
+                background:#ffffff;
+                border:2px solid {border};
+                border-radius:8px;
+            }}
+            QFrame#sectionCard:hover {{
+                background:#ffffff;
+                border-color:{hover_border};
+            }}
+            QFrame#sectionCard:focus {{
+                outline:0;
+                border:2px solid {border};
+            }}
+        """
+
+    def _section_card(self, section):
+        card = QFrame()
+        card.setObjectName("sectionCard")
+        card.setFixedSize(260, 205)
+        card.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        card.setCursor(Qt.CursorShape.PointingHandCursor)
+        card.setStyleSheet(self._section_card_style())
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(16, 12, 14, 14)
+        layout.setSpacing(10)
+
+        top = QHBoxLayout()
+        name_lbl = QLabel(section["name"])
+        name_lbl.setWordWrap(True)
+        name_lbl.setStyleSheet("color:#0f172a;font-size:16px;font-weight:bold;border:none;background:transparent;")
+        menu_btn = QPushButton("⋮")
+        menu_btn.setFixedSize(28, 28)
+        menu_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        menu_btn.setStyleSheet("""
+            QPushButton{background:transparent;border:none;color:#475569;font-size:18px;font-weight:bold;}
+            QPushButton:hover{background:#e2e8f0;border-radius:6px;}
+            QPushButton:focus{outline:0;background:transparent;border:none;}
+        """)
+        menu_btn.clicked.connect(lambda _, s=dict(section), b=menu_btn: self._show_section_menu(s, b))
+        top.addWidget(name_lbl, 1)
+        top.addWidget(menu_btn, alignment=Qt.AlignmentFlag.AlignTop)
+        layout.addLayout(top)
+
+        products_count = len(db.get_all_products(section_id=section["id"]))
+        templates_count = len(db.get_templates(section["id"]))
+        language = self.property("app_language") or "uz"
+        metrics = QFrame()
+        metrics.setObjectName("sectionMetrics")
+        metrics.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        metrics.setStyleSheet("QFrame#sectionMetrics{background:#f8fbff;border:1px solid #dbeafe;border-radius:8px;}")
+        metrics_layout = QVBoxLayout(metrics)
+        metrics_layout.setContentsMargins(12, 10, 12, 10)
+        metrics_layout.setSpacing(6)
+        product_lbl = QLabel(f"{t('Jami mahsulot', language)}: {products_count}")
+        template_lbl = QLabel(f"{t('Templatelar', language)}: {templates_count}")
+        for label in (product_lbl, template_lbl):
+            label.setStyleSheet("color:#475569;font-size:12px;border:none;background:transparent;")
+            metrics_layout.addWidget(label)
+        layout.addWidget(metrics)
+        layout.addStretch()
+        card.mousePressEvent = lambda event, s=dict(section): self._open_section(s)
+        return card
+
+    def _load_trash(self):
+        self._clear_sections_grid()
+        trash = db.get_product_trash()
+        items = [("section", row) for row in trash["sections"]]
+        items.extend(("product", row) for row in trash["products"])
+        if not items:
+            self.sections_grid.setAlignment(Qt.AlignmentFlag(0))
+            empty = self._empty_sections_state(t("Trash bo'sh", self.property("app_language") or "uz"))
+            self.sections_grid.addWidget(empty, 0, 0, 1, 4)
+            for column in range(4):
+                self.sections_grid.setColumnStretch(column, 1)
+            self.sections_grid.setRowStretch(0, 1)
+            QTimer.singleShot(0, self._fit_empty_state_panel)
+            return
+        self.sections_grid.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        for index, (kind, row) in enumerate(items):
+            self.sections_grid.addWidget(self._trash_card(kind, row), index // 4, index % 4)
+        for column in range(4):
+            self.sections_grid.setColumnStretch(column, 0)
+        self.sections_grid.setRowStretch((len(items) + 3) // 4, 1)
+
+    def _trash_card(self, kind, row):
+        language = self.property("app_language") or "uz"
+        card = QFrame()
+        card.setObjectName("trashCard")
+        card.setFixedSize(260, 175)
+        card.setStyleSheet("""
+            QFrame#trashCard { background:#fff; border:1px solid #fecaca; border-radius:8px; }
+        """)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(8)
+        title = _row_value(row, "original_name") or _row_value(row, "name")
+        if kind == "product":
+            title = _row_value(row, "name")
+        title_lbl = QLabel(title or "")
+        title_lbl.setWordWrap(True)
+        title_lbl.setStyleSheet("color:#111827;font-size:15px;font-weight:bold;border:none;background:transparent;")
+        layout.addWidget(title_lbl)
+        type_lbl = QLabel(t("Bo'lim", language) if kind == "section" else t("Mahsulot", language))
+        deleted_label = t("O'chirilgan", language)
+        deleted_lbl = QLabel(f"{deleted_label}: {_row_value(row, 'deleted_at', '') or ''}")
+        purge_lbl = QLabel(f"{t('30 kun ichida', language)}: {_row_value(row, 'purge_after', '') or ''}")
+        labels = [type_lbl]
+        if kind == "product" and _row_value(row, "section_name"):
+            section_label = t("Bo'lim", language)
+            labels.append(QLabel(f"{section_label}: {_row_value(row, 'section_name')}"))
+        labels.extend([deleted_lbl, purge_lbl])
+        for label in labels:
+            label.setStyleSheet("color:#64748b;font-size:12px;border:none;background:transparent;")
+            layout.addWidget(label)
+        layout.addStretch()
+        restore_btn = QPushButton(t("Qayta tiklash", language))
+        restore_btn.setFixedHeight(32)
+        restore_btn.setStyleSheet("""
+            QPushButton{background:#ecfdf5;color:#065f46;border:1px solid #86efac;border-radius:6px;font-weight:bold;}
+            QPushButton:hover{background:#10b981;color:white;border-color:#10b981;}
+        """)
+        if kind == "section":
+            restore_btn.clicked.connect(lambda _, sid=row["id"]: self._restore_section(sid))
+        else:
+            restore_btn.clicked.connect(lambda _, pid=row["id"]: self._restore_product(pid))
+        layout.addWidget(restore_btn)
+        return card
+
+    def _restore_section(self, section_id):
+        language = self.property("app_language") or "uz"
+        try:
+            db.restore_product_section(section_id)
+            self._load_trash()
+        except db.AppError as exc:
+            QMessageBox.warning(self, t("Tiklanmadi", language), t(str(exc), language))
+
+    def _restore_product(self, product_id):
+        language = self.property("app_language") or "uz"
+        try:
+            db.restore_product(product_id)
+            self._load_trash()
+        except db.AppError as exc:
+            QMessageBox.warning(self, t("Tiklanmadi", language), t(str(exc), language))
+
+    def _show_section_menu(self, section, button):
+        menu = QMenu(self)
+        language = self.property("app_language") or "uz"
+        edit_action = menu.addAction(t("Tahrir", language))
+        delete_action = menu.addAction(t("O'chir", language))
+        action = menu.exec(button.mapToGlobal(button.rect().bottomLeft()))
+        if action == edit_action:
+            self._edit_section(section)
+        elif action == delete_action:
+            self._delete_section(section)
+
+    def _add_section(self):
+        language = self.property("app_language") or "uz"
+        dlg = ProductSectionDialog(self)
+        if dlg.exec():
+            try:
+                db.add_product_section(dlg.name_edit.text().strip())
+                self._load_sections()
+            except db.AppError as exc:
+                QMessageBox.warning(self, t("Saqlanmadi", language), t(str(exc), language))
+
+    def _edit_section(self, section):
+        language = self.property("app_language") or "uz"
+        dlg = ProductSectionDialog(self, section)
+        if dlg.exec():
+            try:
+                db.update_product_section(section["id"], dlg.name_edit.text().strip())
+                self._load_sections()
+            except db.AppError as exc:
+                QMessageBox.warning(self, t("Saqlanmadi", language), t(str(exc), language))
+
+    def _delete_section(self, section):
+        language = self.property("app_language") or "uz"
+        delete_text = t("bo'limi va ichidagi mahsulot/template ma'lumotlari o'chirilsinmi?", language)
+        reply = QMessageBox.question(
+            self,
+            t("Bo'limni o'chirish", language),
+            f"'{section['name']}' {delete_text}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            db.delete_product_section(section["id"])
+            self._load_sections()
+        except db.AppError as exc:
+            QMessageBox.warning(self, t("O'chirilmadi", language), t(str(exc), language))
 
     def _on_tab_changed(self):
         self._update_clear_sold_button()
@@ -1471,7 +1942,8 @@ class ProductsWidget(QWidget):
         self.template_filter.clear()
         self.template_filter.addItem("Barcha templatelar", None)
         self.template_filter.addItem("Template tanlanmagan", "none")
-        for template in templates if templates is not None else db.get_templates():
+        section_id = self.current_section["id"] if self.current_section else None
+        for template in templates if templates is not None else db.get_templates(section_id):
             self.template_filter.addItem(template["name"], template["id"])
         if current is not None:
             idx = self.template_filter.findData(current)
@@ -1514,11 +1986,15 @@ class ProductsWidget(QWidget):
         return f"{value:,.2f} {code}"
 
     def load_data(self, query=None):
+        if not self.current_section:
+            self._show_sections()
+            return
         if query is not None and not isinstance(query, str):
             query = None
         if query is None:
             query = self.search_edit.text() if hasattr(self, 'search_edit') else ""
         start_date, end_date = self._date_range()
+        section_id = self.current_section["id"]
 
         if self.isVisible():
             self._async_loader.start(
@@ -1526,10 +2002,10 @@ class ProductsWidget(QWidget):
                     "query": query,
                     "start_date": start_date,
                     "end_date": end_date,
-                    "products": db.search_products(query, start_date, end_date) if query else db.get_all_products(start_date, end_date),
+                    "products": db.search_products(query, start_date, end_date, section_id) if query else db.get_all_products(start_date, end_date, section_id),
                     "sold_rows": [dict(row) for row in db.get_product_sales_archive(query, start_date, end_date)],
                     "suppliers": db.get_all_suppliers(),
-                    "templates": db.get_templates(),
+                    "templates": db.get_templates(section_id),
                     "currencies": [dict(currency) for currency in db.get_currencies()],
                 },
                 self._apply_loaded_data,
@@ -1540,10 +2016,10 @@ class ProductsWidget(QWidget):
             "query": query,
             "start_date": start_date,
             "end_date": end_date,
-            "products": db.search_products(query, start_date, end_date) if query else db.get_all_products(start_date, end_date),
+            "products": db.search_products(query, start_date, end_date, section_id) if query else db.get_all_products(start_date, end_date, section_id),
             "sold_rows": [dict(row) for row in db.get_product_sales_archive(query, start_date, end_date)],
             "suppliers": db.get_all_suppliers(),
-            "templates": db.get_templates(),
+            "templates": db.get_templates(section_id),
             "currencies": [dict(currency) for currency in db.get_currencies()],
         })
 
@@ -1618,11 +2094,27 @@ class ProductsWidget(QWidget):
         )
 
     def _language_changed(self, _language):
+        language = self.property("app_language") or "uz"
+        if hasattr(self, "back_sections_btn"):
+            self.back_sections_btn.setToolTip(t("Bo'limlar", language))
+        if hasattr(self, "trash_btn"):
+            self.trash_btn.setText(t("Trash", language))
+            self.trash_btn.setToolTip(t("Trash", language))
+        if hasattr(self, "section_add_btn"):
+            self.section_add_btn.setText(t("+ Bo'lim qo'shish", language))
+        if hasattr(self, "section_title_lbl"):
+            self._apply_section_title_style()
+        if hasattr(self, "sections_scroll") and not self.current_section:
+            self.section_title_lbl.setText(t("Bo'limlar", language))
+            self._apply_section_title_style()
+            self._load_sections()
         if hasattr(self, "stats_lbl"):
             self._update_stats_label()
 
     def _apply_product_filters(self, products):
         supplier_filter = self.supplier_filter.currentData() if hasattr(self, "supplier_filter") else None
+        if self.current_section:
+            products = [p for p in products if _row_value(p, "section_id") == self.current_section["id"]]
         if supplier_filter == "none":
             products = [p for p in products if not _row_value(p, "supplier_id")]
         elif supplier_filter:
@@ -1895,7 +2387,9 @@ class ProductsWidget(QWidget):
             QMessageBox.warning(self, t("Tozalanmadi", language), str(exc))
 
     def _manage_templates(self):
-        dlg = TemplateManagerDialog(self)
+        if not self.current_section:
+            return
+        dlg = TemplateManagerDialog(self, self.current_section["id"])
         dlg.exec()
         self.load_data()
 
@@ -1907,7 +2401,7 @@ class ProductsWidget(QWidget):
     def _add_product(self):
         language = self.property("app_language") or "uz"
         try:
-            dlg = ProductDialog(self)
+            dlg = ProductDialog(self, section_id=self.current_section["id"] if self.current_section else None)
         except db.AppError as exc:
             QMessageBox.warning(self, t("Xatolik", language), f"{t('Mahsulot oynasi ochilmadi:', language)}\n{exc}")
             return
@@ -1930,7 +2424,7 @@ class ProductsWidget(QWidget):
         if not product:
             return
         try:
-            dlg = ProductDialog(self, product, duplicate=True)
+            dlg = ProductDialog(self, product, duplicate=True, section_id=self.current_section["id"] if self.current_section else None)
         except db.AppError as exc:
             QMessageBox.warning(self, t("Xatolik", language), f"{t('Mahsulot oynasi ochilmadi:', language)}\n{exc}")
             return
@@ -2124,7 +2618,7 @@ class ProductsWidget(QWidget):
             return
         product = item.data(Qt.ItemDataRole.UserRole)
         try:
-            dlg = ProductDialog(self, product)
+            dlg = ProductDialog(self, product, section_id=self.current_section["id"] if self.current_section else None)
         except db.AppError as exc:
             QMessageBox.warning(self, t("Xatolik", language), f"{t('Mahsulot oynasi ochilmadi:', language)}\n{exc}")
             return

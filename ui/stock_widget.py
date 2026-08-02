@@ -256,7 +256,11 @@ class StockInDialog(QDialog):
         product_id = self.product_combo.currentData()
         quantity = self.qty_spin.value()
         note = self.note_edit.text()
-        db.add_stock(product_id, quantity, note)
+        try:
+            db.add_stock(product_id, quantity, note)
+        except db.AppError as exc:
+            QMessageBox.warning(self, t("Saqlanmadi", self.language), str(exc))
+            return
         success_message = str(quantity) + " " + t("ta mahsulot qo'shildi!", self.language)
         QMessageBox.information(
             self,

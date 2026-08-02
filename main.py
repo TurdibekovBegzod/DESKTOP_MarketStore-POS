@@ -1,19 +1,29 @@
 import sys
 import os
+from pathlib import Path
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QIcon
 import database as db
 from ui.login_dialog import LoginDialog
 from ui.main_window import MainWindow
 
 
+def resource_path(relative_path):
+    base_path = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return str(base_path / relative_path)
+
+
+APP_ICON_PATH = resource_path("images/desktop_icon.ico")
+
+
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Market Store POS")
+    app.setWindowIcon(QIcon(APP_ICON_PATH))
 
     # Global font
     font = QFont("Segoe UI", 10)
@@ -35,14 +45,20 @@ def main():
     # Init database
     db.init_db()
 
-    # Show login
+    recent_user = db.get_recent_activity_user(max_minutes=15)
+    if recent_user:
+        db.touch_user_activity(recent_user["id"])
+        window = MainWindow(dict(recent_user))
+        window.showMaximized()
+        sys.exit(app.exec())
+
     login = LoginDialog()
     if login.exec():
+        db.touch_user_activity(login.logged_user["id"])
         window = MainWindow(login.logged_user)
         window.showMaximized()
         sys.exit(app.exec())
-    else:
-        sys.exit(0)
+    sys.exit(0)
 
 
 if __name__ == "__main__":

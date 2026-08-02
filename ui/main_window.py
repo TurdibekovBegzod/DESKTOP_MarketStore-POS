@@ -3,11 +3,14 @@ from PyQt6.QtWidgets import (
     QPushButton, QLabel, QStackedWidget, QFrame, QMessageBox,
     QDialog, QFormLayout, QComboBox, QLineEdit, QApplication,
     QAbstractButton, QTableWidget, QHeaderView, QSpinBox, QDoubleSpinBox,
-    QTextEdit, QDateEdit, QTabWidget, QScrollArea, QCalendarWidget
+    QTextEdit, QDateEdit, QTabWidget, QScrollArea, QCalendarWidget,
+    QFileDialog
 )
-from PyQt6.QtCore import QTimer, Qt
-from PyQt6.QtGui import QPixmap, QPainter
-from datetime import datetime
+from PyQt6.QtCore import QTimer, Qt, pyqtSignal, QEvent
+from PyQt6.QtGui import QPixmap, QPainter, QIcon, QColor, QImage
+from datetime import datetime, timedelta
+from pathlib import Path
+import sys
 import database as db
 
 from ui.sales_widget import SalesWidget
@@ -23,27 +26,83 @@ from ui.checking_widget import CheckingWidget
 from ui.i18n import set_language
 
 
-DESKTOP_ICON_PATH = "images/desktop.png"
+def resource_path(relative_path):
+    base_path = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
+    return str(base_path / relative_path)
+
+
+DESKTOP_ICON_PATH = resource_path("images/desktop.png")
+APP_ICON_PATH = resource_path("images/desktop_icon.ico")
+RIGHT_ARROW_LIST_PATH = resource_path("images/right-arrow_list.png")
+DOWN_ARROW_PATH = resource_path("images/down_full.png")
+if not Path(DOWN_ARROW_PATH).exists():
+    DOWN_ARROW_PATH = resource_path("images/down_fill.png")
 
 
 class NavGroupButton(QPushButton):
     def __init__(self, text="", parent=None):
         super().__init__(text, parent)
         self.expanded = False
+        self._right_icon = QPixmap(RIGHT_ARROW_LIST_PATH)
+        self._down_icon = QPixmap(DOWN_ARROW_PATH)
+        self._icon_normal_color = QColor("#94a3b8")
+        self._icon_active_color = QColor("#ffffff")
 
     def setExpanded(self, expanded):
         self.expanded = expanded
         self.update()
 
+    def setIconColors(self, normal_color, active_color):
+        self._icon_normal_color = QColor(normal_color)
+        self._icon_active_color = QColor(active_color)
+        self.update()
+
     def paintEvent(self, event):
         super().paintEvent(event)
         painter = QPainter(self)
-        painter.setPen(self.palette().buttonText().color())
-        painter.drawText(
-            self.rect().adjusted(0, 0, -14, 0),
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-            "v" if self.expanded else ">",
-        )
+        icon = self._down_icon if self.expanded else self._right_icon
+        if not icon.isNull():
+            size = 14
+            x = self.rect().right() - size - 12
+            y = self.rect().center().y() - size // 2
+            tinted = icon.scaled(
+                size,
+                size,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            color = self._icon_active_color if self.isChecked() else self._icon_normal_color
+            painter.save()
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+            painter.drawPixmap(x, y, self._tinted_pixmap(tinted, color))
+            painter.restore()
+
+    def _tinted_pixmap(self, pixmap, color):
+        image = pixmap.toImage().convertToFormat(QImage.Format.Format_ARGB32)
+        for y in range(image.height()):
+            for x in range(image.width()):
+                pixel = image.pixelColor(x, y)
+                alpha = pixel.alpha()
+                if alpha <= 0:
+                    continue
+                if pixel.red() > 245 and pixel.green() > 245 and pixel.blue() > 245:
+                    image.setPixelColor(x, y, QColor(0, 0, 0, 0))
+                    continue
+                icon_pixel = QColor(color)
+                icon_pixel.setAlpha(alpha)
+                image.setPixelColor(x, y, icon_pixel)
+        return QPixmap.fromImage(image)
+
+
+class LogoLabel(QLabel):
+    doubleClicked = pyqtSignal()
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.doubleClicked.emit()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
 
 THEMES = {
@@ -198,10 +257,44 @@ class MainWindow(QMainWindow):
         self.user = user
         self.settings = db.get_app_settings(self.user["id"])
         self.labels = TEXTS.get(self.settings["language"], TEXTS["uz"])
+        self._last_activity_saved_at = None
+        self._logging_out = False
+        self._activity_event_types = {
+            QEvent.Type.MouseButtonPress,
+            QEvent.Type.MouseButtonRelease,
+            QEvent.Type.KeyPress,
+            QEvent.Type.Wheel,
+            QEvent.Type.TouchBegin,
+        }
         self.setWindowTitle(self.settings["app_name"])
+        self.setWindowIcon(QIcon(APP_ICON_PATH))
         self.setMinimumSize(1280, 780)
         self._build_ui()
         self._start_clock()
+        self._save_user_activity(force=True)
+        app = QApplication.instance()
+        if app:
+            app.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if event.type() in self._activity_event_types:
+            self._save_user_activity()
+        return super().eventFilter(obj, event)
+
+    def closeEvent(self, event):
+        if not self._logging_out:
+            self._save_user_activity(force=True)
+        app = QApplication.instance()
+        if app:
+            app.removeEventFilter(self)
+        super().closeEvent(event)
+
+    def _save_user_activity(self, force=False):
+        now = datetime.now()
+        if not force and self._last_activity_saved_at and now - self._last_activity_saved_at < timedelta(seconds=30):
+            return
+        db.touch_user_activity(self.user.get("id"))
+        self._last_activity_saved_at = now
 
     def _build_ui(self):
         central = QWidget()
@@ -222,10 +315,12 @@ class MainWindow(QMainWindow):
         logo_lay = QHBoxLayout(self.logo_frame)
         logo_lay.setContentsMargins(14, 0, 14, 0)
         logo_lay.setSpacing(10)
-        self.logo_icon_lbl = QLabel()
+        self.logo_icon_lbl = LogoLabel()
         self.logo_icon_lbl.setFixedSize(42, 42)
         self.logo_icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.logo_icon_lbl.setScaledContents(False)
+        self.logo_icon_lbl.setToolTip("Logotip rasmini o'zgartirish uchun ikki marta bosing" if self.user["role"] == "admin" else "")
+        self.logo_icon_lbl.doubleClicked.connect(self._change_logo_image)
         self._set_logo_icon()
         logo_lay.addWidget(self.logo_icon_lbl)
         self.logo_lbl = QLabel(self.settings["app_name"])
@@ -246,12 +341,14 @@ class MainWindow(QMainWindow):
         nav_layout.setContentsMargins(12, 16, 12, 0)
         nav_layout.setSpacing(4)
 
-        nav_items = [(self.labels["sales"], "sales")]
+        nav_items = [
+            (self.labels["sales"], "sales"),
+            (self.labels.get("checking", "Checking"), "checking"),
+        ]
         if self.user["role"] == "admin":
             nav_items.extend([
                 (self.labels["supplier_debts"], "supplier_debts"),
                 (self.labels["expenses"], "expenses"),
-                (self.labels.get("checking", "Checking"), "checking"),
                 (self.labels["users"], "users"),
                 (self.labels["login_history"], "login_history"),
             ])
@@ -303,21 +400,21 @@ class MainWindow(QMainWindow):
         user_lay.setSpacing(5)
 
         self.uname = QLabel(self.user["username"].capitalize())
-        role_row = QHBoxLayout()
+        user_top_row = QHBoxLayout()
         self.urole = QLabel(self.labels["Admin"] if self.user["role"] == "admin" else self.labels["Kassir"])
         self.settings_btn = QPushButton("⚙")
         self.settings_btn.setFixedSize(38, 34)
         self.settings_btn.setToolTip(self.labels["settings"])
         self.settings_btn.clicked.connect(self._open_settings)
-        role_row.addWidget(self.urole)
-        role_row.addStretch()
-        role_row.addWidget(self.settings_btn)
+        user_top_row.addWidget(self.uname)
+        user_top_row.addStretch()
+        user_top_row.addWidget(self.settings_btn)
 
         self.logout_btn = QPushButton(self.labels["logout"])
         self.logout_btn.setFixedHeight(28)
         self.logout_btn.clicked.connect(self._logout)
-        user_lay.addWidget(self.uname)
-        user_lay.addLayout(role_row)
+        user_lay.addLayout(user_top_row)
+        user_lay.addWidget(self.urole)
         user_lay.addWidget(self.logout_btn)
         sb_layout.addWidget(self.user_frame)
 
@@ -342,7 +439,10 @@ class MainWindow(QMainWindow):
         content_layout.addWidget(self.topbar)
 
         self.stack = QStackedWidget()
-        self.pages = {"sales": SalesWidget(self.user)}
+        self.pages = {
+            "sales": SalesWidget(self.user),
+            "checking": CheckingWidget(self.user),
+        }
         if self.user["role"] == "admin":
             self.pages.update({
                 "products": ProductsWidget(self.user),
@@ -351,7 +451,6 @@ class MainWindow(QMainWindow):
                 "finance": FinanceWidget(),
                 "supplier_debts": SupplierDebtsWidget(),
                 "expenses": ExpensesWidget(self.user),
-                "checking": CheckingWidget(self.user),
                 "users": UsersWidget(),
                 "login_history": LoginHistoryWidget(),
             })
@@ -370,6 +469,7 @@ class MainWindow(QMainWindow):
             QPushButton {
                 text-align: left;
                 padding-left: 14px;
+                padding-right: 34px;
                 font-size: 14px;
                 color: %s;
                 background: transparent;
@@ -440,6 +540,7 @@ class MainWindow(QMainWindow):
         group_btn.setObjectName(f"nav_group_{group_key}")
         group_btn.setProperty("label_key", "products" if group_key == "products_group" else "reports")
         group_btn.setStyleSheet(self._nav_group_style())
+        self._sync_nav_group_icon_colors(group_btn)
         group_btn.clicked.connect(lambda checked, k=group_key: self._toggle_nav_group(k))
         nav_layout.addWidget(group_btn)
         self.nav_group_buttons[group_key] = group_btn
@@ -476,6 +577,7 @@ class MainWindow(QMainWindow):
         button.setText(f"  {label}")
         button.setExpanded(visible)
         button.setChecked(visible or any(self.nav_buttons[key].isChecked() for key in self.nav_group_items.get(group_key, ())))
+        self._sync_nav_group_icon_colors(button)
 
     def _is_group_child(self, key):
         return any(key in items for items in self.nav_group_items.values())
@@ -495,6 +597,7 @@ class MainWindow(QMainWindow):
                 group_btn.setExpanded(True)
             else:
                 group_btn.setExpanded(self.nav_group_widgets[group_key].isVisible())
+            self._sync_nav_group_icon_colors(group_btn)
         self.stack.setCurrentWidget(self.pages[key])
         self.page_title_lbl.setText(self.labels.get(key, key))
 
@@ -503,6 +606,13 @@ class MainWindow(QMainWindow):
             page.load_data()
         set_language(page, self.settings.get("language", "uz"))
         self._apply_page_theme()
+
+    def _sync_nav_group_icon_colors(self, button=None):
+        theme = THEMES.get(self.settings.get("theme"), THEMES["dark_blue"])
+        buttons = [button] if button is not None else self.nav_group_buttons.values()
+        for group_button in buttons:
+            if hasattr(group_button, "setIconColors"):
+                group_button.setIconColors(theme["nav_text"], theme["nav_active"])
 
     def _start_clock(self):
         timer = QTimer(self)
@@ -526,6 +636,28 @@ class MainWindow(QMainWindow):
                 )
             )
 
+    def _change_logo_image(self):
+        if self.user["role"] != "admin":
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Logotip rasmini tanlash",
+            "",
+            "Images (*.png *.jpg *.jpeg *.bmp *.webp)",
+        )
+        if not path:
+            return
+        pixmap = QPixmap(path)
+        if pixmap.isNull():
+            QMessageBox.warning(self, "Rasm ochilmadi", "Tanlangan rasmni o'qib bo'lmadi.")
+            return
+        target = Path(DESKTOP_ICON_PATH)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not pixmap.save(str(target), "PNG"):
+            QMessageBox.warning(self, "Saqlanmadi", "Logotip rasmini saqlab bo'lmadi.")
+            return
+        self._set_logo_icon()
+
     def _open_settings(self):
         dlg = SettingsDialog(self, self.user["role"], self.settings)
         if dlg.exec() == QDialog.DialogCode.Accepted:
@@ -544,6 +676,7 @@ class MainWindow(QMainWindow):
         self.urole.setText(self.labels["Admin"] if self.user["role"] == "admin" else self.labels["Kassir"])
         self.logout_btn.setText(self.labels["logout"])
         self.settings_btn.setToolTip(self.labels["settings"])
+        self.logo_icon_lbl.setToolTip("Logotip rasmini o'zgartirish uchun ikki marta bosing" if self.user["role"] == "admin" else "")
         for key, btn in self.nav_buttons.items():
             btn.setText(f"  {self.labels.get(key, key)}")
             btn.setStyleSheet(self._nav_child_btn_style() if self._is_group_child(key) else self._nav_btn_style())
@@ -622,6 +755,7 @@ class MainWindow(QMainWindow):
             btn.setStyleSheet(self._nav_child_btn_style() if self._is_group_child(key) else self._nav_btn_style())
         for group_key, btn in self.nav_group_buttons.items():
             btn.setStyleSheet(self._nav_group_style())
+            self._sync_nav_group_icon_colors(btn)
             if group_key in self.nav_group_widgets:
                 self.nav_group_widgets[group_key].setStyleSheet(
                     "background: transparent; border-left:1px solid rgba(148,163,184,0.35);"
@@ -639,6 +773,8 @@ class MainWindow(QMainWindow):
             return
         for widget in self.stack.findChildren(QWidget):
             if current_page and isinstance(current_page, SalesWidget) and current_page.isAncestorOf(widget):
+                continue
+            if self._inside_products_card(widget):
                 continue
             if self._inside_calendar(widget):
                 continue
@@ -666,6 +802,8 @@ class MainWindow(QMainWindow):
                 widget.setMinimumSize(400, 300)
                 widget.setStyleSheet(self._calendar_style(theme))
             elif isinstance(widget, QLabel):
+                if widget.objectName() == "productsSectionTitle":
+                    continue
                 widget.setStyleSheet(self._label_style(theme))
         if isinstance(current_page, SalesWidget):
             self._apply_sales_theme(current_page, theme)
@@ -682,6 +820,14 @@ class MainWindow(QMainWindow):
         parent = widget.parent()
         while parent is not None:
             if isinstance(parent, QCalendarWidget):
+                return True
+            parent = parent.parent()
+        return False
+
+    def _inside_products_card(self, widget):
+        parent = widget
+        while parent is not None:
+            if parent.objectName() in {"sectionCard", "sectionMetrics", "trashCard"}:
                 return True
             parent = parent.parent()
         return False
@@ -741,6 +887,18 @@ class MainWindow(QMainWindow):
             page.discount_currency_combo.setStyleSheet(self._field_style(theme))
             page.discount_currency_combo.setMinimumHeight(40)
             page.discount_currency_combo.setMinimumWidth(86)
+        cart_title = page.findChild(QLabel, "salesCartTitle")
+        if cart_title:
+            cart_title.setStyleSheet(f"""
+                QLabel#salesCartTitle {{
+                    color:{theme['title']};
+                    background:transparent;
+                    border:none;
+                    font-size:15px;
+                    font-weight:bold;
+                    padding:0;
+                }}
+            """)
         complete_btn = page.findChild(QPushButton, "complete_sale_btn")
         if complete_btn:
             complete_btn.setFixedHeight(48)
@@ -1033,9 +1191,12 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
         if reply == QMessageBox.StandardButton.Yes:
+            self._logging_out = True
+            db.clear_user_activity(self.user.get("id"))
             self.close()
             from ui.login_dialog import LoginDialog
             dlg = LoginDialog()
             if dlg.exec():
+                db.touch_user_activity(dlg.logged_user["id"])
                 self.next_window = MainWindow(dlg.logged_user)
                 self.next_window.showMaximized()

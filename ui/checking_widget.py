@@ -1,6 +1,7 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox, QFrame, QSpinBox
+    QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox, QFrame, QSpinBox,
+    QComboBox
 )
 from PyQt6.QtCore import Qt
 import database as db
@@ -14,6 +15,7 @@ class CheckingWidget(QWidget):
         self.user = user
         self.session = None
         self._async_loader = None
+        self._sections = []
         self._build_ui()
         self.load_data()
 
@@ -26,23 +28,13 @@ class CheckingWidget(QWidget):
         self._async_loader = AsyncDataLoader(self, self.progress_bar)
 
         toolbar = QHBoxLayout()
-        self.status_lbl = QLabel("Checking boshlanmagan")
-        self.status_lbl.setProperty("i18n_skip", True)
-        self.status_lbl.setStyleSheet("font-size:14px;font-weight:bold;color:#1e293b;")
-        toolbar.addWidget(self.status_lbl)
         toolbar.addStretch()
 
-        self.start_btn = QPushButton("Tekshirishni boshlash")
-        self.start_btn.setFixedHeight(38)
-        self.start_btn.setStyleSheet(self._button_style("#3b82f6", "white", "#3b82f6", "#2563eb"))
-        self.start_btn.clicked.connect(self._start_checking)
-        toolbar.addWidget(self.start_btn)
-
-        self.finish_btn = QPushButton("Jarayonni tugatish")
-        self.finish_btn.setFixedHeight(38)
-        self.finish_btn.setStyleSheet(self._button_style("#059669", "white", "#059669", "#047857"))
-        self.finish_btn.clicked.connect(self._finish_checking)
-        toolbar.addWidget(self.finish_btn)
+        self.check_toggle_btn = QPushButton()
+        self.check_toggle_btn.setProperty("i18n_skip", True)
+        self.check_toggle_btn.setFixedHeight(38)
+        self.check_toggle_btn.clicked.connect(self._toggle_checking)
+        toolbar.addWidget(self.check_toggle_btn)
         layout.addLayout(toolbar)
 
         scan_frame = QFrame()
@@ -50,6 +42,18 @@ class CheckingWidget(QWidget):
         scan_layout = QHBoxLayout(scan_frame)
         scan_layout.setContentsMargins(12, 10, 12, 10)
         scan_layout.setSpacing(10)
+        self.section_combo = QComboBox()
+        self.section_combo.setMinimumWidth(170)
+        self.section_combo.setFixedHeight(38)
+        self.section_combo.setStyleSheet(self._input_style())
+        self.section_combo.currentIndexChanged.connect(self._section_filter_changed)
+        scan_layout.addWidget(self.section_combo)
+        self.template_combo = QComboBox()
+        self.template_combo.setMinimumWidth(170)
+        self.template_combo.setFixedHeight(38)
+        self.template_combo.setStyleSheet(self._input_style())
+        self.template_combo.currentIndexChanged.connect(self.load_data)
+        scan_layout.addWidget(self.template_combo)
         scan_layout.addWidget(QLabel("Shtrix-kod:"))
         self.barcode_edit = QLineEdit()
         self.barcode_edit.setPlaceholderText("Skaner bilan o'qing yoki barcode kiriting...")
@@ -129,49 +133,123 @@ class CheckingWidget(QWidget):
         return table
 
     def load_data(self):
+        section_id = self._selected_section_id()
+        template_id = self._selected_template_id()
         if self.isVisible():
-            self._async_loader.start(self._fetch_checking_data, self._apply_loaded_data)
+            self._async_loader.start(lambda: self._fetch_checking_data(section_id, template_id), self._apply_loaded_data)
             return
-        self._apply_loaded_data(self._fetch_checking_data())
+        self._apply_loaded_data(self._fetch_checking_data(section_id, template_id))
 
-    def _fetch_checking_data(self):
+    def _fetch_checking_data(self, section_id=None, template_id=None):
         session = db.get_active_inventory_check()
+        sections = [dict(section) for section in db.get_product_sections()]
+        templates = [dict(template) for template in db.get_templates(section_id)]
         if not session:
-            return {"session": None, "counts": None, "checked": [], "unchecked": []}
+            preview_rows = self._filtered_product_preview_rows(section_id, template_id)
+            return {"session": None, "counts": None, "checked": [], "unchecked": preview_rows, "sections": sections, "templates": templates}
         session_id = session["id"]
         return {
             "session": session,
-            "counts": db.get_inventory_check_counts(session_id),
-            "checked": db.get_inventory_check_items(session_id, True),
-            "unchecked": db.get_inventory_check_items(session_id, False),
+            "counts": db.get_inventory_check_counts(session_id, section_id, template_id),
+            "checked": db.get_inventory_check_items(session_id, True, section_id, template_id),
+            "unchecked": db.get_inventory_check_items(session_id, False, section_id, template_id),
+            "sections": sections,
+            "templates": templates,
         }
 
     def _apply_loaded_data(self, data):
         self.session = data["session"]
         active = bool(self.session)
-        self.start_btn.setEnabled(not active)
-        self.finish_btn.setEnabled(active)
+        self._load_filter_combos(data.get("sections", []), data.get("templates", []))
+        self._update_toggle_button(active)
         self.barcode_edit.setEnabled(active)
         self.qty_spin.setEnabled(active)
         self.scan_btn.setEnabled(active)
         if active:
-            counts = data["counts"]
-            total = counts["total"] or 0
-            checked = counts["checked_count"] or 0
-            unchecked = counts["unchecked_count"] or 0
-            unchecked_quantity = counts["unchecked_quantity"] or 0
-            self.status_lbl.setText(
-                f"Checking #{self.session['id']} | Jami: {total} tur | "
-                f"Tekshirildi: {checked} tur | Qoldi: {unchecked} tur, {unchecked_quantity} ta"
-            )
             self._fill_table(self.checked_table, data["checked"], True)
             self._fill_table(self.unchecked_table, data["unchecked"], False)
             self.barcode_edit.setFocus()
         else:
-            self.status_lbl.setText("Checking boshlanmagan")
             self.checked_table.setRowCount(0)
-            self.unchecked_table.setRowCount(0)
+            self._fill_table(self.unchecked_table, data["unchecked"], False)
         set_language(self, self.property("app_language") or "uz")
+        self._update_toggle_button(active)
+
+    def _filtered_product_preview_rows(self, section_id=None, template_id=None):
+        products = db.get_all_products(section_id=section_id)
+        rows = []
+        for product in products:
+            if template_id is not None and product["template_id"] != template_id:
+                continue
+            stock = product["stock"] or 0
+            if stock <= 0:
+                continue
+            rows.append({
+                "product_id": product["id"],
+                "product_name": product["name"],
+                "barcode": product["barcode"],
+                "expected_stock": stock,
+                "checked_quantity": 0,
+                "checked_at": None,
+            })
+        return rows
+
+    def _load_filter_combos(self, sections, templates):
+        language = self.property("app_language") or "uz"
+        current_section = self._selected_section_id()
+        current_template = self._selected_template_id()
+        self.section_combo.blockSignals(True)
+        self.section_combo.clear()
+        self.section_combo.addItem(t("Barcha bo'limlar", language), None)
+        for section in sections:
+            self.section_combo.addItem(section["name"], section["id"])
+        if current_section is not None:
+            index = self.section_combo.findData(current_section)
+            if index >= 0:
+                self.section_combo.setCurrentIndex(index)
+        self.section_combo.blockSignals(False)
+
+        self.template_combo.blockSignals(True)
+        self.template_combo.clear()
+        self.template_combo.addItem(t("Barcha templatelar", language), None)
+        for template in templates:
+            self.template_combo.addItem(template["name"], template["id"])
+        if current_template is not None:
+            index = self.template_combo.findData(current_template)
+            if index >= 0:
+                self.template_combo.setCurrentIndex(index)
+        self.template_combo.blockSignals(False)
+
+    def _selected_section_id(self):
+        return self.section_combo.currentData() if hasattr(self, "section_combo") else None
+
+    def _selected_template_id(self):
+        return self.template_combo.currentData() if hasattr(self, "template_combo") else None
+
+    def _section_filter_changed(self):
+        self._load_template_combo_for_section()
+        self.load_data()
+
+    def _load_template_combo_for_section(self):
+        language = self.property("app_language") or "uz"
+        self.template_combo.blockSignals(True)
+        self.template_combo.clear()
+        self.template_combo.addItem(t("Barcha templatelar", language), None)
+        for template in db.get_templates(self._selected_section_id()):
+            self.template_combo.addItem(template["name"], template["id"])
+        self.template_combo.blockSignals(False)
+
+    def _update_toggle_button(self, active):
+        language = self.property("app_language") or "uz"
+        if active:
+            self.check_toggle_btn.setText(t("Tekshiruvni to'xtatish", language))
+            self.check_toggle_btn.setStyleSheet(self._button_style("#059669", "white", "#059669", "#047857"))
+        else:
+            self.check_toggle_btn.setText(t("Tekshirishni boshlash", language))
+            self.check_toggle_btn.setStyleSheet(self._button_style("#3b82f6", "white", "#3b82f6", "#2563eb"))
+
+    def _language_changed(self, _language):
+        self._update_toggle_button(bool(self.session))
 
     def _fill_table(self, table, rows, include_time):
         table.setRowCount(0)
@@ -211,6 +289,12 @@ class CheckingWidget(QWidget):
             self.load_data()
         except db.AppError as exc:
             QMessageBox.warning(self, t("Checking boshlanmadi", language), str(exc))
+
+    def _toggle_checking(self):
+        if self.session:
+            self._finish_checking()
+        else:
+            self._start_checking()
 
     def _finish_checking(self):
         if not self.session:
@@ -257,17 +341,16 @@ class CheckingWidget(QWidget):
             return
         barcode = self.barcode_edit.text().strip()
         try:
-            item = db.mark_inventory_product_checked(self.session["id"], barcode, self.qty_spin.value())
+            item = db.mark_inventory_product_checked(
+                self.session["id"],
+                barcode,
+                self.qty_spin.value(),
+                self._selected_section_id(),
+                self._selected_template_id(),
+            )
             self.barcode_edit.clear()
             self.qty_spin.setValue(1)
             self.load_data()
-            expected = item["expected_stock"] or 0
-            checked = item["checked_quantity"] or 0
-            remaining = max(0, expected - checked)
-            if item["checked_at"]:
-                self.status_lbl.setText(f"To'liq tekshirildi: {item['product_name']} | Miqdor: {checked}")
-            else:
-                self.status_lbl.setText(f"Sanaldi: {item['product_name']} | {checked}/{expected} | Qoldi: {remaining}")
         except db.AppError as exc:
             QMessageBox.warning(self, t("Tekshirilmadi", language), str(exc))
             self.barcode_edit.selectAll()
@@ -275,9 +358,10 @@ class CheckingWidget(QWidget):
 
     def _input_style(self):
         return """
-            QLineEdit, QSpinBox { border:1px solid #d1d5db;border-radius:6px;
+            QLineEdit, QSpinBox, QComboBox { border:1px solid #d1d5db;border-radius:6px;
                                   padding:0 12px;font-size:13px;background:white; }
-            QLineEdit:focus, QSpinBox:focus { border-color:#3b82f6; }
+            QLineEdit:focus, QSpinBox:focus, QComboBox:focus { border-color:#3b82f6; }
+            QComboBox::drop-down { border:none;width:26px; }
         """
 
     def _button_style(self, bg, fg, border, hover, hover_fg="white"):

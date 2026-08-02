@@ -1,7 +1,8 @@
 import os
+import sqlite3
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import database as db
 
@@ -23,6 +24,62 @@ class DatabaseOrmRegressionTest(unittest.TestCase):
                 path = self.path + suffix
                 if os.path.exists(path):
                     os.remove(path)
+            for file_name in os.listdir(os.path.dirname(self.path) or "."):
+                if file_name.startswith(os.path.basename(self.path) + ".backup_"):
+                    os.remove(os.path.join(os.path.dirname(self.path), file_name))
+
+    def test_init_db_migrates_old_database_without_losing_products(self):
+        db._get_engine().dispose()
+        for suffix in ("", "-shm", "-wal"):
+            path = self.path + suffix
+            if os.path.exists(path):
+                os.remove(path)
+        conn = sqlite3.connect(self.path)
+        try:
+            conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT UNIQUE NOT NULL, password TEXT NOT NULL, role TEXT)")
+            conn.execute("CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT)")
+            conn.execute("CREATE TABLE categories (id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL)")
+            conn.execute("""
+                CREATE TABLE products (
+                    id INTEGER PRIMARY KEY,
+                    barcode TEXT UNIQUE,
+                    name TEXT NOT NULL,
+                    category_id INTEGER,
+                    price REAL NOT NULL DEFAULT 0,
+                    cost REAL NOT NULL DEFAULT 0,
+                    stock INTEGER NOT NULL DEFAULT 0,
+                    unit TEXT DEFAULT 'dona'
+                )
+            """)
+            conn.execute(
+                "INSERT INTO products (barcode, name, price, cost, stock, unit) VALUES (?, ?, ?, ?, ?, ?)",
+                ("OLD1", "Old Product", 1000, 700, 5, "dona"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        db.init_db()
+
+        product = db.get_product_by_barcode("OLD1")
+        self.assertIsNotNone(product)
+        self.assertEqual(product["name"], "Old Product")
+        self.assertEqual(product["stock"], 5)
+        self.assertIsNotNone(product["section_id"])
+        self.assertEqual(product["is_deleted"], 0)
+
+        applied_versions = {row["version"] for row in db.get_applied_migrations()}
+        self.assertIn("001_create_missing_tables", applied_versions)
+        self.assertIn("002_add_missing_columns", applied_versions)
+
+        conn = sqlite3.connect(self.path)
+        try:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(products)").fetchall()}
+        finally:
+            conn.close()
+        self.assertIn("section_id", columns)
+        self.assertIn("process_quantity", columns)
+        self.assertIn("purge_after", columns)
 
     def test_settings_auth_users_and_login_history(self):
         settings = db.get_app_settings()
@@ -38,6 +95,20 @@ class DatabaseOrmRegressionTest(unittest.TestCase):
         self.assertEqual(log["username"], "admin")
         logged_at = datetime.strptime(log["logged_at"], "%Y-%m-%d %H:%M:%S")
         self.assertLess(abs((logged_at - before).total_seconds()), 120)
+        self.assertEqual(db.get_recent_login_user()["username"], "admin")
+        with db.session_scope() as session:
+            latest = session.scalar(db.select(db.LoginLog).order_by(db.LoginLog.logged_at.desc()))
+            latest.logged_at = (datetime.utcnow() - timedelta(minutes=16)).strftime("%Y-%m-%d %H:%M:%S")
+        self.assertIsNone(db.get_recent_login_user())
+        db.touch_user_activity(admin["id"])
+        self.assertEqual(db.get_recent_activity_user()["username"], "admin")
+        db.clear_user_activity(admin["id"])
+        self.assertIsNone(db.get_recent_activity_user())
+        db.touch_user_activity(admin["id"])
+        with db.session_scope() as session:
+            activity = session.get(db.UserSetting, {"user_id": admin["id"], "key": "last_activity_utc"})
+            activity.value = (datetime.utcnow() - timedelta(minutes=16)).strftime("%Y-%m-%d %H:%M:%S")
+        self.assertIsNone(db.get_recent_activity_user())
         db.clear_login_logs()
         self.assertEqual(db.get_login_logs(), [])
 
@@ -45,7 +116,9 @@ class DatabaseOrmRegressionTest(unittest.TestCase):
         user = [row for row in db.get_users() if row["username"] == "cashier"][0]
         db.save_app_settings({"theme": "light_blue", "language": "ru"}, user["id"])
         self.assertEqual(db.get_app_settings(user["id"])["language"], "ru")
+        db.touch_user_activity(user["id"])
         db.update_user(user["id"], "cashier2", "pass2", "admin")
+        self.assertIsNone(db.get_recent_activity_user())
         self.assertIsNotNone(db.authenticate("cashier2", "pass2"))
         db.delete_user(user["id"])
         self.assertFalse([row for row in db.get_users() if row["username"] == "cashier2"])
@@ -96,6 +169,8 @@ class DatabaseOrmRegressionTest(unittest.TestCase):
 
         db.add_stock(product_id, 5, "kirim")
         self.assertEqual(db.get_product_by_barcode("P100")["stock"], 15)
+        with self.assertRaises(db.AppError):
+            db.add_stock(product_id, 0, "bad")
         usd_product_id = db.add_product({
             "barcode": "USD1",
             "name": "USD Product",
@@ -205,6 +280,43 @@ class DatabaseOrmRegressionTest(unittest.TestCase):
         self.assertIsNone(db.get_active_inventory_check())
         self.assertEqual(db.get_product_by_barcode("CHK1")["id"], product_id)
 
+    def test_inventory_checking_section_and_template_filters(self):
+        section_a = db.add_product_section("Check Section A")
+        section_b = db.add_product_section("Check Section B")
+        template_a = db.add_template("Check Template A", [{"name": "Brand"}], section_a)
+        template_b = db.add_template("Check Template B", [{"name": "Brand"}], section_b)
+        product_a = db.add_product({
+            "barcode": "FCHK1",
+            "name": "Filtered A",
+            "section_id": section_a,
+            "template_id": template_a,
+            "price": 100,
+            "cost": 50,
+            "stock": 4,
+            "unit": "dona",
+        })
+        db.add_product({
+            "barcode": "FCHK2",
+            "name": "Filtered B",
+            "section_id": section_b,
+            "template_id": template_b,
+            "price": 100,
+            "cost": 50,
+            "stock": 7,
+            "unit": "dona",
+        })
+        session_id = db.start_inventory_check()
+        section_counts = db.get_inventory_check_counts(session_id, section_a)
+        self.assertEqual(section_counts["total"], 1)
+        self.assertEqual(section_counts["total_quantity"], 4)
+        template_items = db.get_inventory_check_items(session_id, False, section_a, template_a)
+        self.assertEqual([item["product_id"] for item in template_items], [product_a])
+        with self.assertRaises(db.AppError):
+            db.mark_inventory_product_checked(session_id, "FCHK2", 1, section_a, template_a)
+        db.mark_inventory_product_checked(session_id, "FCHK1", 4, section_a, template_a)
+        self.assertEqual(db.get_inventory_check_counts(session_id, section_a, template_a)["checked_quantity"], 4)
+        db.finish_inventory_check(session_id)
+
     def test_sales_returns_reports_and_clear_history(self):
         customer_id = db.add_customer("Customer", "99890", "c@example.com")
         db.update_customer(customer_id, "Customer 2", "99891", "c2@example.com")
@@ -255,10 +367,76 @@ class DatabaseOrmRegressionTest(unittest.TestCase):
         self.assertTrue(db.get_entity_period_series("cashier", admin["id"], "2000-01-01", "2999-01-01"))
         self.assertTrue(db.get_entity_period_series("customer", customer_id, "2000-01-01", "2999-01-01"))
 
+        section_id = db.add_product_section("Report Section")
+        section_product_id = db.add_product({
+            "barcode": "SECSALE",
+            "name": "Section Sale Product",
+            "section_id": section_id,
+            "template_id": None,
+            "supplier_id": None,
+            "category_id": None,
+            "price": 500,
+            "cost": 300,
+            "stock": 5,
+            "unit": "dona",
+        })
+        db.create_sale(
+            None,
+            admin["id"],
+            [{"product_id": section_product_id, "quantity": 2, "price": 500, "subtotal": 1000}],
+            1000,
+            0,
+            1000,
+            "naqd",
+        )
+        section_rows = db.get_overall_period_series("2000-01-01", "2999-01-01", section_id)
+        self.assertEqual(sum(row["sales_count"] for row in section_rows), 1)
+        self.assertEqual(sum(row["product_count"] for row in section_rows), 2)
+        self.assertEqual(sum(row["revenue"] for row in section_rows), 1000)
+        self.assertEqual(sum(row["profit"] for row in section_rows), 400)
+        cashier_rows = db.get_cashier_period_summary("2000-01-01", "2999-01-01", section_id)
+        admin_row = [row for row in cashier_rows if row["entity_id"] == admin["id"]][0]
+        self.assertEqual(admin_row["product_count"], 2)
+
         db.return_sale_item(archive[0]["sale_item_id"], 1, "return")
         self.assertEqual(db.get_product_by_barcode("SALE1")["stock"], 8)
         db.clear_sales_history()
         self.assertEqual(db.get_product_sales_archive(), [])
+
+    def test_sale_respects_process_reserved_stock(self):
+        admin = db.authenticate("admin", "admin123")
+        product_id = db.add_product({
+            "barcode": "RSV1",
+            "name": "Reserved Product",
+            "template_id": None,
+            "supplier_id": None,
+            "category_id": None,
+            "price": 1000,
+            "cost": 600,
+            "stock": 5,
+            "unit": "dona",
+        })
+        db.put_product_in_process(product_id, 4, 0, "UZS", "Ali", "901")
+        with self.assertRaises(db.AppError):
+            db.create_sale(
+                None,
+                admin["id"],
+                [{"product_id": product_id, "quantity": 2, "price": 1000, "subtotal": 2000}],
+                2000,
+                0,
+                2000,
+                "naqd",
+            )
+        db.create_sale(
+            None,
+            admin["id"],
+            [{"product_id": product_id, "quantity": 1, "price": 1000, "subtotal": 1000}],
+            1000,
+            0,
+            1000,
+            "naqd",
+        )
+        self.assertEqual(db.get_product_by_barcode("RSV1")["stock"], 4)
 
     def test_discount_archive_stays_proportional_after_return(self):
         admin = db.authenticate("admin", "admin123")
@@ -304,6 +482,52 @@ class DatabaseOrmRegressionTest(unittest.TestCase):
         self.assertNotIn("DISC2", rows)
         self.assertAlmostEqual(rows["DISC1"]["item_discount"], 8)
         self.assertAlmostEqual(rows["DISC1"]["item_total_after_discount"], 192)
+
+    def test_product_trash_only_tracks_deleted_items(self):
+        admin = db.authenticate("admin", "admin123")
+        section_id = db.add_product_section("Trash Section")
+        template_id = db.add_template("Trash Template", [{"name": "Brand"}], section_id)
+        sold_product_id = db.add_product({
+            "barcode": "TRSOLD",
+            "name": "Sold Product",
+            "section_id": section_id,
+            "template_id": template_id,
+            "price": 1000,
+            "cost": 500,
+            "stock": 5,
+            "unit": "dona",
+        })
+        deleted_product_id = db.add_product({
+            "barcode": "TRDEL",
+            "name": "Deleted Product",
+            "section_id": section_id,
+            "template_id": template_id,
+            "price": 1000,
+            "cost": 500,
+            "stock": 5,
+            "unit": "dona",
+        })
+        db.create_sale(
+            None,
+            admin["id"],
+            [{"product_id": sold_product_id, "quantity": 1, "price": 1000, "subtotal": 1000}],
+            1000,
+            0,
+            1000,
+            "naqd",
+        )
+        trash = db.get_product_trash()
+        self.assertFalse(trash["sections"])
+        self.assertFalse(trash["products"])
+
+        db.delete_product(deleted_product_id)
+        trash = db.get_product_trash()
+        self.assertEqual({row["id"] for row in trash["products"]}, {deleted_product_id})
+
+        db.delete_product_section(section_id)
+        trash = db.get_product_trash()
+        self.assertEqual({row["id"] for row in trash["sections"]}, {section_id})
+        self.assertEqual({row["id"] for row in trash["products"]}, {sold_product_id, deleted_product_id})
 
     def test_suppliers_debtors_and_expenses(self):
         supplier_id = db.add_supplier("Supplier", "1", "note", "USD")

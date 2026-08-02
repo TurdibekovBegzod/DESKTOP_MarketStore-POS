@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import secrets
+import shutil
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -17,9 +18,9 @@ from sqlalchemy import (
     create_engine,
     event,
     func,
-    inspect,
     or_,
     select,
+    update,
 )
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, declarative_base, relationship, sessionmaker
@@ -187,6 +188,14 @@ def _local_hour_label(value):
     return f"{hour}:00"
 
 
+def _trash_now():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _trash_purge_after():
+    return (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+
+
 class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True)
@@ -237,9 +246,26 @@ class UserSetting(Base):
 class ProductTemplate(Base):
     __tablename__ = "product_templates"
     id = Column(Integer, primary_key=True)
-    name = Column(String, unique=True, nullable=False)
+    section_id = Column(Integer, ForeignKey("product_sections.id", ondelete="CASCADE"))
+    name = Column(String, nullable=False)
+    original_name = Column(String)
+    is_deleted = Column(Integer, default=0)
+    deleted_at = Column(String)
+    purge_after = Column(String)
     created_at = Column(String, server_default=text("CURRENT_TIMESTAMP"))
     fields = relationship("ProductTemplateField", cascade="all, delete-orphan")
+    __table_args__ = (UniqueConstraint("section_id", "name"),)
+
+
+class ProductSection(Base):
+    __tablename__ = "product_sections"
+    id = Column(Integer, primary_key=True)
+    name = Column(String, unique=True, nullable=False)
+    original_name = Column(String)
+    is_deleted = Column(Integer, default=0)
+    deleted_at = Column(String)
+    purge_after = Column(String)
+    created_at = Column(String, server_default=text("CURRENT_TIMESTAMP"))
 
 
 class ProductTemplateField(Base):
@@ -256,7 +282,9 @@ class Product(Base):
     __tablename__ = "products"
     id = Column(Integer, primary_key=True)
     barcode = Column(String, unique=True)
+    original_barcode = Column(String)
     name = Column(String, nullable=False)
+    section_id = Column(Integer, ForeignKey("product_sections.id"))
     template_id = Column(Integer, ForeignKey("product_templates.id"))
     supplier_id = Column(Integer, ForeignKey("suppliers.id"))
     category_id = Column(Integer, ForeignKey("categories.id"))
@@ -277,6 +305,8 @@ class Product(Base):
     process_customer_name = Column(String)
     process_customer_phone = Column(String)
     is_deleted = Column(Integer, default=0)
+    deleted_at = Column(String)
+    purge_after = Column(String)
     created_at = Column(String, server_default=text("CURRENT_TIMESTAMP"))
 
 
@@ -435,11 +465,87 @@ class FinanceManualMovement(Base):
     created_at = Column(String, server_default=text("CURRENT_TIMESTAMP"))
 
 
-def _add_missing_columns():
+MIGRATIONS = (
+    ("001_create_missing_tables", "Create any missing tables from the current SQLAlchemy models."),
+    ("002_add_missing_columns", "Add columns introduced after earlier releases."),
+)
+
+
+def _database_has_user_tables(conn):
+    rows = conn.exec_driver_sql(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+    ).fetchall()
+    return any(row[0] != "schema_migrations" for row in rows)
+
+
+def _backup_database_before_migration(conn):
+    if not DB_PATH or DB_PATH == ":memory:" or not os.path.exists(DB_PATH) or os.path.getsize(DB_PATH) == 0:
+        return None
+    if not _database_has_user_tables(conn):
+        return None
+    try:
+        conn.exec_driver_sql("PRAGMA wal_checkpoint(FULL)")
+    except OperationalError:
+        pass
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_path = f"{DB_PATH}.backup_{timestamp}"
+    shutil.copy2(DB_PATH, backup_path)
+    return backup_path
+
+
+def _ensure_schema_migrations_table(conn):
+    conn.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            version TEXT PRIMARY KEY,
+            description TEXT,
+            applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+
+def get_applied_migrations():
     engine = _get_engine()
-    inspector = inspect(engine)
+    with engine.begin() as conn:
+        _ensure_schema_migrations_table(conn)
+        rows = conn.exec_driver_sql("SELECT version, description, applied_at FROM schema_migrations ORDER BY version").fetchall()
+    return [Row(version=row[0], description=row[1], applied_at=row[2]) for row in rows]
+
+
+def _mark_migration_applied(conn, version, description):
+    conn.exec_driver_sql(
+        "INSERT OR IGNORE INTO schema_migrations(version, description, applied_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
+        (version, description),
+    )
+
+
+def _migration_create_missing_tables(conn):
+    Base.metadata.create_all(bind=conn)
+
+
+def _table_columns(conn, table_name):
+    return {row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info('{table_name}')").fetchall()}
+
+
+def _has_table(conn, table_name):
+    row = conn.exec_driver_sql(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _add_missing_columns(conn=None):
+    engine = _get_engine()
     migrations = {
+        "users": {
+            "created_at": "ALTER TABLE users ADD COLUMN created_at TEXT",
+        },
+        "currencies": {
+            "updated_at": "ALTER TABLE currencies ADD COLUMN updated_at TEXT",
+        },
         "products": {
+            "section_id": "ALTER TABLE products ADD COLUMN section_id INTEGER REFERENCES product_sections(id)",
+            "original_barcode": "ALTER TABLE products ADD COLUMN original_barcode TEXT",
             "template_id": "ALTER TABLE products ADD COLUMN template_id INTEGER REFERENCES product_templates(id)",
             "supplier_id": "ALTER TABLE products ADD COLUMN supplier_id INTEGER REFERENCES suppliers(id)",
             "price_currency": "ALTER TABLE products ADD COLUMN price_currency TEXT DEFAULT 'UZS'",
@@ -455,6 +561,59 @@ def _add_missing_columns():
             "process_customer_name": "ALTER TABLE products ADD COLUMN process_customer_name TEXT",
             "process_customer_phone": "ALTER TABLE products ADD COLUMN process_customer_phone TEXT",
             "is_deleted": "ALTER TABLE products ADD COLUMN is_deleted INTEGER DEFAULT 0",
+            "deleted_at": "ALTER TABLE products ADD COLUMN deleted_at TEXT",
+            "purge_after": "ALTER TABLE products ADD COLUMN purge_after TEXT",
+            "created_at": "ALTER TABLE products ADD COLUMN created_at TEXT",
+        },
+        "product_templates": {
+            "section_id": "ALTER TABLE product_templates ADD COLUMN section_id INTEGER REFERENCES product_sections(id)",
+            "original_name": "ALTER TABLE product_templates ADD COLUMN original_name TEXT",
+            "is_deleted": "ALTER TABLE product_templates ADD COLUMN is_deleted INTEGER DEFAULT 0",
+            "deleted_at": "ALTER TABLE product_templates ADD COLUMN deleted_at TEXT",
+            "purge_after": "ALTER TABLE product_templates ADD COLUMN purge_after TEXT",
+            "created_at": "ALTER TABLE product_templates ADD COLUMN created_at TEXT",
+        },
+        "product_sections": {
+            "original_name": "ALTER TABLE product_sections ADD COLUMN original_name TEXT",
+            "is_deleted": "ALTER TABLE product_sections ADD COLUMN is_deleted INTEGER DEFAULT 0",
+            "deleted_at": "ALTER TABLE product_sections ADD COLUMN deleted_at TEXT",
+            "purge_after": "ALTER TABLE product_sections ADD COLUMN purge_after TEXT",
+            "created_at": "ALTER TABLE product_sections ADD COLUMN created_at TEXT",
+        },
+        "product_template_fields": {
+            "field_type": "ALTER TABLE product_template_fields ADD COLUMN field_type TEXT DEFAULT 'text'",
+            "required": "ALTER TABLE product_template_fields ADD COLUMN required INTEGER DEFAULT 0",
+            "sort_order": "ALTER TABLE product_template_fields ADD COLUMN sort_order INTEGER DEFAULT 0",
+        },
+        "customers": {
+            "email": "ALTER TABLE customers ADD COLUMN email TEXT",
+            "balance": "ALTER TABLE customers ADD COLUMN balance REAL DEFAULT 0",
+            "total_purchases": "ALTER TABLE customers ADD COLUMN total_purchases REAL DEFAULT 0",
+            "created_at": "ALTER TABLE customers ADD COLUMN created_at TEXT",
+        },
+        "suppliers": {
+            "phone": "ALTER TABLE suppliers ADD COLUMN phone TEXT",
+            "note": "ALTER TABLE suppliers ADD COLUMN note TEXT",
+            "debt_currency": "ALTER TABLE suppliers ADD COLUMN debt_currency TEXT DEFAULT 'UZS'",
+            "balance": "ALTER TABLE suppliers ADD COLUMN balance REAL DEFAULT 0",
+            "total_received": "ALTER TABLE suppliers ADD COLUMN total_received REAL DEFAULT 0",
+            "created_at": "ALTER TABLE suppliers ADD COLUMN created_at TEXT",
+        },
+        "supplier_debt_movements": {
+            "note": "ALTER TABLE supplier_debt_movements ADD COLUMN note TEXT",
+            "created_at": "ALTER TABLE supplier_debt_movements ADD COLUMN created_at TEXT",
+        },
+        "debtors": {
+            "phone": "ALTER TABLE debtors ADD COLUMN phone TEXT",
+            "note": "ALTER TABLE debtors ADD COLUMN note TEXT",
+            "debt_currency": "ALTER TABLE debtors ADD COLUMN debt_currency TEXT DEFAULT 'UZS'",
+            "balance": "ALTER TABLE debtors ADD COLUMN balance REAL DEFAULT 0",
+            "total_given": "ALTER TABLE debtors ADD COLUMN total_given REAL DEFAULT 0",
+            "created_at": "ALTER TABLE debtors ADD COLUMN created_at TEXT",
+        },
+        "debtor_debt_movements": {
+            "note": "ALTER TABLE debtor_debt_movements ADD COLUMN note TEXT",
+            "created_at": "ALTER TABLE debtor_debt_movements ADD COLUMN created_at TEXT",
         },
         "sales": {
             "customer_name": "ALTER TABLE sales ADD COLUMN customer_name TEXT",
@@ -463,28 +622,137 @@ def _add_missing_columns():
             "exchange_rate": "ALTER TABLE sales ADD COLUMN exchange_rate REAL DEFAULT 1",
             "paid_original": "ALTER TABLE sales ADD COLUMN paid_original REAL DEFAULT 0",
             "change_original": "ALTER TABLE sales ADD COLUMN change_original REAL DEFAULT 0",
+            "payment_method": "ALTER TABLE sales ADD COLUMN payment_method TEXT DEFAULT 'naqd'",
+            "created_at": "ALTER TABLE sales ADD COLUMN created_at TEXT",
         },
         "sale_items": {
             "returned_quantity": "ALTER TABLE sale_items ADD COLUMN returned_quantity INTEGER DEFAULT 0",
         },
-        "suppliers": {
-            "debt_currency": "ALTER TABLE suppliers ADD COLUMN debt_currency TEXT DEFAULT 'UZS'",
+        "stock_movements": {
+            "note": "ALTER TABLE stock_movements ADD COLUMN note TEXT",
+            "created_at": "ALTER TABLE stock_movements ADD COLUMN created_at TEXT",
+        },
+        "inventory_check_sessions": {
+            "started_by": "ALTER TABLE inventory_check_sessions ADD COLUMN started_by INTEGER REFERENCES users(id)",
+            "status": "ALTER TABLE inventory_check_sessions ADD COLUMN status TEXT DEFAULT 'active'",
+            "started_at": "ALTER TABLE inventory_check_sessions ADD COLUMN started_at TEXT",
+            "finished_at": "ALTER TABLE inventory_check_sessions ADD COLUMN finished_at TEXT",
         },
         "inventory_check_items": {
             "checked_quantity": "ALTER TABLE inventory_check_items ADD COLUMN checked_quantity INTEGER DEFAULT 0",
+            "checked_at": "ALTER TABLE inventory_check_items ADD COLUMN checked_at TEXT",
         },
         "expenses": {
             "user_id": "ALTER TABLE expenses ADD COLUMN user_id INTEGER REFERENCES users(id)",
+            "currency_code": "ALTER TABLE expenses ADD COLUMN currency_code TEXT DEFAULT 'UZS'",
+            "description": "ALTER TABLE expenses ADD COLUMN description TEXT",
+            "created_at": "ALTER TABLE expenses ADD COLUMN created_at TEXT",
+        },
+        "finance_manual_movements": {
+            "currency_code": "ALTER TABLE finance_manual_movements ADD COLUMN currency_code TEXT DEFAULT 'UZS'",
+            "rate_to_uzs": "ALTER TABLE finance_manual_movements ADD COLUMN rate_to_uzs REAL DEFAULT 1",
+            "created_at": "ALTER TABLE finance_manual_movements ADD COLUMN created_at TEXT",
         },
     }
-    with engine.begin() as conn:
-        for table_name, table_migrations in migrations.items():
-            if not inspector.has_table(table_name):
+    owns_connection = conn is None
+    if owns_connection:
+        with engine.begin() as owned_conn:
+            _add_missing_columns(owned_conn)
+        return
+
+    for table_name, table_migrations in migrations.items():
+        if not _has_table(conn, table_name):
+            continue
+        columns = _table_columns(conn, table_name)
+        for column, sql in table_migrations.items():
+            if column not in columns:
+                conn.exec_driver_sql(sql)
+                columns.add(column)
+    if _has_table(conn, "product_templates"):
+        index_rows = conn.exec_driver_sql("PRAGMA index_list('product_templates')").fetchall()
+        has_global_name_unique = False
+        for index_row in index_rows:
+            index_name = index_row[1]
+            is_unique = bool(index_row[2])
+            if not is_unique:
                 continue
-            columns = {column["name"] for column in inspector.get_columns(table_name)}
-            for column, sql in table_migrations.items():
-                if column not in columns:
-                    conn.exec_driver_sql(sql)
+            columns = [row[2] for row in conn.exec_driver_sql(f"PRAGMA index_info('{index_name}')").fetchall()]
+            if columns == ["name"]:
+                has_global_name_unique = True
+                break
+        if has_global_name_unique:
+            conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+            conn.exec_driver_sql("""
+                CREATE TABLE product_templates_new (
+                    id INTEGER PRIMARY KEY,
+                    section_id INTEGER REFERENCES product_sections(id) ON DELETE CASCADE,
+                    name VARCHAR NOT NULL,
+                    original_name VARCHAR,
+                    is_deleted INTEGER DEFAULT 0,
+                    deleted_at VARCHAR,
+                    purge_after VARCHAR,
+                    created_at VARCHAR DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(section_id, name)
+                )
+            """)
+            conn.exec_driver_sql("""
+                INSERT INTO product_templates_new (
+                    id, section_id, name, original_name, is_deleted, deleted_at, purge_after, created_at
+                )
+                SELECT
+                    id,
+                    section_id,
+                    name,
+                    original_name,
+                    COALESCE(is_deleted, 0),
+                    deleted_at,
+                    purge_after,
+                    created_at
+                FROM product_templates
+            """)
+            conn.exec_driver_sql("DROP TABLE product_templates")
+            conn.exec_driver_sql("ALTER TABLE product_templates_new RENAME TO product_templates")
+            conn.exec_driver_sql("PRAGMA foreign_keys=ON")
+
+
+def _migration_add_missing_columns(conn):
+    _add_missing_columns(conn)
+
+
+MIGRATION_FUNCTIONS = {
+    "001_create_missing_tables": _migration_create_missing_tables,
+    "002_add_missing_columns": _migration_add_missing_columns,
+}
+
+
+def run_migrations():
+    engine = _get_engine()
+    with engine.begin() as conn:
+        _ensure_schema_migrations_table(conn)
+        applied = {row[0] for row in conn.exec_driver_sql("SELECT version FROM schema_migrations").fetchall()}
+        pending = [(version, description) for version, description in MIGRATIONS if version not in applied]
+        if not pending:
+            return []
+        _backup_database_before_migration(conn)
+        applied_now = []
+        for version, description in pending:
+            MIGRATION_FUNCTIONS[version](conn)
+            _mark_migration_applied(conn, version, description)
+            applied_now.append(version)
+        return applied_now
+
+
+def _default_product_section_id(session):
+    section = session.scalar(
+        select(ProductSection)
+        .where(func.coalesce(ProductSection.is_deleted, 0) == 0)
+        .order_by(ProductSection.id)
+    )
+    if section is None:
+        section = ProductSection(name="Umumiy")
+        session.add(section)
+        session.flush()
+    return section.id
 
 
 def init_db():
@@ -494,8 +762,7 @@ def init_db():
             conn.exec_driver_sql("PRAGMA journal_mode = WAL")
     except OperationalError:
         pass
-    Base.metadata.create_all(engine)
-    _add_missing_columns()
+    run_migrations()
 
     with session_scope() as session:
         admin = session.scalar(select(User).where(User.username == "admin"))
@@ -511,6 +778,12 @@ def init_db():
             if not session.scalar(select(Category).where(Category.name == name)):
                 session.add(Category(name=name))
 
+        default_section_id = _default_product_section_id(session)
+        for product in session.scalars(select(Product).where(Product.section_id.is_(None))):
+            product.section_id = default_section_id
+        for template in session.scalars(select(ProductTemplate).where(ProductTemplate.section_id.is_(None))):
+            template.section_id = default_section_id
+
         for code, name, rate, is_base in [
             ("UZS", "O'zbek so'mi", 1, 1),
             ("USD", "AQSh dollari", 12500, 0),
@@ -524,7 +797,7 @@ def init_db():
                 session.add(ExpenseCategory(name=name))
 
         if session.scalar(select(func.count(ProductTemplate.id))) == 0:
-            template = ProductTemplate(name="Umumiy mahsulot")
+            template = ProductTemplate(name="Umumiy mahsulot", section_id=default_section_id)
             session.add(template)
             session.flush()
             for order, field_name in enumerate(["Brend", "Model", "Rang"]):
@@ -572,24 +845,227 @@ def _product_select():
         select(Product, Category.name, ProductTemplate.name, Supplier.name)
         .outerjoin(Category, Product.category_id == Category.id)
         .outerjoin(ProductTemplate, Product.template_id == ProductTemplate.id)
+        .outerjoin(ProductSection, Product.section_id == ProductSection.id)
         .outerjoin(Supplier, Product.supplier_id == Supplier.id)
         .where(func.coalesce(Product.is_deleted, 0) == 0)
+        .where(or_(Product.section_id.is_(None), func.coalesce(ProductSection.is_deleted, 0) == 0))
+        .where(or_(Product.template_id.is_(None), func.coalesce(ProductTemplate.is_deleted, 0) == 0))
     )
 
 
-def get_all_products(start_date=None, end_date=None):
+def get_product_sections():
+    with session_scope() as session:
+        return _rows_from_models(
+            session.scalars(
+                select(ProductSection)
+                .where(func.coalesce(ProductSection.is_deleted, 0) == 0)
+                .order_by(ProductSection.id)
+            ).all()
+        )
+
+
+def _unique_section_name(session, desired, exclude_id=None):
+    base = (desired or "Bo'lim").strip()
+    candidate = base
+    suffix = 1
+    while session.scalar(
+        select(ProductSection.id).where(
+            ProductSection.name == candidate,
+            ProductSection.id != exclude_id if exclude_id else text("1=1"),
+        )
+    ):
+        suffix += 1
+        candidate = f"{base} ({suffix})"
+    return candidate
+
+
+def _unique_template_name(session, section_id, desired, exclude_id=None):
+    base = (desired or "Template").strip()
+    candidate = base
+    suffix = 1
+    while session.scalar(
+        select(ProductTemplate.id).where(
+            ProductTemplate.section_id == section_id,
+            ProductTemplate.name == candidate,
+            ProductTemplate.id != exclude_id if exclude_id else text("1=1"),
+        )
+    ):
+        suffix += 1
+        candidate = f"{base} ({suffix})"
+    return candidate
+
+
+def _unique_deleted_label(prefix, row_id, value):
+    clean = (value or "").strip() or "empty"
+    return f"__deleted_{prefix}_{row_id}_{clean}"
+
+
+def add_product_section(name):
+    if not name.strip():
+        raise AppError("Bo'lim nomini kiriting.")
+    try:
+        with session_scope() as session:
+            section = ProductSection(name=name.strip())
+            session.add(section)
+            session.flush()
+            return section.id
+    except IntegrityError as exc:
+        raise AppError("Bu bo'lim allaqachon mavjud.") from exc
+
+
+def update_product_section(section_id, name):
+    if not name.strip():
+        raise AppError("Bo'lim nomini kiriting.")
+    try:
+        with session_scope() as session:
+            section = session.get(ProductSection, section_id)
+            if section:
+                section.name = name.strip()
+                session.flush()
+    except IntegrityError as exc:
+        raise AppError("Bu bo'lim allaqachon mavjud.") from exc
+
+
+def delete_product_section(section_id):
+    with session_scope() as session:
+        section = session.get(ProductSection, section_id)
+        if not section or section.is_deleted:
+            return
+        now = _trash_now()
+        purge_after = _trash_purge_after()
+        section.original_name = section.original_name or section.name
+        section.name = _unique_deleted_label("section", section.id, section.name)
+        section.is_deleted = 1
+        section.deleted_at = now
+        section.purge_after = purge_after
+        template_ids = [
+            row.id for row in session.scalars(
+                select(ProductTemplate).where(ProductTemplate.section_id == section_id, func.coalesce(ProductTemplate.is_deleted, 0) == 0)
+            )
+        ]
+        for template in session.scalars(select(ProductTemplate).where(ProductTemplate.id.in_(template_ids))):
+            template.original_name = template.original_name or template.name
+            template.name = _unique_deleted_label("template", template.id, template.name)
+            template.is_deleted = 1
+            template.deleted_at = now
+            template.purge_after = purge_after
+        for product in session.scalars(select(Product).where(Product.section_id == section_id)):
+            if product.is_deleted:
+                continue
+            product.is_deleted = 1
+            product.deleted_at = now
+            product.purge_after = purge_after
+            if product.barcode:
+                product.original_barcode = product.original_barcode or product.barcode
+                product.barcode = _unique_deleted_label("barcode", product.id, product.barcode)
+
+
+def get_product_trash():
+    with session_scope() as session:
+        cutoff = _trash_now()
+        sections = session.scalars(
+            select(ProductSection)
+            .where(func.coalesce(ProductSection.is_deleted, 0) == 1)
+            .where(or_(ProductSection.purge_after.is_(None), ProductSection.purge_after >= cutoff))
+            .order_by(ProductSection.deleted_at.desc(), ProductSection.id.desc())
+        ).all()
+        products = session.execute(
+            select(Product, ProductSection.original_name, ProductSection.name, ProductSection.is_deleted)
+            .outerjoin(ProductSection, Product.section_id == ProductSection.id)
+            .where(func.coalesce(Product.is_deleted, 0) == 1)
+            .where(or_(Product.purge_after.is_(None), Product.purge_after >= cutoff))
+            .order_by(Product.deleted_at.desc(), Product.id.desc())
+        ).all()
+        return Row(dict(
+            sections=[_row_from_model(section) for section in sections],
+            products=[
+                _row_from_model(
+                    product,
+                    section_name=(section_original or section_name or ""),
+                    section_deleted=section_deleted or 0,
+                )
+                for product, section_original, section_name, section_deleted in products
+            ],
+        ))
+
+
+def restore_product_section(section_id):
+    with session_scope() as session:
+        section = session.get(ProductSection, section_id)
+        if not section or not section.is_deleted:
+            return
+        section.name = _unique_section_name(session, section.original_name or section.name, section.id)
+        section.is_deleted = 0
+        section.deleted_at = None
+        section.purge_after = None
+        section.original_name = None
+        for template in session.scalars(select(ProductTemplate).where(ProductTemplate.section_id == section_id)):
+            if not template.is_deleted:
+                continue
+            template.name = _unique_template_name(session, section_id, template.original_name or template.name, template.id)
+            template.is_deleted = 0
+            template.deleted_at = None
+            template.purge_after = None
+            template.original_name = None
+        for product in session.scalars(select(Product).where(Product.section_id == section_id)):
+            if not product.is_deleted:
+                continue
+            product.is_deleted = 0
+            product.deleted_at = None
+            product.purge_after = None
+            if product.original_barcode:
+                conflict = session.scalar(
+                    select(Product.id).where(Product.barcode == product.original_barcode, Product.id != product.id)
+                )
+                product.barcode = None if conflict else product.original_barcode
+                product.original_barcode = None
+
+
+def restore_product(product_id):
+    with session_scope() as session:
+        product = session.get(Product, product_id)
+        if not product or not product.is_deleted:
+            return
+        section = session.get(ProductSection, product.section_id) if product.section_id else None
+        if section and section.is_deleted:
+            section.name = _unique_section_name(session, section.original_name or section.name, section.id)
+            section.is_deleted = 0
+            section.deleted_at = None
+            section.purge_after = None
+            section.original_name = None
+        template = session.get(ProductTemplate, product.template_id) if product.template_id else None
+        if template and template.is_deleted:
+            template.name = _unique_template_name(session, template.section_id, template.original_name or template.name, template.id)
+            template.is_deleted = 0
+            template.deleted_at = None
+            template.purge_after = None
+            template.original_name = None
+        product.is_deleted = 0
+        product.deleted_at = None
+        product.purge_after = None
+        if product.original_barcode:
+            conflict = session.scalar(select(Product.id).where(Product.barcode == product.original_barcode, Product.id != product.id))
+            product.barcode = None if conflict else product.original_barcode
+            product.original_barcode = None
+
+
+def get_all_products(start_date=None, end_date=None, section_id=None):
     with session_scope() as session:
         stmt = _product_select()
+        if section_id is not None:
+            stmt = stmt.where(Product.section_id == section_id)
         if start_date and end_date:
             stmt = stmt.where(_date_expr(Product.created_at).between(start_date, end_date))
         rows = session.execute(stmt.order_by(Product.name)).all()
         return [_product_row(p, c, t, s) for p, c, t, s in rows]
 
 
-def search_products(query, start_date=None, end_date=None):
+def search_products(query, start_date=None, end_date=None, section_id=None):
     pattern = f"%{query}%"
     with session_scope() as session:
         stmt = _product_select().where(or_(Product.name.like(pattern), Product.barcode.like(pattern)))
+        if section_id is not None:
+            stmt = stmt.where(Product.section_id == section_id)
         if start_date and end_date:
             stmt = stmt.where(_date_expr(Product.created_at).between(start_date, end_date))
         rows = session.execute(stmt.order_by(Product.name)).all()
@@ -626,6 +1102,8 @@ def add_product(data: dict):
     fields = {column.name for column in Product.__table__.columns}
     try:
         with session_scope() as session:
+            if not data.get("section_id"):
+                data["section_id"] = _default_product_section_id(session)
             product = Product(**{k: v for k, v in data.items() if k in fields and k != "id"})
             session.add(product)
             session.flush()
@@ -651,6 +1129,11 @@ def delete_product(product_id):
         product = session.get(Product, product_id)
         if product:
             product.is_deleted = 1
+            product.deleted_at = _trash_now()
+            product.purge_after = _trash_purge_after()
+            if product.barcode:
+                product.original_barcode = product.original_barcode or product.barcode
+                product.barcode = _unique_deleted_label("barcode", product.id, product.barcode)
 
 
 def set_product_process_status(product_id, status):
@@ -767,9 +1250,12 @@ def delete_category(category_id):
             session.delete(row)
 
 
-def get_templates():
+def get_templates(section_id=None):
     with session_scope() as session:
-        return _rows_from_models(session.scalars(select(ProductTemplate).order_by(ProductTemplate.name)).all())
+        stmt = select(ProductTemplate).where(func.coalesce(ProductTemplate.is_deleted, 0) == 0)
+        if section_id is not None:
+            stmt = stmt.where(ProductTemplate.section_id == section_id)
+        return _rows_from_models(session.scalars(stmt.order_by(ProductTemplate.name)).all())
 
 
 def get_template_fields(template_id):
@@ -784,10 +1270,14 @@ def get_template_fields(template_id):
         return _rows_from_models(rows)
 
 
-def add_template(name, fields):
+def add_template(name, fields, section_id=None):
+    if not name.strip():
+        raise AppError("Template nomini kiriting.")
     try:
         with session_scope() as session:
-            template = ProductTemplate(name=name)
+            if section_id is None:
+                section_id = _default_product_section_id(session)
+            template = ProductTemplate(name=name.strip(), section_id=section_id)
             session.add(template)
             session.flush()
             for order, field in enumerate(fields):
@@ -804,11 +1294,13 @@ def add_template(name, fields):
 
 
 def update_template(template_id, name, fields):
+    if not name.strip():
+        raise AppError("Template nomini kiriting.")
     try:
         with session_scope() as session:
             template = session.get(ProductTemplate, template_id)
             if template:
-                template.name = name
+                template.name = name.strip()
             existing = session.scalars(select(ProductTemplateField).where(ProductTemplateField.template_id == template_id)).all()
             existing_by_name = {row.name.lower(): row for row in existing}
             kept_ids = []
@@ -831,12 +1323,21 @@ def update_template(template_id, name, fields):
 
 def delete_template(template_id):
     with session_scope() as session:
-        in_use = session.scalar(select(func.count(Product.id)).where(Product.template_id == template_id))
+        in_use = session.scalar(
+            select(func.count(Product.id)).where(
+                Product.template_id == template_id,
+                func.coalesce(Product.is_deleted, 0) == 0,
+            )
+        )
         if in_use:
             raise AppError("Bu template mahsulotlarda ishlatilgan, uni o'chirib bo'lmaydi.")
         row = session.get(ProductTemplate, template_id)
         if row:
-            session.delete(row)
+            row.original_name = row.original_name or row.name
+            row.name = _unique_deleted_label("template", row.id, row.name)
+            row.is_deleted = 1
+            row.deleted_at = _trash_now()
+            row.purge_after = _trash_purge_after()
 
 
 def get_product_attributes(product_id):
@@ -928,11 +1429,14 @@ def delete_currency(code):
 
 
 def add_stock(product_id, quantity, note=""):
+    if quantity <= 0:
+        raise AppError("Miqdor 0 dan katta bo'lishi kerak.")
     with session_scope() as session:
         product = session.get(Product, product_id)
-        if product:
-            product.stock = (product.stock or 0) + quantity
-            session.add(StockMovement(product_id=product_id, type="kirim", quantity=quantity, note=note))
+        if not product or product.is_deleted:
+            raise AppError("Mahsulot topilmadi.")
+        product.stock = (product.stock or 0) + quantity
+        session.add(StockMovement(product_id=product_id, type="kirim", quantity=quantity, note=note))
 
 
 def get_active_inventory_check():
@@ -971,8 +1475,19 @@ def start_inventory_check(user_id=None):
         return check.id
 
 
-def get_inventory_check_items(session_id, checked=None):
+def _apply_inventory_product_filters(stmt, section_id=None, template_id=None):
+    if section_id is not None or template_id is not None:
+        stmt = stmt.join(Product, Product.id == InventoryCheckItem.product_id)
+    if section_id is not None:
+        stmt = stmt.where(Product.section_id == section_id)
+    if template_id is not None:
+        stmt = stmt.where(Product.template_id == template_id)
+    return stmt
+
+
+def get_inventory_check_items(session_id, checked=None, section_id=None, template_id=None):
     stmt = select(InventoryCheckItem).where(InventoryCheckItem.session_id == session_id)
+    stmt = _apply_inventory_product_filters(stmt, section_id, template_id)
     if checked is True:
         stmt = stmt.where(func.coalesce(InventoryCheckItem.checked_quantity, 0) > 0)
     elif checked is False:
@@ -984,9 +1499,11 @@ def get_inventory_check_items(session_id, checked=None):
         return _rows_from_models(rows)
 
 
-def get_inventory_check_counts(session_id):
+def get_inventory_check_counts(session_id, section_id=None, template_id=None):
     with session_scope() as session:
-        items = session.scalars(select(InventoryCheckItem).where(InventoryCheckItem.session_id == session_id)).all()
+        stmt = select(InventoryCheckItem).where(InventoryCheckItem.session_id == session_id)
+        stmt = _apply_inventory_product_filters(stmt, section_id, template_id)
+        items = session.scalars(stmt).all()
         total = len(items)
         checked_count = sum(1 for item in items if item.checked_at)
         unchecked_count = sum(1 for item in items if (item.checked_quantity or 0) < (item.expected_stock or 0))
@@ -1003,7 +1520,7 @@ def get_inventory_check_counts(session_id):
         ))
 
 
-def mark_inventory_product_checked(session_id, barcode, quantity=1):
+def mark_inventory_product_checked(session_id, barcode, quantity=1, section_id=None, template_id=None):
     barcode = (barcode or "").strip()
     if not barcode:
         raise AppError("Shtrix-kodni kiriting.")
@@ -1016,6 +1533,10 @@ def mark_inventory_product_checked(session_id, barcode, quantity=1):
         product = session.scalar(select(Product).where(and_(Product.barcode == barcode, func.coalesce(Product.is_deleted, 0) == 0)))
         if not product:
             raise AppError("Bu shtrix-kodli mahsulot topilmadi.")
+        if section_id is not None and product.section_id != section_id:
+            raise AppError("Bu mahsulot tanlangan bo'limga tegishli emas.")
+        if template_id is not None and product.template_id != template_id:
+            raise AppError("Bu mahsulot tanlangan templatega tegishli emas.")
         item = session.scalar(
             select(InventoryCheckItem).where(and_(InventoryCheckItem.session_id == session_id, InventoryCheckItem.product_id == product.id))
         )
@@ -1056,14 +1577,14 @@ def create_sale(customer_id, cashier_id, items, total, discount, paid, payment_m
     if exchange_rate <= 0:
         raise AppError("Valyuta kursi noto'g'ri.")
     with session_scope() as session:
+        product_names = {}
         for item in items:
             product = session.get(Product, item["product_id"])
-            if product is None:
+            if product is None or product.is_deleted:
                 raise AppError("Savatdagi mahsulot topilmadi.")
             if item["quantity"] <= 0:
                 raise AppError("Miqdor noto'g'ri kiritilgan.")
-            if (product.stock or 0) < item["quantity"]:
-                raise AppError(f"{product.name} uchun qoldiq yetarli emas. Mavjud: {product.stock}, so'ralgan: {item['quantity']}.")
+            product_names[product.id] = product.name
         payable = total - discount
         change = max(0, paid - payable)
         paid_original = paid_original if paid_original is not None else paid / exchange_rate
@@ -1092,16 +1613,34 @@ def create_sale(customer_id, cashier_id, items, total, discount, paid, payment_m
         session.add(sale)
         session.flush()
         for item in items:
+            product_id = item["product_id"]
+            quantity = item["quantity"]
+            result = session.execute(
+                update(Product)
+                .where(
+                    Product.id == product_id,
+                    func.coalesce(Product.is_deleted, 0) == 0,
+                    (func.coalesce(Product.stock, 0) - func.coalesce(Product.process_quantity, 0)) >= quantity,
+                )
+                .values(stock=Product.stock - quantity)
+            )
+            if result.rowcount != 1:
+                current_stock, process_quantity = session.execute(
+                    select(Product.stock, Product.process_quantity).where(Product.id == product_id)
+                ).first() or (0, 0)
+                available_stock = max((current_stock or 0) - (process_quantity or 0), 0)
+                product_name = product_names.get(product_id, "Mahsulot")
+                raise AppError(
+                    f"{product_name} uchun qoldiq yetarli emas. Mavjud: {available_stock}, so'ralgan: {quantity}."
+                )
             session.add(SaleItem(
                 sale_id=sale.id,
-                product_id=item["product_id"],
-                quantity=item["quantity"],
+                product_id=product_id,
+                quantity=quantity,
                 price=item["price"],
                 subtotal=item["subtotal"],
             ))
-            product = session.get(Product, item["product_id"])
-            product.stock = (product.stock or 0) - item["quantity"]
-            session.add(StockMovement(product_id=product.id, type="sotuv", quantity=-item["quantity"], note=f"Sotuv #{sale.id}"))
+            session.add(StockMovement(product_id=product_id, type="sotuv", quantity=-quantity, note=f"Sotuv #{sale.id}"))
         if customer_id:
             customer = session.get(Customer, customer_id)
             if customer:
@@ -1163,6 +1702,7 @@ def get_product_sales_archive(query="", start_date=None, end_date=None):
                 product_id=item.product_id,
                 product_name=product.name,
                 barcode=product.barcode,
+                section_id=product.section_id,
                 template_id=product.template_id,
                 supplier_id=product.supplier_id,
                 quantity=item.quantity,
@@ -1620,13 +2160,41 @@ def get_cashier_sold_items(date_str, cashier_id=None):
         return sorted(grouped.values(), key=lambda r: r["revenue"], reverse=True)
 
 
-def get_overall_period_series(start_date, end_date):
+def _sale_section_totals(session, sale_id, section_id):
+    stmt = (
+        select(SaleItem, Product)
+        .select_from(SaleItem)
+        .join(Product, Product.id == SaleItem.product_id)
+        .where(SaleItem.sale_id == sale_id, Product.section_id == section_id)
+    )
+    totals = Row(dict(sales_count=0, product_count=0, revenue=0, profit=0))
+    for item, product in session.execute(stmt).all():
+        qty = (item.quantity or 0) - (item.returned_quantity or 0)
+        if qty <= 0:
+            continue
+        revenue = qty * (item.price or 0)
+        totals["product_count"] += qty
+        totals["revenue"] += revenue
+        totals["profit"] += revenue - (qty * (product.cost or 0))
+    if totals["revenue"] > 0:
+        totals["sales_count"] = 1
+    return totals
+
+
+def get_overall_period_series(start_date, end_date, section_id=None):
     with session_scope() as session:
         sales = session.scalars(select(Sale).where(_date_expr(Sale.created_at).between(start_date, end_date))).all()
         grouped = {}
         for sale in sales:
             label = _local_date_label(sale.created_at)
             row = grouped.setdefault(label, Row(dict(label=label, sales_count=0, product_count=0, revenue=0, profit=0)))
+            if section_id:
+                totals = _sale_section_totals(session, sale.id, section_id)
+                row["sales_count"] += totals["sales_count"]
+                row["product_count"] += totals["product_count"]
+                row["revenue"] += totals["revenue"]
+                row["profit"] += totals["profit"]
+                continue
             revenue = _sale_revenue(sale)
             if revenue > 0:
                 row["sales_count"] += 1
@@ -1636,13 +2204,20 @@ def get_overall_period_series(start_date, end_date):
         return [grouped[key] for key in sorted(grouped)]
 
 
-def get_overall_day_hourly_series(date_str):
+def get_overall_day_hourly_series(date_str, section_id=None):
     with session_scope() as session:
         sales = session.scalars(select(Sale).where(_date_expr(Sale.created_at) == date_str)).all()
         grouped = {}
         for sale in sales:
             label = _local_hour_label(sale.created_at)
             row = grouped.setdefault(label, Row(dict(label=label, sales_count=0, product_count=0, revenue=0, profit=0)))
+            if section_id:
+                totals = _sale_section_totals(session, sale.id, section_id)
+                row["sales_count"] += totals["sales_count"]
+                row["product_count"] += totals["product_count"]
+                row["revenue"] += totals["revenue"]
+                row["profit"] += totals["profit"]
+                continue
             revenue = _sale_revenue(sale)
             if revenue > 0:
                 row["sales_count"] += 1
@@ -1652,7 +2227,7 @@ def get_overall_day_hourly_series(date_str):
         return [grouped[key] for key in sorted(grouped)]
 
 
-def get_cashier_period_summary(start_date, end_date):
+def get_cashier_period_summary(start_date, end_date, section_id=None):
     with session_scope() as session:
         users = session.scalars(select(User).order_by(User.username)).all()
         rows = []
@@ -1660,6 +2235,13 @@ def get_cashier_period_summary(start_date, end_date):
             sales = session.scalars(select(Sale).where(and_(Sale.cashier_id == user.id, _date_expr(Sale.created_at).between(start_date, end_date)))).all()
             row = Row(dict(entity_id=user.id, entity_name=user.username, sales_count=0, product_count=0, revenue=0, profit=0))
             for sale in sales:
+                if section_id:
+                    totals = _sale_section_totals(session, sale.id, section_id)
+                    row["sales_count"] += totals["sales_count"]
+                    row["product_count"] += totals["product_count"]
+                    row["revenue"] += totals["revenue"]
+                    row["profit"] += totals["profit"]
+                    continue
                 revenue = _sale_revenue(sale)
                 if revenue > 0:
                     row["sales_count"] += 1
@@ -1688,7 +2270,7 @@ def get_customer_period_summary(start_date, end_date):
         return sorted(rows, key=lambda r: (-r["revenue"], r["entity_name"]))
 
 
-def get_entity_period_series(entity_type, entity_id, start_date, end_date):
+def get_entity_period_series(entity_type, entity_id, start_date, end_date, section_id=None):
     if entity_type not in ("cashier", "customer"):
         raise AppError("Hisobot turi noto'g'ri.")
     column = Sale.cashier_id if entity_type == "cashier" else Sale.customer_id
@@ -1698,6 +2280,13 @@ def get_entity_period_series(entity_type, entity_id, start_date, end_date):
         for sale in sales:
             label = _local_date_label(sale.created_at)
             row = grouped.setdefault(label, Row(dict(label=label, sales_count=0, product_count=0, revenue=0, profit=0)))
+            if section_id:
+                totals = _sale_section_totals(session, sale.id, section_id)
+                row["sales_count"] += totals["sales_count"]
+                row["product_count"] += totals["product_count"]
+                row["revenue"] += totals["revenue"]
+                row["profit"] += totals["profit"]
+                continue
             revenue = _sale_revenue(sale)
             if revenue > 0:
                 row["sales_count"] += 1
@@ -1707,7 +2296,7 @@ def get_entity_period_series(entity_type, entity_id, start_date, end_date):
         return [grouped[key] for key in sorted(grouped)]
 
 
-def get_entity_day_hourly_series(entity_type, entity_id, date_str):
+def get_entity_day_hourly_series(entity_type, entity_id, date_str, section_id=None):
     if entity_type not in ("cashier", "customer"):
         raise AppError("Hisobot turi noto'g'ri.")
     column = Sale.cashier_id if entity_type == "cashier" else Sale.customer_id
@@ -1717,6 +2306,13 @@ def get_entity_day_hourly_series(entity_type, entity_id, date_str):
         for sale in sales:
             label = _local_hour_label(sale.created_at)
             row = grouped.setdefault(label, Row(dict(label=label, sales_count=0, product_count=0, revenue=0, profit=0)))
+            if section_id:
+                totals = _sale_section_totals(session, sale.id, section_id)
+                row["sales_count"] += totals["sales_count"]
+                row["product_count"] += totals["product_count"]
+                row["revenue"] += totals["revenue"]
+                row["profit"] += totals["profit"]
+                continue
             revenue = _sale_revenue(sale)
             if revenue > 0:
                 row["sales_count"] += 1
@@ -2028,6 +2624,66 @@ def log_login(user):
         session.add(LoginLog(user_id=user["id"], username=user["username"], role=user["role"], logged_at=_utc_now()))
 
 
+def touch_user_activity(user_id):
+    if not user_id:
+        return
+    with session_scope() as session:
+        user = session.get(User, user_id)
+        if not user:
+            return
+        row = session.get(UserSetting, {"user_id": user_id, "key": "last_activity_utc"}) or UserSetting(user_id=user_id, key="last_activity_utc")
+        row.value = _utc_now()
+        session.merge(row)
+
+
+def clear_user_activity(user_id):
+    if not user_id:
+        return
+    with session_scope() as session:
+        row = session.get(UserSetting, {"user_id": user_id, "key": "last_activity_utc"})
+        if row:
+            session.delete(row)
+
+
+def get_recent_activity_user(max_minutes=15):
+    with session_scope() as session:
+        latest = session.scalar(
+            select(UserSetting)
+            .where(UserSetting.key == "last_activity_utc")
+            .order_by(UserSetting.value.desc())
+            .limit(1)
+        )
+        if not latest or not latest.user_id or not latest.value:
+            return None
+        try:
+            activity_at = datetime.strptime(str(latest.value), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+        if datetime.now(timezone.utc) - activity_at > timedelta(minutes=max_minutes):
+            return None
+        user = session.get(User, latest.user_id)
+        if not user:
+            return None
+        return _row_from_model(user)
+
+
+def get_recent_login_user(max_minutes=15):
+    with session_scope() as session:
+        latest = session.scalar(select(LoginLog).order_by(LoginLog.logged_at.desc(), LoginLog.id.desc()).limit(1))
+        if not latest or not latest.user_id or not latest.logged_at:
+            return None
+        try:
+            logged_at = datetime.strptime(str(latest.logged_at), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+        if datetime.now(timezone.utc) - logged_at > timedelta(minutes=max_minutes):
+            return None
+        user = session.get(User, latest.user_id)
+        if not user:
+            return None
+        return _row_from_model(user)
+
+
 def get_login_logs(limit=500):
     with session_scope() as session:
         rows = _rows_from_models(
@@ -2077,6 +2733,9 @@ def update_user(user_id, username, password=None, role="cashier"):
                 user.role = role
                 if password:
                     user.password = _hash_password(password)
+                    activity = session.get(UserSetting, {"user_id": user_id, "key": "last_activity_utc"})
+                    if activity:
+                        session.delete(activity)
                 session.flush()
         except IntegrityError as exc:
             raise AppError("Bu username allaqachon mavjud.") from exc

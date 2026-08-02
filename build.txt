@@ -1,0 +1,1 @@
+pyinstaller --noconfirm --clean --onedir --windowed --name "MarketStore-POS" --icon "images\desktop_icon.ico" --add-data "images;images" main.py

@@ -62,11 +62,17 @@ class FinanceChart(QWidget):
         painter.drawText(rect.left(), rect.top(), rect.width(), 22, Qt.AlignmentFlag.AlignCenter, self.title)
 
         visible_points = self._visible_points()
-        values = [value for _, value in visible_points]
+        values = [value or 0 for _, value in visible_points]
         max_value = max(values) if values else 0
-        if max_value <= 0:
-            max_value = 1
-        y_labels = [f"{max_value - (step / 5) * max_value:,.0f}" for step in range(6)]
+        min_value = min(values) if values else 0
+        if min_value > 0:
+            min_value = 0
+        if max_value < 0:
+            max_value = 0
+        if max_value == min_value:
+            max_value = min_value + 1
+        value_span = max_value - min_value
+        y_labels = [f"{max_value - (step / 5) * value_span:,.0f}" for step in range(6)]
         painter.setFont(QFont("Segoe UI", 8))
         label_width = max(painter.fontMetrics().horizontalAdvance(label) for label in y_labels) + 12
         left_margin = max(58, min(label_width + 12, max(90, rect.width() // 3)))
@@ -90,10 +96,14 @@ class FinanceChart(QWidget):
         plotted = []
         for index, (_, value) in enumerate(visible_points):
             x = chart.left() + (index / count) * chart.width()
-            y = chart.bottom() - (value / max_value) * chart.height()
+            safe_value = value or 0
+            y = chart.bottom() - ((safe_value - min_value) / value_span) * chart.height()
+            y = max(chart.top(), min(chart.bottom(), y))
             plotted.append(QPointF(x, y))
 
         color = QColor("#2563eb")
+        painter.save()
+        painter.setClipRect(chart.adjusted(-6, -6, 6, 6))
         painter.setPen(QPen(color, 3))
         for index in range(1, len(plotted)):
             painter.drawLine(plotted[index - 1], plotted[index])
@@ -101,6 +111,7 @@ class FinanceChart(QWidget):
         painter.setPen(QPen(QColor("white"), 2))
         for point in plotted:
             painter.drawEllipse(point, 4.5, 4.5)
+        painter.restore()
 
         painter.setPen(QColor("#475569"))
         painter.setFont(QFont("Segoe UI", 7))
@@ -441,13 +452,7 @@ class FinanceWidget(QWidget):
 
         self._loading = False
         self.chart.setProperty("app_language", self.language)
-        self.chart.set_points(
-            [
-                (self._display_date(row["label"], short=True), self._finance_chart_value(row, template_columns))
-                for row in chart_rows
-            ],
-            t("Summa grafigi", self.language),
-        )
+        self.chart.set_points(self._finance_chart_points(chart_rows, template_columns), t("Summa grafigi", self.language))
         set_language(self, self.language)
         if self.theme:
             self.apply_theme(self.theme)
@@ -749,7 +754,31 @@ class FinanceWidget(QWidget):
             row_start = today
         if row_start > today:
             return 0
+        if not self._row_has_activity(row):
+            return 0
         return self._display_value(self._row_total(row, template_columns))
+
+    def _finance_chart_points(self, rows, template_columns):
+        values = [self._finance_chart_value(row, template_columns) for row in rows]
+        if (self.period_combo.currentData() or "day") == "day":
+            active_indexes = [index for index, value in enumerate(values) if value != 0]
+            for left, right in zip(active_indexes, active_indexes[1:]):
+                if right - left <= 1:
+                    continue
+                span = right - left
+                for index in range(left + 1, right):
+                    label = str(rows[index]["label"])
+                    try:
+                        if date.fromisoformat(label) > date.today():
+                            continue
+                    except ValueError:
+                        pass
+                    ratio = (index - left) / span
+                    values[index] = values[left] + (values[right] - values[left]) * ratio
+        return [
+            (self._display_date(row["label"], short=True), values[index])
+            for index, row in enumerate(rows)
+        ]
 
     def _daily_row_total(self, row, template_columns):
         return (

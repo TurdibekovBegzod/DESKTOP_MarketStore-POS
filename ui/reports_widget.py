@@ -49,17 +49,12 @@ class LineChart(QWidget):
         painter.setFont(QFont("Segoe UI", 11, QFont.Weight.Normal))
         painter.drawText(rect.left(), rect.top(), rect.width(), 24, Qt.AlignmentFlag.AlignCenter, self.title)
 
-        chart = rect.adjusted(54, 38, -14, -92)
-        painter.setPen(QPen(QColor("#d9d9d9"), 1))
         grid_lines = 5
-        for step in range(grid_lines + 1):
-            y = chart.top() + (step / grid_lines) * chart.height()
-            painter.drawLine(chart.left(), int(y), chart.right(), int(y))
-
         chart_series = self._visible_series()
         all_points = [point for series in chart_series for point in series["points"]]
 
         if not all_points:
+            chart = rect.adjusted(54, 38, -14, -92)
             painter.setPen(QColor("#94a3b8"))
             painter.drawText(chart, Qt.AlignmentFlag.AlignCenter, "Ma'lumot yo'q")
             return
@@ -73,12 +68,27 @@ class LineChart(QWidget):
             min_value = 0
         value_range = (max_value - min_value) or 1
 
-        painter.setPen(QColor("#4b5563"))
         painter.setFont(QFont("Segoe UI", 8))
+        y_axis_labels = [f"{max_value - (step / grid_lines) * value_range:,.0f}" for step in range(grid_lines + 1)]
+        y_label_width = max(painter.fontMetrics().horizontalAdvance(label) for label in y_axis_labels)
+        chart = rect.adjusted(y_label_width + 18, 38, -14, -92)
+
+        painter.setPen(QPen(QColor("#d9d9d9"), 1))
         for step in range(grid_lines + 1):
-            value = max_value - (step / grid_lines) * value_range
             y = chart.top() + (step / grid_lines) * chart.height()
-            painter.drawText(chart.left() - 58, int(y) - 8, 50, 16, Qt.AlignmentFlag.AlignRight, f"{value:,.0f}")
+            painter.drawLine(chart.left(), int(y), chart.right(), int(y))
+
+        painter.setPen(QColor("#4b5563"))
+        for step in range(grid_lines + 1):
+            y = chart.top() + (step / grid_lines) * chart.height()
+            painter.drawText(
+                chart.left() - y_label_width - 8,
+                int(y) - 8,
+                y_label_width,
+                16,
+                Qt.AlignmentFlag.AlignRight,
+                y_axis_labels[step],
+            )
 
         plotted_by_series = []
         for item in chart_series:
@@ -238,7 +248,7 @@ class ReportsWidget(QWidget):
         self.period_combo.addItem("Oylik", "month")
         self.period_combo.addItem("Yillik", "year")
         self.period_combo.setStyleSheet("border:1px solid #d1d5db;border-radius:6px;padding:6px 10px;background:white;")
-        self.period_combo.currentIndexChanged.connect(self.load_data)
+        self.period_combo.currentIndexChanged.connect(self._period_changed)
 
         self.period_range_lbl = QLabel("")
         self.period_range_lbl.setObjectName("period_range_lbl")
@@ -256,6 +266,13 @@ class ReportsWidget(QWidget):
         self.today_btn.setMinimumWidth(82)
         self.today_btn.setStyleSheet(self._toggle_style())
         self.today_btn.clicked.connect(lambda: self.date_edit.setDate(QDate.currentDate()))
+        self.section_lbl = QLabel("Bo'lim:")
+        self.section_lbl.setStyleSheet("color:#64748b;font-size:12px;font-weight:bold;")
+        self.section_combo = QComboBox()
+        self.section_combo.setFixedHeight(34)
+        self.section_combo.setMinimumWidth(180)
+        self._load_section_combo()
+        self.section_combo.currentIndexChanged.connect(self.load_data)
         self.report_currency_combo = QComboBox()
         self.report_currency_combo.setFixedHeight(34)
         self.report_currency_combo.setMinimumWidth(92)
@@ -382,6 +399,8 @@ class ReportsWidget(QWidget):
 
         period_controls = QHBoxLayout()
         period_controls.setSpacing(8)
+        period_controls.addWidget(self.section_lbl)
+        period_controls.addWidget(self.section_combo)
         period_controls.addStretch()
         period_controls.addWidget(self.prev_period_btn)
         period_controls.addWidget(self.date_lbl)
@@ -389,7 +408,7 @@ class ReportsWidget(QWidget):
         period_controls.addWidget(self.period_combo)
         period_controls.addWidget(self.next_period_btn)
         period_controls.addWidget(self.today_btn)
-        period_controls.addWidget(self.report_currency_combo)
+        period_controls.addWidget(self.report_currency_combo, 0, Qt.AlignmentFlag.AlignTop)
         period_controls.addWidget(self.period_range_lbl)
         period_controls.addStretch()
         chart_layout.addLayout(period_controls)
@@ -398,7 +417,7 @@ class ReportsWidget(QWidget):
 
         self.overall_rows = []
         self._sync_buttons()
-        self.load_data()
+        self._period_changed()
 
     def apply_theme(self, theme):
         self.setStyleSheet(f"background:{theme['content']};")
@@ -422,7 +441,10 @@ class ReportsWidget(QWidget):
         self.date_edit.setStyleSheet(field_style)
         self.period_combo.setMinimumHeight(38)
         self.period_combo.setStyleSheet(field_style)
-        self.report_currency_combo.setMinimumHeight(38)
+        self.section_combo.setFixedHeight(34)
+        self.section_combo.setStyleSheet(field_style)
+        self.section_lbl.setStyleSheet(f"color:{theme['muted']};font-size:12px;font-weight:bold;")
+        self.report_currency_combo.setFixedHeight(34)
         self.report_currency_combo.setStyleSheet(field_style)
         self.period_range_lbl.setStyleSheet(f"color:{theme['muted']};font-size:12px;font-weight:bold;background:transparent;border:none;")
 
@@ -465,28 +487,29 @@ class ReportsWidget(QWidget):
     def load_data(self):
         start_date, end_date = self._date_range()
         period = self.period_combo.currentData()
+        section_id = self._selected_section_id()
         if self.isVisible():
             self._async_loader.start(
-                lambda: self._fetch_report_data(start_date, end_date, period),
+                lambda: self._fetch_report_data(start_date, end_date, period, section_id),
                 self._apply_loaded_data,
             )
             return
-        self._apply_loaded_data(self._fetch_report_data(start_date, end_date, period))
+        self._apply_loaded_data(self._fetch_report_data(start_date, end_date, period, section_id))
 
-    def _fetch_report_data(self, start_date, end_date, period):
+    def _fetch_report_data(self, start_date, end_date, period, section_id=None):
         if period == "day":
-            rows = db.get_overall_day_hourly_series(start_date)
-            expense_rows = db.get_expense_hourly_report(start_date)
+            rows = db.get_overall_day_hourly_series(start_date, section_id)
+            expense_rows = [] if section_id else db.get_expense_hourly_report(start_date)
         else:
-            rows = db.get_overall_period_series(start_date, end_date)
-            if period == "year":
-                rows = self._aggregate_monthly(rows)
-            expense_rows = db.get_expense_report(start_date, end_date)
+            rows = db.get_overall_period_series(start_date, end_date, section_id)
+            expense_rows = [] if section_id else db.get_expense_report(start_date, end_date)
         return {
             "start_date": start_date,
             "end_date": end_date,
+            "section_id": section_id,
             "rows": rows,
             "expense_rows": expense_rows,
+            "sections": [dict(section) for section in db.get_product_sections()],
             "currencies": [dict(currency) for currency in db.get_currencies()],
         }
 
@@ -494,6 +517,7 @@ class ReportsWidget(QWidget):
         start_date = data["start_date"]
         end_date = data["end_date"]
         self._update_period_range_label(start_date, end_date)
+        self._load_section_combo(data.get("sections"))
         self._load_report_currency_combo(data["currencies"])
         filled = self._with_net_profit_from_expenses(
             self._filled_series(data["rows"], start_date, end_date),
@@ -540,7 +564,7 @@ class ReportsWidget(QWidget):
 
     def _load_entities(self, start_date, end_date):
         current = self.selected_entity_id
-        rows = db.get_cashier_period_summary(start_date, end_date)
+        rows = db.get_cashier_period_summary(start_date, end_date, self._selected_section_id())
         title = "Kassirlar hisoboti"
         self.detail_chart.title = title
         self.entity_table.blockSignals(True)
@@ -573,7 +597,8 @@ class ReportsWidget(QWidget):
             return
         start_date, end_date = self._date_range()
         rows = self._entity_series(self.detail_mode, self.selected_entity_id, start_date, end_date)
-        filled = self._with_entity_net_profit(self._filled_series(rows, start_date, end_date), start_date, end_date)
+        filled_rows = self._filled_series(rows, start_date, end_date)
+        filled = filled_rows if self._selected_section_id() else self._with_entity_net_profit(filled_rows, start_date, end_date)
         label = self.entity_table.item(self.entity_table.currentRow(), 0).text()
         titles = {
             "all": "barcha ko'rsatkichlar",
@@ -587,12 +612,13 @@ class ReportsWidget(QWidget):
         self._set_chart_data(self.detail_chart, filled, self.detail_metric)
 
     def _set_chart_data(self, chart, rows, metric):
+        chart_rows = self._smooth_chart_rows(rows)
         if metric == "all":
             chart.set_series([
                 {
                     "label": label,
                     "color": color,
-                    "points": [(row.get("display_label") or row["label"][5:], self._metric_value(row, key)) for row in rows],
+                    "points": [(row.get("display_label") or row["label"][5:], self._metric_value(row, key)) for row in chart_rows],
                 }
                 for key, label, color in self._chart_metrics()
             ])
@@ -600,10 +626,31 @@ class ReportsWidget(QWidget):
 
         chart.color = self._metric_color(metric)
         points = []
-        for row in rows:
+        for row in chart_rows:
             value = self._metric_value(row, metric)
             points.append((row.get("display_label") or row["label"][5:], value))
         chart.set_data(points)
+
+    def _smooth_chart_rows(self, rows):
+        chart_rows = [dict(row) for row in rows]
+        metric_keys = ("sales_count", "product_count", "revenue", "profit", "expense", "net_profit")
+        for key in metric_keys:
+            active_indexes = [
+                index for index, row in enumerate(chart_rows)
+                if (row.get(key, 0) or 0) != 0
+            ]
+            for left, right in zip(active_indexes, active_indexes[1:]):
+                if right - left <= 1:
+                    continue
+                start_value = chart_rows[left].get(key, 0) or 0
+                end_value = chart_rows[right].get(key, 0) or 0
+                span = right - left
+                for index in range(left + 1, right):
+                    if (chart_rows[index].get(key, 0) or 0) != 0:
+                        continue
+                    ratio = (index - left) / span
+                    chart_rows[index][key] = start_value + (end_value - start_value) * ratio
+        return chart_rows
 
     def _metric_value(self, row, metric):
         if metric == "net_profit":
@@ -618,6 +665,9 @@ class ReportsWidget(QWidget):
 
     def _selected_report_currency(self):
         return self.report_currency_combo.currentData() or {"code": "UZS", "rate_to_uzs": 1}
+
+    def _selected_section_id(self):
+        return self.section_combo.currentData() if hasattr(self, "section_combo") else None
 
     def _converted_money(self, value):
         currency = self._selected_report_currency()
@@ -650,6 +700,22 @@ class ReportsWidget(QWidget):
                 self.report_currency_combo.setCurrentIndex(index)
         self.report_currency_combo.blockSignals(False)
 
+    def _load_section_combo(self, sections=None):
+        if not hasattr(self, "section_combo"):
+            return
+        current = self.section_combo.currentData()
+        language = self.property("app_language") or "uz"
+        self.section_combo.blockSignals(True)
+        self.section_combo.clear()
+        self.section_combo.addItem(t("Barcha bo'limlar", language), None)
+        for section in sections if sections is not None else db.get_product_sections():
+            self.section_combo.addItem(section["name"], section["id"])
+        if current is not None:
+            index = self.section_combo.findData(current)
+            if index >= 0:
+                self.section_combo.setCurrentIndex(index)
+        self.section_combo.blockSignals(False)
+
     def _chart_metrics(self):
         return [
             ("revenue", "Daromad", self._metric_color("revenue")),
@@ -673,20 +739,21 @@ class ReportsWidget(QWidget):
         selected = self.date_edit.date().toPyDate()
         period = self.period_combo.currentData()
         if period == "day":
-            start = selected
-            end = selected
-        elif period == "year":
-            start = selected.replace(month=1, day=1)
-            end = selected.replace(month=12, day=31)
+            start = end = selected
+        elif period == "week":
+            start = selected - timedelta(days=selected.weekday())
+            end = start + timedelta(days=6)
         elif period == "month":
             start = selected.replace(day=1)
             if selected.month == 12:
                 end = selected.replace(year=selected.year + 1, month=1, day=1) - timedelta(days=1)
             else:
                 end = selected.replace(month=selected.month + 1, day=1) - timedelta(days=1)
+        elif period == "year":
+            start = selected.replace(month=1, day=1)
+            end = selected.replace(month=12, day=31)
         else:
-            start = selected - timedelta(days=selected.weekday())
-            end = start + timedelta(days=6)
+            start = end = selected
         return start.isoformat(), end.isoformat()
 
     def _update_period_range_label(self, start_date, end_date):
@@ -700,61 +767,119 @@ class ReportsWidget(QWidget):
         elif period == "year":
             text = start.strftime("%Y")
         else:
-            text = f"{start.strftime('%d.%m')} - {end.strftime('%d.%m.%Y')}"
+            text = start.strftime("%m.%Y")
         self.period_range_lbl.setText(text)
 
     def _filled_series(self, rows, start_date, end_date):
-        by_label = {row["label"]: dict(row) for row in rows}
-        if self.period_combo.currentData() == "day":
-            filled = []
-            for hour in range(24):
-                label = f"{hour:02d}:00"
-                row = by_label.get(label, {
-                    "label": label,
-                    "sales_count": 0,
-                    "product_count": 0,
-                    "revenue": 0,
-                    "profit": 0,
-                })
-                row["display_label"] = label
-                filled.append(row)
-            return filled
-
-        if self.period_combo.currentData() == "year":
-            year = date.fromisoformat(start_date).year
-            filled = []
-            for month in range(1, 13):
-                label = f"{year}-{month:02d}"
-                row = by_label.get(label, {
-                    "label": label,
-                    "sales_count": 0,
-                    "product_count": 0,
-                    "revenue": 0,
-                    "profit": 0,
-                })
-                row["display_label"] = self._month_label(month)
-                filled.append(row)
-            return filled
-
-        current = date.fromisoformat(start_date)
-        end = date.fromisoformat(end_date)
-        filled = []
-        while current <= end:
-            label = current.isoformat()
-            row = by_label.get(label, {
-                "label": label,
-                "sales_count": 0,
-                "product_count": 0,
-                "revenue": 0,
-                "profit": 0,
-            })
-            if self.period_combo.currentData() == "week":
-                row["display_label"] = f"{self._weekday_label(current.weekday())} {current.strftime('%d.%m')}"
+        period = self.period_combo.currentData()
+        grouped = {}
+        for raw in rows:
+            row = dict(raw)
+            if period == "day":
+                key = row.get("label")
+                if not key:
+                    continue
             else:
-                row["display_label"] = f"{current.day:02d}"
+                try:
+                    row_date = date.fromisoformat(row["label"])
+                except (TypeError, ValueError):
+                    continue
+                key = self._period_key(row_date, period)
+            item = grouped.setdefault(key, self._empty_report_row(key))
+            item["sales_count"] += row.get("sales_count", 0) or 0
+            item["product_count"] += row.get("product_count", 0) or 0
+            item["revenue"] += row.get("revenue", 0) or 0
+            item["profit"] += row.get("profit", 0) or 0
+
+        filled = []
+        for key in self._period_keys(start_date, end_date, period):
+            row = grouped.get(key, self._empty_report_row(key))
+            row["display_label"] = self._period_display_label(key, period)
             filled.append(row)
-            current += timedelta(days=1)
         return filled
+
+    def _empty_report_row(self, label):
+        return {
+            "label": label,
+            "sales_count": 0,
+            "product_count": 0,
+            "revenue": 0,
+            "profit": 0,
+        }
+
+    def _period_keys(self, start_date, end_date, period):
+        start = date.fromisoformat(start_date)
+        end = date.fromisoformat(end_date)
+        keys = []
+        if period == "day":
+            return [f"{hour:02d}:00" for hour in range(24)]
+        if period == "week":
+            current = start
+            while current <= end:
+                keys.append(current.isoformat())
+                current += timedelta(days=1)
+            return keys
+        if period == "month":
+            current = start
+            while current <= end:
+                keys.append(current.isoformat())
+                current += timedelta(days=1)
+            return keys
+        if period == "year":
+            current = start.replace(month=1, day=1)
+            while current <= end:
+                keys.append(current.strftime("%Y-%m"))
+                current = current.replace(year=current.year + 1, month=1, day=1) if current.month == 12 else current.replace(month=current.month + 1, day=1)
+            return keys
+        current = start
+        while current <= end:
+            keys.append(current.isoformat())
+            current += timedelta(days=1)
+        return keys
+
+    def _period_key(self, value, period):
+        if period == "year":
+            return value.strftime("%Y-%m")
+        if period in ("week", "month"):
+            return value.isoformat()
+        if period == "day":
+            return str(value)
+        return value.isoformat()
+
+    def _expense_period_key(self, label, period):
+        if period == "day":
+            return label
+        row_date = date.fromisoformat(label)
+        if period == "year":
+            return row_date.strftime("%Y-%m")
+        if period in ("week", "month"):
+            return row_date.isoformat()
+        return row_date.isoformat()
+
+    def _entity_rows(self, entity_type, entity_id, start_date, end_date):
+        section_id = self._selected_section_id()
+        if self.period_combo.currentData() == "day":
+            return db.get_entity_day_hourly_series(entity_type, entity_id, start_date, section_id)
+        return db.get_entity_period_series(entity_type, entity_id, start_date, end_date, section_id)
+
+    def _expense_rows(self, start_date, end_date, user_id=None, include_unassigned=False):
+        if self.period_combo.currentData() == "day":
+            return db.get_expense_hourly_report(start_date, user_id=user_id, include_unassigned=include_unassigned)
+        return db.get_expense_report(start_date, end_date, user_id=user_id, include_unassigned=include_unassigned)
+
+    def _period_display_label(self, key, period):
+        if period == "day":
+            return key
+        if period in ("week", "month"):
+            item = date.fromisoformat(key)
+            if period == "week":
+                return f"{self._weekday_label(item.weekday())} {item.strftime('%d.%m')}"
+            return item.strftime("%d.%m")
+        if period == "year":
+            item = date.fromisoformat(f"{key}-01")
+            return self._month_label(item.month)
+        item = date.fromisoformat(key)
+        return item.strftime("%d.%m")
 
     def _weekday_label(self, weekday):
         language = self.property("app_language") or "uz"
@@ -775,7 +900,7 @@ class ReportsWidget(QWidget):
         return labels.get(language, labels["uz"])[month - 1]
 
     def _with_net_profit(self, rows, start_date, end_date):
-        expenses = self._expense_totals_by_date(start_date, end_date)
+        expenses = self._expense_totals_by_period(start_date, end_date)
         for row in rows:
             row["expense"] = expenses.get(row["label"], 0)
             row["net_profit"] = (row["profit"] or 0) - row["expense"]
@@ -785,7 +910,10 @@ class ReportsWidget(QWidget):
         rates = {currency["code"]: currency["rate_to_uzs"] or 1 for currency in currencies}
         totals = {}
         for expense in expense_rows:
-            label = expense["label"][:7] if self.period_combo.currentData() == "year" else expense["label"]
+            try:
+                label = self._expense_period_key(expense["label"], self.period_combo.currentData())
+            except (TypeError, ValueError):
+                continue
             currency = expense["currency_code"] or "UZS"
             totals[label] = totals.get(label, 0) + (expense["amount"] or 0) * (rates.get(currency, 1) or 1)
         for row in rows:
@@ -796,7 +924,7 @@ class ReportsWidget(QWidget):
     def _with_entity_net_profit(self, rows, start_date, end_date):
         entity = self._selected_entity()
         if entity and entity.get("role") == "admin":
-            expenses = self._expense_totals_by_date(start_date, end_date, user_id=entity["id"], include_unassigned=True)
+            expenses = self._expense_totals_by_period(start_date, end_date, user_id=entity["id"], include_unassigned=True)
             for row in rows:
                 row["expense"] = expenses.get(row["label"], 0)
                 row["net_profit"] = (row["profit"] or 0) - row["expense"]
@@ -806,16 +934,15 @@ class ReportsWidget(QWidget):
             row["net_profit"] = row["profit"] or 0
         return rows
 
-    def _expense_totals_by_date(self, start_date, end_date, user_id=None, include_unassigned=False):
+    def _expense_totals_by_period(self, start_date, end_date, user_id=None, include_unassigned=False):
         rates = {currency["code"]: currency["rate_to_uzs"] or 1 for currency in db.get_currencies()}
         totals = {}
-        expense_rows = (
-            db.get_expense_hourly_report(start_date, user_id=user_id, include_unassigned=include_unassigned)
-            if self.period_combo.currentData() == "day"
-            else db.get_expense_report(start_date, end_date, user_id=user_id, include_unassigned=include_unassigned)
-        )
+        expense_rows = self._expense_rows(start_date, end_date, user_id=user_id, include_unassigned=include_unassigned)
         for row in expense_rows:
-            label = row["label"][:7] if self.period_combo.currentData() == "year" else row["label"]
+            try:
+                label = self._expense_period_key(row["label"], self.period_combo.currentData())
+            except (TypeError, ValueError):
+                continue
             currency = row["currency_code"] or "UZS"
             totals[label] = totals.get(label, 0) + (row["amount"] or 0) * (rates.get(currency, 1) or 1)
         return totals
@@ -830,20 +957,10 @@ class ReportsWidget(QWidget):
         return None
 
     def _overall_series(self, start_date, end_date):
-        if self.period_combo.currentData() == "day":
-            return db.get_overall_day_hourly_series(start_date)
-        rows = db.get_overall_period_series(start_date, end_date)
-        if self.period_combo.currentData() == "year":
-            return self._aggregate_monthly(rows)
-        return rows
+        return db.get_overall_period_series(start_date, end_date)
 
     def _entity_series(self, entity_type, entity_id, start_date, end_date):
-        if self.period_combo.currentData() == "day":
-            return db.get_entity_day_hourly_series(entity_type, entity_id, start_date)
-        rows = db.get_entity_period_series(entity_type, entity_id, start_date, end_date)
-        if self.period_combo.currentData() == "year":
-            return self._aggregate_monthly(rows)
-        return rows
+        return self._entity_rows(entity_type, entity_id, start_date, end_date)
 
     def _aggregate_monthly(self, rows):
         grouped = {}
@@ -874,6 +991,19 @@ class ReportsWidget(QWidget):
         else:
             next_date = current.addYears(direction)
         self.date_edit.setDate(next_date)
+
+    def _period_changed(self):
+        period = self.period_combo.currentData()
+        if period == "day":
+            self.date_edit.setDisplayFormat("dd.MM.yyyy")
+            self.date_edit.setFixedWidth(150)
+        elif period == "year":
+            self.date_edit.setDisplayFormat("yyyy")
+            self.date_edit.setFixedWidth(110)
+        else:
+            self.date_edit.setDisplayFormat("dd.MM.yyyy")
+            self.date_edit.setFixedWidth(150)
+        self.load_data()
 
     def _mode_button(self, label, mode):
         btn = QPushButton(label)
