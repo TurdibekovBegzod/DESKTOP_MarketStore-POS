@@ -5,7 +5,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     app_name: str = "MarketStore POS API"
     api_prefix: str = "/api/v1"
-    api_port: int = 18080
+    api_port: int = 8000
     database_url: str = "postgresql+psycopg://marketstore:marketstore@localhost:5432/marketstore"
     secret_key: str = "change-this-secret-key"
     access_token_expire_minutes: int = 60 * 24 * 7
@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     celery_result_backend: str = "redis://localhost:6379/1"
     google_client_id: str | None = None
     google_client_secret: str | None = None
-    google_redirect_uri: str = "http://127.0.0.1:18080/api/v1/auth/google/callback"
+    google_redirect_uri: str = "http://169.58.152.33/api/v1/auth/google/callback"
     google_token_clock_skew_seconds: int = 300
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
