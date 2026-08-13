@@ -4,7 +4,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
-DEFAULT_API_URL = "http://127.0.0.1:18080/api/v1"
+DEFAULT_API_URL = "http://169.58.152.33:8000/api/v1"
 
 
 class ApiClientError(Exception):

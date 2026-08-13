@@ -13,7 +13,7 @@ python main.py
 
 - Kirish online API orqali tekshiriladi: Gmail/email va parol kiritiladi.
 - Google orqali kirish ham API OAuth flow bilan ishlaydi.
-- Default API URL: `http://127.0.0.1:18080/api/v1`
+- Default API URL: `http://169.58.152.33:8000/api/v1`
 - Boshqa server ishlatilsa appni ochishdan oldin `MARKETSTORE_API_URL` env qiymatini bering.
 - Parol unutilsa login oynasidagi `Parolni unutdingizmi?` orqali emailga verification code yuboriladi.
 
