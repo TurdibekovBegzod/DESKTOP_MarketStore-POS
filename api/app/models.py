@@ -24,7 +24,6 @@ class User(Base):
     devices: Mapped[list["Device"]] = relationship(back_populates="user", cascade="all, delete-orphan", foreign_keys="Device.user_id")
     records: Mapped[list["UserRecord"]] = relationship(back_populates="user", cascade="all, delete-orphan", foreign_keys="UserRecord.user_id")
     password_reset_codes: Mapped[list["PasswordResetCode"]] = relationship(back_populates="user", cascade="all, delete-orphan")
-    google_oauth_sessions: Mapped[list["GoogleOAuthSession"]] = relationship(back_populates="user")
 
     @property
     def user_uid(self) -> str:
@@ -42,21 +41,6 @@ class PasswordResetCode(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     user: Mapped[User] = relationship(back_populates="password_reset_codes")
-
-
-class GoogleOAuthSession(Base):
-    __tablename__ = "google_oauth_sessions"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    state: Mapped[str] = mapped_column(String(120), unique=True, index=True, nullable=False)
-    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
-    access_token: Mapped[str | None] = mapped_column(Text)
-    error: Mapped[str | None] = mapped_column(Text)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-
-    user: Mapped[User | None] = relationship(back_populates="google_oauth_sessions")
 
 
 class Device(Base):

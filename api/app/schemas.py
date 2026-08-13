@@ -81,19 +81,6 @@ class TokenOut(BaseModel):
     token_type: str = "bearer"
 
 
-class GoogleLoginStartOut(BaseModel):
-    state: str
-    auth_url: str
-    expires_in: int
-
-
-class GoogleLoginStatusOut(BaseModel):
-    status: str
-    access_token: str | None = None
-    token_type: str = "bearer"
-    detail: str | None = None
-
-
 class DeviceIn(BaseModel):
     device_key: str = Field(min_length=1, max_length=120)
     name: str | None = Field(default=None, max_length=120)

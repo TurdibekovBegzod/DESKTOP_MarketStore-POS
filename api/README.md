@@ -83,20 +83,8 @@ Email yuborish request ichida bajarilmaydi. API reset code yaratib Redis queue'g
 FastAPI -> Redis -> Celery worker -> SMTP provider -> user email
 ```
 
-## Google Login
+## Account Login
 
-Desktop appdagi `Google orqali kirish` tugmasi API orqali OAuth server flow ishlatadi. Google Cloud Console ichida OAuth Client yarating va redirect URI sifatida quyidagini qo'shing:
+Desktop appda user email va parol orqali ro'yxatdan o'tadi yoki login qiladi. `POST /api/v1/auth/register` yangi account yaratadi, `POST /api/v1/auth/login` esa bearer token beradi.
 
-```text
-http://169.58.152.33:8000/api/v1/auth/google/callback
-```
-
-Keyin `.env` ichida quyidagilarni real qiymatlar bilan to'ldiring:
-
-```env
-GOOGLE_CLIENT_ID=your-google-client-id.apps.googleusercontent.com
-GOOGLE_CLIENT_SECRET=your-google-client-secret
-GOOGLE_REDIRECT_URI=http://169.58.152.33:8000/api/v1/auth/google/callback
-```
-
-Google login tugagach API userni email bo'yicha topadi yoki yangi user yaratadi, unga alohida `user_uid` beradi, desktop app esa bearer tokenni olib faqat shu `user_uid` muhitidagi ma'lumotlarni sync qiladi.
+Har bir accountga alohida `user_uid` beriladi. Desktop app tokenni saqlaydi va sync endpointlar faqat shu `user_uid` muhitidagi ma'lumotlarni qaytaradi.
