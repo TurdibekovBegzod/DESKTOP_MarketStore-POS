@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     celery_result_backend: str = "redis://localhost:6379/1"
     google_client_id: str | None = None
     google_client_secret: str | None = None
-    google_redirect_uri: str = "http://169.58.152.33/api/v1/auth/google/callback"
+    google_redirect_uri: str = "http://169.58.152.33:8000/api/v1/auth/google/callback"
     google_token_clock_skew_seconds: int = 300
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
