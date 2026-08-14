@@ -1,12 +1,15 @@
+import math
+import time
+
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QMessageBox, QFrame
 )
-import webbrowser
 
 from PyQt6.QtCore import QTimer, Qt
 import api_client
 import database as db
+import sync_service
 
 
 class PasswordResetDialog(QDialog):
@@ -119,11 +122,14 @@ class LoginDialog(QDialog):
     def __init__(self):
         super().__init__()
         self.logged_user = None
-        self._google_state = None
-        self._google_timer = QTimer(self)
-        self._google_timer.setInterval(2000)
-        self._google_timer.timeout.connect(self._poll_google_login)
-        self.setWindowTitle("Market Store POS — Kirish")
+        self.auth_mode = "login"
+        self.signup_stage = "details"
+        self.signup_countdown = 0
+        self.signup_resend_at = 0.0
+        self.signup_timer = QTimer(self)
+        self.signup_timer.setInterval(1000)
+        self.signup_timer.timeout.connect(self._tick_signup_countdown)
+        self.setWindowTitle("Market Store POS - Kirish")
         self.setMinimumSize(420, 500)
         self.resize(420, 520)
         self.setWindowFlags(
@@ -153,14 +159,20 @@ class LoginDialog(QDialog):
             }
             QPushButton#login:hover { background: #2563eb; }
             QPushButton#login:pressed { background: #1d4ed8; }
+            QPushButton#resend {
+                background: #1e293b; color: #93c5fd; border: 1px solid #334155;
+                border-radius: 8px; padding: 10px; font-weight: bold;
+            }
+            QPushButton#resend:hover { border-color: #3b82f6; color: #bfdbfe; }
+            QPushButton#resend:disabled { color: #64748b; border-color: #334155; }
         """)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(40, 34, 40, 28)
         layout.setSpacing(10)
 
-        icon_lbl = QLabel("🛒")
-        icon_lbl.setStyleSheet("font-size: 40px;")
+        icon_lbl = QLabel("POS")
+        icon_lbl.setStyleSheet("font-size: 24px; font-weight: bold; color: #60a5fa;")
         icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(icon_lbl)
 
@@ -175,6 +187,19 @@ class LoginDialog(QDialog):
         layout.addSpacing(8)
         layout.addWidget(sub)
 
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(8)
+        self.login_mode_btn = QPushButton("Login")
+        self.signup_mode_btn = QPushButton("Signup")
+        for mode_btn in (self.login_mode_btn, self.signup_mode_btn):
+            mode_btn.setMinimumHeight(36)
+            mode_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.login_mode_btn.clicked.connect(lambda: self._set_mode("login"))
+        self.signup_mode_btn.clicked.connect(lambda: self._set_mode("signup"))
+        mode_row.addWidget(self.login_mode_btn)
+        mode_row.addWidget(self.signup_mode_btn)
+        layout.addLayout(mode_row)
+
         self.email_edit = QLineEdit()
         self.email_edit.setPlaceholderText("Gmail / Email")
         self.email_edit.setMinimumHeight(44)
@@ -187,6 +212,32 @@ class LoginDialog(QDialog):
         self.password_edit.returnPressed.connect(self._try_login)
         layout.addWidget(self.password_edit)
 
+        self.confirm_password_edit = QLineEdit()
+        self.confirm_password_edit.setPlaceholderText("Parolni qayta kiriting")
+        self.confirm_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.confirm_password_edit.setMinimumHeight(44)
+        self.confirm_password_edit.returnPressed.connect(self._try_login)
+        layout.addWidget(self.confirm_password_edit)
+
+        self.verification_hint = QLabel("Emailga yuborilgan 6 xonali kodni kiriting.")
+        self.verification_hint.setObjectName("sub")
+        self.verification_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.verification_hint.setWordWrap(True)
+        layout.addWidget(self.verification_hint)
+
+        self.verification_code_edit = QLineEdit()
+        self.verification_code_edit.setPlaceholderText("Verification code")
+        self.verification_code_edit.setMinimumHeight(44)
+        self.verification_code_edit.setMaxLength(6)
+        self.verification_code_edit.returnPressed.connect(self._try_login)
+        layout.addWidget(self.verification_code_edit)
+
+        self.resend_signup_btn = QPushButton("Qayta yuborish")
+        self.resend_signup_btn.setObjectName("resend")
+        self.resend_signup_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.resend_signup_btn.clicked.connect(self._resend_signup_code)
+        layout.addWidget(self.resend_signup_btn)
+
         layout.addSpacing(4)
 
         self.error_lbl = QLabel("")
@@ -196,40 +247,102 @@ class LoginDialog(QDialog):
         self.error_lbl.setWordWrap(True)
         layout.addWidget(self.error_lbl)
 
-        btn = QPushButton("Kirish")
-        btn.setObjectName("login")
-        btn.setMinimumHeight(46)
-        btn.clicked.connect(self._try_login)
-        layout.addWidget(btn)
+        self.submit_btn = QPushButton("Kirish")
+        self.submit_btn.setObjectName("login")
+        self.submit_btn.setMinimumHeight(46)
+        self.submit_btn.clicked.connect(self._try_login)
+        layout.addWidget(self.submit_btn)
 
-        self.google_btn = QPushButton("Google orqali kirish")
-        self.google_btn.setMinimumHeight(44)
-        self.google_btn.setStyleSheet("""
-            QPushButton {
-                background: #ffffff; color: #0f172a; border: 1px solid #cbd5e1;
-                border-radius: 8px; padding: 10px; font-weight: bold;
-            }
-            QPushButton:hover { background: #f8fafc; }
-        """)
-        self.google_btn.clicked.connect(self._start_google_login)
-        layout.addWidget(self.google_btn)
-
-        forgot_btn = QPushButton("Parolni unutdingizmi?")
-        forgot_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        forgot_btn.setStyleSheet("""
+        self.forgot_btn = QPushButton("Parolni unutdingizmi?")
+        self.forgot_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.forgot_btn.setStyleSheet("""
             QPushButton {
                 background: transparent; color: #93c5fd; border: none;
                 padding: 6px; font-size: 12px; font-weight: normal;
             }
             QPushButton:hover { color: #bfdbfe; text-decoration: underline; }
         """)
-        forgot_btn.clicked.connect(self._open_password_reset)
-        layout.addWidget(forgot_btn)
+        self.forgot_btn.clicked.connect(self._open_password_reset)
+        layout.addWidget(self.forgot_btn)
+        self._set_mode("login")
 
-        hint = QLabel("Default: admin@gmail.com / admin123")
-        hint.setStyleSheet("color: #475569; font-size: 11px;")
-        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(hint)
+    def _set_mode(self, mode):
+        self.auth_mode = mode
+        is_signup = mode == "signup"
+        self.signup_stage = "details"
+        self.signup_timer.stop()
+        self.signup_countdown = 0
+        self.signup_resend_at = 0.0
+        self.email_edit.setReadOnly(False)
+        self.password_edit.setVisible(True)
+        self.confirm_password_edit.setVisible(is_signup)
+        self.verification_hint.setVisible(False)
+        self.verification_code_edit.setVisible(False)
+        self.resend_signup_btn.setVisible(False)
+        self.forgot_btn.setVisible(not is_signup)
+        self.submit_btn.setText("Signup" if is_signup else "Kirish")
+        self.error_lbl.setStyleSheet("color: #f87171; font-size: 12px;")
+        self.error_lbl.setText("")
+        active_style = """
+            QPushButton {
+                background: #3b82f6; color: white; border: none;
+                border-radius: 8px; padding: 8px; font-weight: bold;
+            }
+        """
+        inactive_style = """
+            QPushButton {
+                background: #1e293b; color: #94a3b8; border: 1px solid #334155;
+                border-radius: 8px; padding: 8px; font-weight: bold;
+            }
+            QPushButton:hover { border-color: #3b82f6; color: #e2e8f0; }
+        """
+        self.login_mode_btn.setStyleSheet(active_style if not is_signup else inactive_style)
+        self.signup_mode_btn.setStyleSheet(active_style if is_signup else inactive_style)
+
+    def _show_signup_verification(self, challenge):
+        self.signup_stage = "verification"
+        self.email_edit.setReadOnly(True)
+        self.password_edit.setVisible(False)
+        self.confirm_password_edit.setVisible(False)
+        self.verification_hint.setVisible(True)
+        self.verification_code_edit.setVisible(True)
+        self.resend_signup_btn.setVisible(True)
+        self.submit_btn.setText("Kodni tasdiqlash")
+        self.signup_countdown = max(0, int(challenge.get("resend_after_seconds") or 180))
+        self.signup_resend_at = time.monotonic() + self.signup_countdown
+        self._update_resend_button()
+        if self.signup_countdown:
+            self.signup_timer.start()
+        self.error_lbl.setStyleSheet("color: #22c55e; font-size: 12px;")
+        self.error_lbl.setText("Tasdiqlash kodi emailingizga yuborildi.")
+        self.verification_code_edit.setFocus()
+        self.resize(420, 580)
+
+    def _tick_signup_countdown(self):
+        self.signup_countdown = max(0, math.ceil(self.signup_resend_at - time.monotonic()))
+        if self.signup_countdown == 0:
+            self.signup_timer.stop()
+        self._update_resend_button()
+
+    def _update_resend_button(self):
+        enabled = self.signup_countdown == 0
+        self.resend_signup_btn.setEnabled(enabled)
+        if enabled:
+            self.resend_signup_btn.setText("Kodni qayta yuborish")
+            return
+        minutes, seconds = divmod(self.signup_countdown, 60)
+        self.resend_signup_btn.setText(f"Qayta yuborish ({minutes:02d}:{seconds:02d})")
+
+    def _resend_signup_code(self):
+        if self.signup_countdown > 0:
+            return
+        try:
+            challenge = api_client.resend_registration_code(self.email_edit.text().strip())
+            self.verification_code_edit.clear()
+            self._show_signup_verification(challenge)
+        except api_client.ApiClientError as exc:
+            self.error_lbl.setStyleSheet("color: #f87171; font-size: 12px;")
+            self.error_lbl.setText(str(exc))
 
     def _open_password_reset(self):
         dlg = PasswordResetDialog(self.email_edit.text().strip(), self)
@@ -238,25 +351,53 @@ class LoginDialog(QDialog):
     def _try_login(self):
         email = self.email_edit.text().strip()
         password = self.password_edit.text().strip()
+        confirm_password = self.confirm_password_edit.text().strip()
+
+        if self.auth_mode == "signup" and self.signup_stage == "verification":
+            code = self.verification_code_edit.text().strip()
+            if not code:
+                self.error_lbl.setStyleSheet("color: #f87171; font-size: 12px;")
+                self.error_lbl.setText("Tasdiqlash kodini kiriting.")
+                return
+            try:
+                online_session = api_client.confirm_registration(email, code)
+                self._complete_online_login(
+                    online_session["token"],
+                    online_session["user"],
+                    allow_legacy_import=False,
+                )
+            except (api_client.ApiClientError, db.AppError) as exc:
+                self.error_lbl.setStyleSheet("color: #f87171; font-size: 12px;")
+                self.error_lbl.setText(str(exc))
+                self.verification_code_edit.setFocus()
+            return
 
         if not email or not password:
-            self.error_lbl.setText("⚠ Iltimos, barcha maydonlarni to'ldiring")
+            self.error_lbl.setText("Iltimos, barcha maydonlarni to'ldiring.")
+            return
+        if self.auth_mode == "signup":
+            if not confirm_password:
+                self.error_lbl.setText("Parolni qayta kiriting.")
+                return
+            if password != confirm_password:
+                self.error_lbl.setText("Parollar bir xil emas.")
+                return
+            try:
+                challenge = api_client.register(email, password)
+                self._show_signup_verification(challenge)
+            except api_client.ApiClientError as exc:
+                self.error_lbl.setStyleSheet("color: #f87171; font-size: 12px;")
+                self.error_lbl.setText(str(exc))
+                self.password_edit.setFocus()
             return
 
         try:
             online_session = api_client.login(email, password)
-            api_user = online_session["user"]
-            user = db.sync_online_user(
-                api_user.get("email"),
-                display_name=api_user.get("display_name"),
-                role="cashier",
-                access_token=online_session["token"],
+            self._complete_online_login(
+                online_session["token"],
+                online_session["user"],
+                allow_legacy_import=True,
             )
-            self.logged_user = dict(user)
-            self.logged_user["api_access_token"] = online_session["token"]
-            self.logged_user["api_user_id"] = api_user.get("id")
-            db.log_login(self.logged_user)
-            self.accept()
         except api_client.ApiClientError as exc:
             self.error_lbl.setText(str(exc))
             self.password_edit.clear()
@@ -265,65 +406,34 @@ class LoginDialog(QDialog):
             self.error_lbl.setText(str(exc))
             self.password_edit.setFocus()
 
-    def _start_google_login(self):
-        self.error_lbl.setStyleSheet("color: #93c5fd; font-size: 12px;")
-        self.error_lbl.setText("Google oynasi ochilmoqda...")
-        self.google_btn.setEnabled(False)
-        try:
-            session = api_client.start_google_login()
-            self._google_state = session["state"]
-            webbrowser.open(session["auth_url"])
-            self.error_lbl.setText("Browserda Google orqali kiring. App avtomatik davom etadi.")
-            self._google_timer.start()
-        except api_client.ApiClientError as exc:
-            self.google_btn.setEnabled(True)
-            self.error_lbl.setStyleSheet("color: #f87171; font-size: 12px;")
-            self.error_lbl.setText(str(exc))
-        except Exception:
-            self.google_btn.setEnabled(True)
-            self.error_lbl.setStyleSheet("color: #f87171; font-size: 12px;")
-            self.error_lbl.setText("Google loginni boshlashda xatolik yuz berdi.")
-
-    def _poll_google_login(self):
-        if not self._google_state:
-            self._google_timer.stop()
-            self.google_btn.setEnabled(True)
-            return
-        try:
-            status = api_client.get_google_login_status(self._google_state)
-        except api_client.ApiClientError as exc:
-            self._google_timer.stop()
-            self.google_btn.setEnabled(True)
-            self.error_lbl.setStyleSheet("color: #f87171; font-size: 12px;")
-            self.error_lbl.setText(str(exc))
-            return
-        if status.get("status") == "pending":
-            return
-        self._google_timer.stop()
-        self.google_btn.setEnabled(True)
-        if status.get("status") != "completed" or not status.get("access_token"):
-            self.error_lbl.setStyleSheet("color: #f87171; font-size: 12px;")
-            self.error_lbl.setText(status.get("detail") or "Google login yakunlanmadi.")
-            return
-        try:
-            self._complete_online_login(status["access_token"])
-        except api_client.ApiClientError as exc:
-            self.error_lbl.setStyleSheet("color: #f87171; font-size: 12px;")
-            self.error_lbl.setText(str(exc))
-        except db.AppError as exc:
-            self.error_lbl.setStyleSheet("color: #f87171; font-size: 12px;")
-            self.error_lbl.setText(str(exc))
-
-    def _complete_online_login(self, token):
-        api_user = api_client.get_current_user(token)
+    def _complete_online_login(self, token, api_user=None, allow_legacy_import=False):
+        api_user = api_user or api_client.get_current_user(token)
+        user_uid = api_user.get("user_uid") or api_user.get("uid")
+        if not user_uid:
+            raise db.AppError("Server account UID qaytarmadi.")
+        activation = db.activate_account_database(
+            user_uid,
+            email=api_user.get("email"),
+            allow_legacy_import=allow_legacy_import,
+        )
+        db.init_db(account_owner=api_user, seed_defaults=False)
+        if activation.get("database_created"):
+            db.mark_server_bootstrap_required()
         user = db.sync_online_user(
             api_user.get("email"),
             display_name=api_user.get("display_name"),
-            role="cashier",
+            role="admin",
             access_token=token,
+            user_uid=user_uid,
         )
+        db.remove_foreign_online_accounts(user["id"], user_uid)
+        db.save_account_session(api_user, token)
         self.logged_user = dict(user)
+        self.logged_user["role"] = "cashier"
         self.logged_user["api_access_token"] = token
         self.logged_user["api_user_id"] = api_user.get("id")
+        self.logged_user["api_user_uid"] = user_uid
+        sync_service.synchronize_account_storage(self.logged_user)
         db.log_login(self.logged_user)
         self.accept()
+

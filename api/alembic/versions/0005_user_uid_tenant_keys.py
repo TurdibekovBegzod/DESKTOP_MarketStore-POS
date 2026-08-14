@@ -5,7 +5,6 @@ Revises: 0004_google_oauth_sessions
 Create Date: 2026-08-08
 """
 from typing import Sequence, Union
-import uuid
 
 from alembic import op
 import sqlalchemy as sa
@@ -24,8 +23,22 @@ def upgrade() -> None:
     conn = op.get_bind()
 
     op.add_column("users", sa.Column("uid", sa.String(length=36), nullable=True))
-    for (user_id,) in conn.execute(sa.text("SELECT id FROM users WHERE uid IS NULL")).fetchall():
-        conn.execute(sa.text("UPDATE users SET uid = :uid WHERE id = :id"), {"uid": str(uuid.uuid4()), "id": user_id})
+    conn.execute(
+        sa.text(
+            """
+            UPDATE users
+            SET uid = substr(uid_hash, 1, 8) || '-' || substr(uid_hash, 9, 4) || '-' ||
+                      substr(uid_hash, 13, 4) || '-' || substr(uid_hash, 17, 4) || '-' ||
+                      substr(uid_hash, 21, 12)
+            FROM (
+                SELECT id, md5(random()::text || clock_timestamp()::text || id::text) AS uid_hash
+                FROM users
+                WHERE uid IS NULL
+            ) generated
+            WHERE users.id = generated.id
+            """
+        )
+    )
     op.alter_column("users", "uid", existing_type=sa.String(length=36), nullable=False)
     op.create_index("ix_users_uid", "users", ["uid"], unique=True)
 

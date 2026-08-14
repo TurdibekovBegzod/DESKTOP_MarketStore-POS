@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtGui import QFont, QIcon
 import database as db
+import sync_service
 from ui.login_dialog import LoginDialog
 from ui.main_window import MainWindow
 
@@ -42,12 +43,14 @@ def main():
         QToolTip { background: #1e293b; color: white; border: none; padding: 4px 8px; border-radius: 4px; }
     """)
 
-    # Init database
-    db.init_db()
-
-    recent_user = db.get_recent_activity_user(max_minutes=15)
+    recent_user = db.restore_recent_account_user(max_minutes=15)
     if recent_user:
         recent_user["role"] = "cashier"
+        try:
+            sync_service.synchronize_account_storage(recent_user)
+        except Exception:
+            recent_user = None
+    if recent_user:
         db.touch_user_activity(recent_user["id"])
         window = MainWindow(dict(recent_user))
         window.showMaximized()

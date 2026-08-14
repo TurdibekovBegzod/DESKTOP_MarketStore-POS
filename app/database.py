@@ -1,8 +1,10 @@
+import base64
 import hashlib
 import json
 import os
 import secrets
 import shutil
+import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -27,15 +29,20 @@ from sqlalchemy.orm import Session, declarative_base, relationship, sessionmaker
 from sqlalchemy.sql import text
 
 
-DB_PATH = os.path.join("data", "market_pos.db")
+LEGACY_DB_PATH = os.path.join("data", "market_pos.db")
+ACCOUNT_DB_ROOT = os.path.join("data", "accounts")
+ACCOUNT_SESSION_PATH = os.path.join("data", "account_session.json")
+DB_PATH = LEGACY_DB_PATH
 
 Base = declarative_base()
 _ENGINE = None
 _ENGINE_PATH = None
 _SessionLocal = None
 _SYNC_SUSPENDED = False
+_ACTIVE_ACCOUNT_UID = None
 
 SYNC_TABLES = (
+    "users",
     "categories",
     "currencies",
     "app_settings",
@@ -113,6 +120,174 @@ def _database_url():
     if db_dir:
         os.makedirs(db_dir, exist_ok=True)
     return f"sqlite:///{DB_PATH}"
+
+
+def _safe_account_uid(user_uid):
+    value = str(user_uid or "").strip().lower()
+    if value and all(char.isalnum() or char == "-" for char in value):
+        return value
+    if not value:
+        raise AppError("Online account UID topilmadi.")
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _email_account_key(email):
+    normalized = _normalize_email(email)
+    if not normalized:
+        raise AppError("Online account emaili topilmadi.")
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    return f"email-{digest[:32]}"
+
+
+def account_database_path(user_uid, email=None, storage_root=None):
+    root = storage_root or ACCOUNT_DB_ROOT
+    account_key = _email_account_key(email) if email else _safe_account_uid(user_uid)
+    return os.path.join(root, account_key, "market_pos.db")
+
+
+def _account_migration_marker(email, storage_root=None):
+    root = storage_root or ACCOUNT_DB_ROOT
+    return os.path.join(root, ".migrations", _email_account_key(email) + ".done")
+
+
+def _switch_database_path(path):
+    global DB_PATH, _ENGINE, _ENGINE_PATH, _SessionLocal
+    normalized = os.path.normpath(path)
+    if _ENGINE is not None and _ENGINE_PATH != normalized:
+        _ENGINE.dispose()
+        _ENGINE = None
+        _ENGINE_PATH = None
+        _SessionLocal = None
+    DB_PATH = normalized
+
+
+def _jwt_subject(token):
+    try:
+        payload = str(token).split(".", 2)[1]
+        payload += "=" * (-len(payload) % 4)
+        decoded = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")).decode("utf-8"))
+        return str(decoded.get("sub") or "")
+    except (ValueError, IndexError, TypeError, json.JSONDecodeError):
+        return ""
+
+
+def _legacy_database_matches_account(user_uid, email):
+    if not os.path.exists(LEGACY_DB_PATH):
+        return False
+    try:
+        with sqlite3.connect(LEGACY_DB_PATH) as conn:
+            row = conn.execute(
+                """
+                SELECT user_settings.value
+                FROM users
+                JOIN user_settings ON user_settings.user_id = users.id
+                WHERE lower(users.email) = lower(?) AND user_settings.key = 'api_access_token'
+                ORDER BY users.id DESC
+                LIMIT 1
+                """,
+                (email,),
+            ).fetchone()
+    except sqlite3.Error:
+        return False
+    if not row:
+        return False
+    legacy_uid = _jwt_subject(row[0])
+    if legacy_uid == str(user_uid):
+        return True
+    recent_account = _read_account_session()
+    return bool(
+        legacy_uid
+        and recent_account.get("user_uid") == legacy_uid
+        and _normalize_email(recent_account.get("email")) == _normalize_email(email)
+    )
+
+
+def _copy_sqlite_database(source_path, target_path):
+    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+    with sqlite3.connect(source_path) as source, sqlite3.connect(target_path) as target:
+        source.backup(target)
+
+
+def activate_account_database(user_uid, email=None, allow_legacy_import=False, storage_root=None):
+    global _ACTIVE_ACCOUNT_UID
+    safe_uid = _safe_account_uid(user_uid)
+    target_path = account_database_path(safe_uid, email=email, storage_root=storage_root)
+    old_uid_path = account_database_path(safe_uid, storage_root=storage_root)
+    migration_marker = _account_migration_marker(email, storage_root) if email else None
+    can_import_old_database = not migration_marker or not os.path.exists(migration_marker)
+    database_existed = os.path.exists(target_path)
+    imported_legacy = False
+    if (
+        not database_existed
+        and can_import_old_database
+        and os.path.exists(old_uid_path)
+        and old_uid_path != target_path
+    ):
+        _copy_sqlite_database(old_uid_path, target_path)
+        imported_legacy = True
+    elif (
+        not database_existed
+        and can_import_old_database
+        and allow_legacy_import
+        and email
+        and _legacy_database_matches_account(safe_uid, email)
+    ):
+        _copy_sqlite_database(LEGACY_DB_PATH, target_path)
+        imported_legacy = True
+    if migration_marker:
+        os.makedirs(os.path.dirname(migration_marker), exist_ok=True)
+        if not os.path.exists(migration_marker):
+            with open(migration_marker, "w", encoding="utf-8") as marker:
+                marker.write("email-account-db-v1\n")
+    _switch_database_path(target_path)
+    _ACTIVE_ACCOUNT_UID = safe_uid
+    return Row(
+        path=target_path,
+        imported_legacy=imported_legacy,
+        database_created=not database_existed and not imported_legacy,
+    )
+
+
+def _read_account_session():
+    try:
+        with open(ACCOUNT_SESSION_PATH, "r", encoding="utf-8") as file:
+            data = json.load(file)
+    except (OSError, ValueError, TypeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_account_session(data):
+    directory = os.path.dirname(ACCOUNT_SESSION_PATH)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    temporary_path = ACCOUNT_SESSION_PATH + ".tmp"
+    with open(temporary_path, "w", encoding="utf-8") as file:
+        json.dump(data, file, ensure_ascii=True, indent=2)
+    os.replace(temporary_path, ACCOUNT_SESSION_PATH)
+
+
+def save_account_session(api_user, access_token):
+    user_uid = _safe_account_uid((api_user or {}).get("user_uid") or (api_user or {}).get("uid"))
+    data = {
+        "user_uid": user_uid,
+        "email": _normalize_email((api_user or {}).get("email")),
+        "display_name": ((api_user or {}).get("display_name") or "").strip(),
+        "api_user_id": (api_user or {}).get("id"),
+        "api_access_token": access_token or "",
+        "last_activity_utc": _utc_now(),
+    }
+    _write_account_session(data)
+
+
+def _touch_account_session(active=True):
+    if not _ACTIVE_ACCOUNT_UID:
+        return
+    data = _read_account_session()
+    if data.get("user_uid") != _ACTIVE_ACCOUNT_UID:
+        return
+    data["last_activity_utc"] = _utc_now() if active else ""
+    _write_account_session(data)
 
 
 def _get_engine():
@@ -287,6 +462,13 @@ class UserSetting(Base):
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
     key = Column(String, primary_key=True)
     value = Column(String)
+
+
+class SyncTombstone(Base):
+    __tablename__ = "sync_tombstones"
+    table_name = Column(String, primary_key=True)
+    local_id = Column(String, primary_key=True)
+    deleted_at = Column(String, nullable=False)
 
 
 class ProductTemplate(Base):
@@ -515,6 +697,7 @@ MIGRATIONS = (
     ("001_create_missing_tables", "Create any missing tables from the current SQLAlchemy models."),
     ("002_add_missing_columns", "Add columns introduced after earlier releases."),
     ("003_create_sync_state", "Create local sync state table."),
+    ("004_create_sync_tombstones", "Track deleted rows that must be synchronized."),
 )
 
 
@@ -581,6 +764,17 @@ def _migration_create_missing_tables(conn):
 
 def _migration_create_sync_state(conn):
     _ensure_sync_state_table(conn)
+
+
+def _migration_create_sync_tombstones(conn):
+    conn.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS sync_tombstones (
+            table_name TEXT NOT NULL,
+            local_id TEXT NOT NULL,
+            deleted_at TEXT NOT NULL,
+            PRIMARY KEY (table_name, local_id)
+        )
+    """)
 
 
 def _table_columns(conn, table_name):
@@ -785,6 +979,7 @@ MIGRATION_FUNCTIONS = {
     "001_create_missing_tables": _migration_create_missing_tables,
     "002_add_missing_columns": _migration_add_missing_columns,
     "003_create_sync_state": _migration_create_sync_state,
+    "004_create_sync_tombstones": _migration_create_sync_tombstones,
 }
 
 
@@ -818,7 +1013,22 @@ def _default_product_section_id(session):
     return section.id
 
 
-def init_db():
+def _reassign_user_references(session, source_user_id, target_user_id):
+    if source_user_id == target_user_id:
+        return
+    session.execute(update(LoginLog).where(LoginLog.user_id == source_user_id).values(user_id=target_user_id))
+    session.execute(update(Expense).where(Expense.user_id == source_user_id).values(user_id=target_user_id))
+    session.execute(update(Sale).where(Sale.cashier_id == source_user_id).values(cashier_id=target_user_id))
+    session.execute(
+        update(InventoryCheckSession)
+        .where(InventoryCheckSession.started_by == source_user_id)
+        .values(started_by=target_user_id)
+    )
+    session.query(UserSetting).filter(UserSetting.user_id == source_user_id).delete(synchronize_session=False)
+
+
+def init_db(account_owner=None, seed_defaults=True):
+    global _SYNC_SUSPENDED
     engine = _get_engine()
     try:
         with engine.begin() as conn:
@@ -826,66 +1036,115 @@ def init_db():
     except OperationalError:
         pass
     run_migrations()
+    if account_owner:
+        _bind_account_identity(
+            account_owner.get("user_uid") or account_owner.get("uid"),
+            account_owner.get("email"),
+        )
 
-    with session_scope() as session:
-        admin = session.scalar(select(User).where(User.username == "admin"))
-        if admin is None:
-            session.add(User(username="admin", email="admin@gmail.com", password=_hash_password("admin123"), role="admin"))
-        elif not str(admin.password).startswith("pbkdf2_sha256$"):
-            admin.password = _hash_password(admin.password)
-        if admin and not admin.email:
-            admin.email = "admin@gmail.com"
+    previous_sync_state = _SYNC_SUSPENDED
+    if account_owner:
+        _SYNC_SUSPENDED = True
+    try:
+        with session_scope() as session:
+            if account_owner:
+                owner_email = _normalize_email(account_owner.get("email"))
+                if not owner_email:
+                    raise AppError("Online account emaili topilmadi.")
+                owner = session.scalar(select(User).where(func.lower(User.email) == owner_email))
+                legacy_admin = session.scalar(
+                    select(User).where(
+                        User.username == "admin",
+                        or_(User.email.is_(None), User.email == "", func.lower(User.email) == "admin@gmail.com"),
+                    )
+                )
+                if owner is None and legacy_admin is not None:
+                    owner = legacy_admin
+                    owner.email = owner_email
+                    owner.username = (account_owner.get("display_name") or owner_email).strip()
+                elif owner is not None and legacy_admin is not None and owner.id != legacy_admin.id:
+                    _reassign_user_references(session, legacy_admin.id, owner.id)
+                    session.delete(legacy_admin)
+                if owner is None:
+                    owner = User(
+                        username=(account_owner.get("display_name") or owner_email).strip(),
+                        email=owner_email,
+                        password=_hash_password(secrets.token_urlsafe(32)),
+                        role="admin",
+                    )
+                    session.add(owner)
+                owner.role = "admin"
+                if not str(owner.password).startswith("pbkdf2_sha256$"):
+                    owner.password = _hash_password(owner.password)
+            else:
+                admin = session.scalar(select(User).where(User.username == "admin"))
+                if admin is None:
+                    session.add(User(username="admin", email="admin@gmail.com", password=_hash_password("admin123"), role="admin"))
+                elif not str(admin.password).startswith("pbkdf2_sha256$"):
+                    admin.password = _hash_password(admin.password)
+                if admin and not admin.email:
+                    admin.email = "admin@gmail.com"
 
-        used_emails = {
-            str(email).lower()
-            for email in session.scalars(select(User.email).where(User.email.is_not(None)))
-            if email
-        }
-        for user in session.scalars(select(User).where(or_(User.email.is_(None), User.email == ""))).all():
-            base_email = _email_from_username(user.username)
-            candidate = base_email
-            counter = 2
-            while candidate in used_emails:
-                local, domain = base_email.split("@", 1)
-                candidate = f"{local}.{counter}@{domain}"
-                counter += 1
-            user.email = candidate
-            used_emails.add(candidate)
+            used_emails = {
+                str(email).lower()
+                for email in session.scalars(select(User.email).where(User.email.is_not(None)))
+                if email
+            }
+            for user in session.scalars(select(User).where(or_(User.email.is_(None), User.email == ""))).all():
+                base_email = _email_from_username(user.username)
+                candidate = base_email
+                counter = 2
+                while candidate in used_emails:
+                    local, domain = base_email.split("@", 1)
+                    candidate = f"{local}.{counter}@{domain}"
+                    counter += 1
+                user.email = candidate
+                used_emails.add(candidate)
 
-        if not session.get(AppSetting, "app_name"):
-            session.add(AppSetting(key="app_name", value="Market POS"))
+            if not session.get(AppSetting, "app_name"):
+                session.add(AppSetting(key="app_name", value="Market POS"))
 
-        for name in ["Oziq-ovqat", "Ichimliklar", "Gigiena", "Uy-ro'zg'or"]:
-            if not session.scalar(select(Category).where(Category.name == name)):
-                session.add(Category(name=name))
+            if seed_defaults:
+                for name in ["Oziq-ovqat", "Ichimliklar", "Gigiena", "Uy-ro'zg'or"]:
+                    if not session.scalar(select(Category).where(Category.name == name)):
+                        session.add(Category(name=name))
 
-        default_section_id = _default_product_section_id(session)
-        for product in session.scalars(select(Product).where(Product.section_id.is_(None))):
-            product.section_id = default_section_id
-        for template in session.scalars(select(ProductTemplate).where(ProductTemplate.section_id.is_(None))):
-            template.section_id = default_section_id
+            has_orphan_products = session.scalar(select(func.count(Product.id)).where(Product.section_id.is_(None))) > 0
+            has_orphan_templates = session.scalar(
+                select(func.count(ProductTemplate.id)).where(ProductTemplate.section_id.is_(None))
+            ) > 0
+            default_section_id = None
+            if seed_defaults or has_orphan_products or has_orphan_templates:
+                default_section_id = _default_product_section_id(session)
+                for product in session.scalars(select(Product).where(Product.section_id.is_(None))):
+                    product.section_id = default_section_id
+                for template in session.scalars(select(ProductTemplate).where(ProductTemplate.section_id.is_(None))):
+                    template.section_id = default_section_id
 
-        for code, name, rate, is_base in [
-            ("UZS", "O'zbek so'mi", 1, 1),
-            ("USD", "AQSh dollari", 12500, 0),
-            ("EUR", "Yevro", 13500, 0),
-        ]:
-            if not session.scalar(select(Currency).where(Currency.code == code)):
-                session.add(Currency(code=code, name=name, rate_to_uzs=rate, is_base=is_base))
+            for code, name, rate, is_base in [
+                ("UZS", "O'zbek so'mi", 1, 1),
+                ("USD", "AQSh dollari", 12500, 0),
+                ("EUR", "Yevro", 13500, 0),
+            ]:
+                if not session.scalar(select(Currency).where(Currency.code == code)):
+                    session.add(Currency(code=code, name=name, rate_to_uzs=rate, is_base=is_base))
 
-        for name in ["Ijara", "Transport", "Kommunal", "Ish haqi", "Boshqa"]:
-            if not session.scalar(select(ExpenseCategory).where(ExpenseCategory.name == name)):
-                session.add(ExpenseCategory(name=name))
+            if seed_defaults:
+                for name in ["Ijara", "Transport", "Kommunal", "Ish haqi", "Boshqa"]:
+                    if not session.scalar(select(ExpenseCategory).where(ExpenseCategory.name == name)):
+                        session.add(ExpenseCategory(name=name))
 
-        if session.scalar(select(func.count(ProductTemplate.id))) == 0:
-            template = ProductTemplate(name="Umumiy mahsulot", section_id=default_section_id)
-            session.add(template)
-            session.flush()
-            for order, field_name in enumerate(["Brend", "Model", "Rang"]):
-                session.add(ProductTemplateField(template_id=template.id, name=field_name, sort_order=order))
-    with engine.begin() as conn:
-        conn.exec_driver_sql("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_email ON users(email)")
-    migrate_finance_manual_json()
+            if seed_defaults and session.scalar(select(func.count(ProductTemplate.id))) == 0:
+                template = ProductTemplate(name="Umumiy mahsulot", section_id=default_section_id)
+                session.add(template)
+                session.flush()
+                for order, field_name in enumerate(["Brend", "Model", "Rang"]):
+                    session.add(ProductTemplateField(template_id=template.id, name=field_name, sort_order=order))
+        with engine.begin() as conn:
+            conn.exec_driver_sql("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_email ON users(email)")
+        migrate_finance_manual_json()
+    finally:
+        _SYNC_SUSPENDED = previous_sync_state
 
 
 def _quote_identifier(name):
@@ -908,6 +1167,49 @@ def _sync_state_set(conn, key, value):
         """,
         (key, value),
     )
+
+
+def _bind_account_identity(user_uid, email):
+    safe_uid = _safe_account_uid(user_uid)
+    normalized_email = _normalize_email(email)
+    if not normalized_email:
+        raise AppError("Online account emaili topilmadi.")
+    with _get_engine().begin() as conn:
+        stored_email = _normalize_email(_sync_state_get(conn, "account_email"))
+        stored_uid = _sync_state_get(conn, "account_user_uid")
+        if stored_email and stored_email != normalized_email:
+            raise AppError("Lokal baza boshqa email accountiga tegishli.")
+        if stored_uid and stored_uid != safe_uid:
+            _sync_state_set(conn, "server_reseed_required", "1")
+            _sync_state_set(conn, "last_dirty_at", _utc_now())
+            _sync_state_set(conn, "pending_change_count", "1")
+        _sync_state_set(conn, "account_email", normalized_email)
+        _sync_state_set(conn, "account_user_uid", safe_uid)
+
+
+def mark_server_bootstrap_required():
+    with _get_engine().begin() as conn:
+        _sync_state_set(conn, "server_bootstrap_required", "1")
+
+
+def mark_server_bootstrap_complete():
+    with _get_engine().begin() as conn:
+        _sync_state_set(conn, "server_bootstrap_required", "0")
+
+
+def is_server_bootstrap_required():
+    with _get_engine().begin() as conn:
+        return _sync_state_get(conn, "server_bootstrap_required") == "1"
+
+
+def is_server_reseed_required():
+    with _get_engine().begin() as conn:
+        return _sync_state_get(conn, "server_reseed_required") == "1"
+
+
+def mark_server_reseed_complete():
+    with _get_engine().begin() as conn:
+        _sync_state_set(conn, "server_reseed_required", "0")
 
 
 def _sync_state_int(conn, key, default=0):
@@ -976,7 +1278,20 @@ def export_sync_records():
             if not _has_table(conn, table_name):
                 continue
             quoted = _quote_identifier(table_name)
-            rows = conn.exec_driver_sql(f"SELECT * FROM {quoted}").mappings().all()
+            if table_name == "users" and _ACTIVE_ACCOUNT_UID:
+                rows = conn.exec_driver_sql(
+                    """
+                    SELECT users.*
+                    FROM users
+                    WHERE users.id NOT IN (
+                        SELECT user_id FROM user_settings
+                        WHERE key = 'api_user_uid' AND value = ?
+                    )
+                    """,
+                    (_ACTIVE_ACCOUNT_UID,),
+                ).mappings().all()
+            else:
+                rows = conn.exec_driver_sql(f"SELECT * FROM {quoted}").mappings().all()
             for row in rows:
                 data = dict(row)
                 local_id = str(data.get("id") if "id" in data else data.get("key"))
@@ -990,6 +1305,23 @@ def export_sync_records():
                         "data": data,
                         "local_updated_at": str(local_updated_at) if local_updated_at else now,
                         "deleted_at": str(data.get("deleted_at")) if data.get("deleted_at") else None,
+                        "source_device_key": device_key,
+                    }
+                )
+        if _has_table(conn, "sync_tombstones"):
+            tombstones = conn.exec_driver_sql(
+                "SELECT table_name, local_id, deleted_at FROM sync_tombstones"
+            ).mappings().all()
+            for tombstone in tombstones:
+                if tombstone["table_name"] not in SYNC_TABLES:
+                    continue
+                records.append(
+                    {
+                        "table_name": tombstone["table_name"],
+                        "local_id": tombstone["local_id"],
+                        "data": {},
+                        "local_updated_at": tombstone["deleted_at"],
+                        "deleted_at": tombstone["deleted_at"],
                         "source_device_key": device_key,
                     }
                 )
@@ -1040,6 +1372,11 @@ def import_sync_records(records):
                     f"INSERT OR REPLACE INTO {quoted_table} ({quoted_columns}) VALUES ({placeholders})",
                     values,
                 )
+                if _has_table(conn, "sync_tombstones"):
+                    conn.exec_driver_sql(
+                        "DELETE FROM sync_tombstones WHERE table_name=? AND local_id=?",
+                        (table_name, str(record.get("local_id") or "")),
+                    )
                 imported += 1
             conn.exec_driver_sql("PRAGMA foreign_keys=ON")
             _sync_state_set(conn, "last_pull_at", _utc_now())
@@ -2873,13 +3210,16 @@ def authenticate(email, password):
         return None
 
 
-def sync_online_user(email, display_name=None, role="cashier", access_token=None):
+def sync_online_user(email, display_name=None, role="admin", access_token=None, user_uid=None):
     email = _normalize_email(email)
     role = role if role in ("admin", "cashier") else "cashier"
     display_name = (display_name or "").strip()
     username = display_name or email
     if not email:
         raise AppError("Email kiriting.")
+    safe_uid = _safe_account_uid(user_uid) if user_uid else None
+    if safe_uid and _ACTIVE_ACCOUNT_UID and safe_uid != _ACTIVE_ACCOUNT_UID:
+        raise AppError("Account bazasi boshqa userga tegishli.")
     global _SYNC_SUSPENDED
     previous = _SYNC_SUSPENDED
     _SYNC_SUSPENDED = True
@@ -2892,7 +3232,10 @@ def sync_online_user(email, display_name=None, role="cashier", access_token=None
                 session.flush()
             else:
                 if display_name:
-                    user.username = display_name
+                    duplicate_name = session.scalar(
+                        select(User.id).where(User.username == display_name, User.id != user.id)
+                    )
+                    user.username = email if duplicate_name else display_name
                 user.email = email
                 user.role = role
             if access_token:
@@ -2901,6 +3244,12 @@ def sync_online_user(email, display_name=None, role="cashier", access_token=None
                 )
                 row.value = access_token
                 session.merge(row)
+            if safe_uid:
+                uid_row = session.get(UserSetting, {"user_id": user.id, "key": "api_user_uid"}) or UserSetting(
+                    user_id=user.id, key="api_user_uid"
+                )
+                uid_row.value = safe_uid
+                session.merge(uid_row)
             return _row_from_model(user)
     finally:
         _SYNC_SUSPENDED = previous
@@ -2933,6 +3282,7 @@ def touch_user_activity(user_id):
             session.merge(row)
     finally:
         _SYNC_SUSPENDED = previous
+    _touch_account_session(active=True)
 
 
 def clear_user_activity(user_id):
@@ -2948,6 +3298,72 @@ def clear_user_activity(user_id):
                 session.delete(row)
     finally:
         _SYNC_SUSPENDED = previous
+    _touch_account_session(active=False)
+
+
+def remove_foreign_online_accounts(owner_user_id, account_uid):
+    safe_uid = _safe_account_uid(account_uid)
+    global _SYNC_SUSPENDED
+    previous = _SYNC_SUSPENDED
+    _SYNC_SUSPENDED = True
+    try:
+        with session_scope() as session:
+            token_rows = session.execute(
+                select(UserSetting.user_id, UserSetting.value).where(UserSetting.key == "api_access_token")
+            ).all()
+            foreign_ids = {
+                user_id
+                for user_id, token in token_rows
+                if user_id != owner_user_id and _jwt_subject(token) and _jwt_subject(token) != safe_uid
+            }
+            for foreign_id in foreign_ids:
+                foreign_user = session.get(User, foreign_id)
+                if not foreign_user:
+                    continue
+                _reassign_user_references(session, foreign_id, owner_user_id)
+                session.delete(foreign_user)
+    finally:
+        _SYNC_SUSPENDED = previous
+
+
+def restore_recent_account_user(max_minutes=15):
+    data = _read_account_session()
+    user_uid = data.get("user_uid")
+    email = _normalize_email(data.get("email"))
+    activity_value = data.get("last_activity_utc")
+    if not user_uid or not email or not activity_value:
+        return None
+    try:
+        activity_at = datetime.strptime(str(activity_value), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    if datetime.now(timezone.utc) - activity_at > timedelta(minutes=max_minutes):
+        return None
+
+    activation = activate_account_database(user_uid, email=email, allow_legacy_import=False)
+    owner_data = {
+        "user_uid": user_uid,
+        "email": email,
+        "display_name": data.get("display_name"),
+    }
+    init_db(account_owner=owner_data, seed_defaults=False)
+    if activation.get("database_created"):
+        mark_server_bootstrap_required()
+    user = sync_online_user(
+        email,
+        display_name=data.get("display_name"),
+        role="admin",
+        access_token=data.get("api_access_token"),
+        user_uid=user_uid,
+    )
+    remove_foreign_online_accounts(user["id"], user_uid)
+    restored = dict(user)
+    restored["role"] = "cashier"
+    restored["api_access_token"] = data.get("api_access_token")
+    restored["api_user_id"] = data.get("api_user_id")
+    restored["api_user_uid"] = user_uid
+    restored["local_database_created"] = bool(activation.get("database_created"))
+    return Row(restored)
 
 
 def get_recent_activity_user(max_minutes=15):
@@ -3020,8 +3436,12 @@ def add_user(email, password, role="cashier", username=None):
         raise AppError("Role noto'g'ri.")
     with session_scope() as session:
         try:
-            session.add(User(username=username, email=email, password=_hash_password(password), role=role))
+            user = User(username=username, email=email, password=_hash_password(password), role=role)
+            session.add(user)
             session.flush()
+            tombstone = session.get(SyncTombstone, {"table_name": "users", "local_id": str(user.id)})
+            if tombstone:
+                session.delete(tombstone)
         except IntegrityError as exc:
             raise AppError("Bu email allaqachon mavjud.") from exc
 
@@ -3037,6 +3457,9 @@ def update_user(user_id, email, password=None, role="cashier", username=None):
         try:
             user = session.get(User, user_id)
             if user:
+                owner_uid = session.get(UserSetting, {"user_id": user_id, "key": "api_user_uid"})
+                if owner_uid and (email != user.email or role != "admin"):
+                    raise AppError("Asosiy account emaili va admin holatini bu yerdan o'zgartirib bo'lmaydi.")
                 user.username = username
                 user.email = email
                 user.role = role
@@ -3054,13 +3477,24 @@ def delete_user(user_id):
     with session_scope() as session:
         admins = session.scalar(select(func.count(User.id)).where(User.role == "admin"))
         user = session.get(User, user_id)
+        owner_uid = session.get(UserSetting, {"user_id": user_id, "key": "api_user_uid"})
+        if owner_uid:
+            raise AppError("Asosiy accountni kassirlar bo'limidan o'chirib bo'lmaydi.")
         if user and user.role == "admin" and admins <= 1:
             raise AppError("Oxirgi adminni o'chirib bo'lmaydi.")
         if user:
-            try:
-                session.delete(user)
-            except IntegrityError as exc:
-                raise AppError("Bu foydalanuvchi sotuv tarixida bor, uni o'chirib bo'lmaydi.") from exc
+            has_history = any((
+                session.scalar(select(func.count(LoginLog.id)).where(LoginLog.user_id == user_id)),
+                session.scalar(select(func.count(Expense.id)).where(Expense.user_id == user_id)),
+                session.scalar(select(func.count(Sale.id)).where(Sale.cashier_id == user_id)),
+                session.scalar(
+                    select(func.count(InventoryCheckSession.id)).where(InventoryCheckSession.started_by == user_id)
+                ),
+            ))
+            if has_history:
+                raise AppError("Bu foydalanuvchi amallar tarixida bor, uni o'chirib bo'lmaydi.")
+            session.merge(SyncTombstone(table_name="users", local_id=str(user.id), deleted_at=_utc_now()))
+            session.delete(user)
 
 
 def get_low_stock_products():

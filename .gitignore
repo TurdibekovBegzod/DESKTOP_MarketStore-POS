@@ -11,6 +11,9 @@ venv-lx
 build/
 develop-eggs/
 dist/
+app/data/accounts/
+app/data/account_session.json
+api/credentials.json
 downloads/
 eggs/
 .eggs/
@@ -149,6 +152,7 @@ celerybeat.pid
 
 # Environments
 .env
+!api/.env
 .envrc
 .venv
 env/

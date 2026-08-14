@@ -13,7 +13,7 @@ def _token_for_user(user):
     token = db.get_user_api_token((user or {}).get("id"))
     if token:
         return token
-    raise SyncError("Online account token topilmadi. Gmail yoki Google orqali qayta kiring.")
+    raise SyncError("Online account token topilmadi. Email va parol orqali qayta kiring.")
 
 
 def push_local_changes(user):
@@ -26,6 +26,7 @@ def push_local_changes(user):
         note="desktop snapshot",
     )
     db.mark_sync_pushed()
+    db.mark_server_reseed_complete()
     return {
         "sent": len(records),
         "saved": result.get("saved", 0),
@@ -38,8 +39,17 @@ def pull_server_changes(user):
     result = api_client.pull_sync_records(token, include_deleted=True)
     records = result.get("records", [])
     imported = db.import_sync_records(records)
+    db.mark_server_bootstrap_complete()
     return {
         "received": len(records),
         "imported": imported,
         "server_time": result.get("server_time"),
     }
+
+
+def synchronize_account_storage(user):
+    if db.is_server_reseed_required():
+        return {"direction": "push", **push_local_changes(user)}
+    if db.is_server_bootstrap_required():
+        return {"direction": "pull", **pull_server_changes(user)}
+    return {"direction": "none"}

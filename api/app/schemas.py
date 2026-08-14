@@ -60,8 +60,41 @@ class PasswordResetConfirm(BaseModel):
         return code
 
 
+class RegistrationVerify(BaseModel):
+    email: str = Field(min_length=5, max_length=255)
+    code: str = Field(min_length=6, max_length=12)
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, value: str) -> str:
+        return normalize_email(value)
+
+    @field_validator("code")
+    @classmethod
+    def normalize_code(cls, value: str) -> str:
+        code = "".join(ch for ch in value.strip() if ch.isdigit())
+        if len(code) != 6:
+            raise ValueError("Verification code must be 6 digits")
+        return code
+
+
+class RegistrationResend(BaseModel):
+    email: str = Field(min_length=5, max_length=255)
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, value: str) -> str:
+        return normalize_email(value)
+
+
 class MessageOut(BaseModel):
     message: str
+
+
+class RegistrationChallengeOut(BaseModel):
+    message: str
+    expires_in_seconds: int
+    resend_after_seconds: int
 
 
 class UserOut(BaseModel):
@@ -71,6 +104,7 @@ class UserOut(BaseModel):
     display_name: str | None = None
     role: str
     is_active: bool
+    email_verified_at: datetime | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}

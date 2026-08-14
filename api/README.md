@@ -28,7 +28,9 @@ alembic revision --autogenerate -m "next change"
 
 ## Asosiy endpointlar
 
-- `POST /api/v1/auth/register` - email/parol bilan user yaratish. Har bir yangi account o'z muhitining `admin` useri bo'lib ochiladi.
+- `POST /api/v1/auth/register` - signup kodini emailga yuborish; account kod tasdiqlanguncha faol bo'lmaydi
+- `POST /api/v1/auth/register/confirm` - 6 xonali kodni tasdiqlash va bearer token olish
+- `POST /api/v1/auth/register/resend` - 3 daqiqa o'tgach yangi signup kodini yuborish
 - `POST /api/v1/auth/token` - OAuth2 form orqali bearer token olish (`username` maydoniga email yuboriladi)
 - `POST /api/v1/auth/login` - JSON email/parol orqali bearer token olish
 - `POST /api/v1/auth/password-reset/request` - emailga verification code yuborish
@@ -65,7 +67,7 @@ Authorization: Bearer <token>
 
 ## Email Sender
 
-Parol tiklash kodi har bir userning o'z emailiga yuboriladi. `.env` ichidagi SMTP esa faqat yuboruvchi sender akkaunt bo'ladi. Minglab user bo'lsa ham userlar bitta emailga bog'lanmaydi, har biri o'z `users.email` qiymatiga code oladi.
+Signup va parol tiklash kodlari har bir userning o'z emailiga yuboriladi. `.env` ichidagi SMTP esa faqat yuboruvchi sender akkaunt bo'ladi. Minglab user bo'lsa ham userlar bitta emailga bog'lanmaydi, har biri o'z `users.email` qiymatiga code oladi.
 
 ```env
 SMTP_HOST=smtp.gmail.com
@@ -73,11 +75,13 @@ SMTP_PORT=587
 SMTP_USERNAME=sender@example.com
 SMTP_PASSWORD=sender-smtp-password
 SMTP_FROM_EMAIL=sender@example.com
+SIGNUP_VERIFICATION_CODE_MINUTES=3
+SIGNUP_VERIFICATION_RESEND_SECONDS=180
 ```
 
 Gmail ishlatilsa oddiy parol emas, Google Account ichidan yaratilgan App Password kerak bo'ladi. Katta production uchun SendGrid, Mailgun, Amazon SES yoki korporativ SMTP ishlatish yaxshiroq.
 
-Email yuborish request ichida bajarilmaydi. API reset code yaratib Redis queue'ga task tashlaydi, Celery worker esa SMTP orqali email yuboradi:
+Email yuborish request ichida bajarilmaydi. API verification code yaratib Redis queue'ga task tashlaydi, Celery worker esa SMTP orqali email yuboradi:
 
 ```text
 FastAPI -> Redis -> Celery worker -> SMTP provider -> user email
@@ -85,6 +89,6 @@ FastAPI -> Redis -> Celery worker -> SMTP provider -> user email
 
 ## Account Login
 
-Desktop appda user email va parol orqali ro'yxatdan o'tadi yoki login qiladi. `POST /api/v1/auth/register` yangi account yaratadi, `POST /api/v1/auth/login` esa bearer token beradi.
+Desktop appda user email va parol orqali ro'yxatdan o'tadi yoki login qiladi. Signup tugagach emaildagi 6 xonali kod tasdiqlanadi; kod 3 daqiqa amal qiladi. Tasdiqlangan yangi account `admin` sifatida ochiladi, desktop esa birinchi ekranda kassir rejimini ko'rsatadi.
 
-Har bir accountga alohida `user_uid` beriladi. Desktop app tokenni saqlaydi va sync endpointlar faqat shu `user_uid` muhitidagi ma'lumotlarni qaytaradi.
+Har bir accountga alohida `user_uid` beriladi va u `users.email` bilan bog'langan. Desktop app lokal ma'lumotni `data/accounts/email-<email_sha256>/market_pos.db` ichida saqlaydi; tokenli sync endpointlar esa faqat shu email accountining `user_uid` muhitidagi ma'lumotlarni qaytaradi. Lokal DB yo'qolsa u qayta yaratiladi va serverdan pull qilinadi. Server DB qayta yaralib UID almashsa, bir xil email lokal bazani topadi va uni yangi server muhitiga qayta yuboradi.

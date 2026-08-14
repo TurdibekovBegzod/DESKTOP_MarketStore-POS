@@ -55,12 +55,7 @@ def _request_json(path, payload=None, token=None, timeout=10):
         except Exception:
             detail = None
         detail_text = _format_api_detail(detail)
-        if detail_text == "Google login is not configured":
-            raise ApiClientError(
-                "Google orqali kirish hali sozlanmagan. API .env ichiga real GOOGLE_CLIENT_ID va "
-                "GOOGLE_CLIENT_SECRET qo'yish kerak."
-            ) from exc
-        if exc.code in (400, 401, 403, 422):
+        if exc.code in (400, 401, 403, 409, 422, 429):
             raise ApiClientError(detail_text or "Email yoki parol noto'g'ri.") from exc
         raise ApiClientError(detail_text or f"Server xatosi: HTTP {exc.code}") from exc
     except URLError as exc:
@@ -80,6 +75,23 @@ def login(email, password):
     return {"token": token, "user": user}
 
 
+def register(email, password):
+    return _request_json("/auth/register", {"email": email, "password": password})
+
+
+def confirm_registration(email, code):
+    token_response = _request_json("/auth/register/confirm", {"email": email, "code": code})
+    token = token_response.get("access_token")
+    if not token:
+        raise ApiClientError("Server token qaytarmadi.")
+    user = _request_json("/auth/me", token=token)
+    return {"token": token, "user": user}
+
+
+def resend_registration_code(email):
+    return _request_json("/auth/register/resend", {"email": email})
+
+
 def request_password_reset(email):
     return _request_json("/auth/password-reset/request", {"email": email})
 
@@ -89,14 +101,6 @@ def confirm_password_reset(email, code, new_password):
         "/auth/password-reset/confirm",
         {"email": email, "code": code, "new_password": new_password},
     )
-
-
-def start_google_login():
-    return _request_json("/auth/google/start", {})
-
-
-def get_google_login_status(state):
-    return _request_json(f"/auth/google/status/{state}")
 
 
 def get_current_user(token):

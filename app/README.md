@@ -11,8 +11,10 @@ python main.py
 
 ## Kirish
 
-- Kirish online API orqali tekshiriladi: Gmail/email va parol kiritiladi.
-- Google orqali kirish ham API OAuth flow bilan ishlaydi.
+- Kirish online API orqali tekshiriladi: email va parol kiritiladi.
+- Signup paytida emailga 3 daqiqa amal qiladigan 6 xonali tasdiqlash kodi yuboriladi.
+- Har bir online account lokalda alohida `data/accounts/email-<email_sha256>/market_pos.db` bazasidan foydalanadi.
+- Lokal DB fayli yo'q bo'lsa yangidan yaratiladi va shu email accountining server ma'lumotlari avtomatik olinadi.
 - Default API URL: `http://169.58.152.33:8000/api/v1`
 - Boshqa server ishlatilsa appni ochishdan oldin `MARKETSTORE_API_URL` env qiymatini bering.
 - Parol unutilsa login oynasidagi `Parolni unutdingizmi?` orqali emailga verification code yuboriladi.

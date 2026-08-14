@@ -1,7 +1,8 @@
 from datetime import datetime, timedelta, timezone
+import math
 import secrets
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
@@ -10,40 +11,152 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.database import get_db
 from app.deps import get_current_user
-from app.models import PasswordResetCode, User
+from app.models import EmailVerificationCode, PasswordResetCode, User
 from app.schemas import (
     LoginRequest,
     MessageOut,
     PasswordResetConfirm,
     PasswordResetRequest,
+    RegistrationChallengeOut,
+    RegistrationResend,
+    RegistrationVerify,
     TokenOut,
     UserCreate,
     UserOut,
     normalize_email,
 )
 from app.security import create_access_token, hash_password, hash_secret, verify_password
-from app.tasks import send_password_reset_code_task
+from app.tasks import send_password_reset_code_task, send_signup_verification_code_task
 
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
-@router.post("/register", response_model=UserOut, status_code=status.HTTP_201_CREATED)
-def register(payload: UserCreate, db: Session = Depends(get_db)):
-    user = User(
-        email=payload.email,
-        password_hash=hash_password(payload.password),
-        display_name=payload.display_name,
-        role="admin",
+def _seconds_until(value: datetime, now: datetime | None = None) -> int:
+    now = now or datetime.now(timezone.utc)
+    return max(0, math.ceil((value - now).total_seconds()))
+
+
+def _new_signup_code(db: Session, user: User, now: datetime) -> tuple[str, datetime]:
+    settings = get_settings()
+    code = f"{secrets.randbelow(900000) + 100000}"
+    expires_at = now + timedelta(minutes=settings.signup_verification_code_minutes)
+    db.execute(
+        update(EmailVerificationCode)
+        .where(EmailVerificationCode.user_id == user.id, EmailVerificationCode.used_at.is_(None))
+        .values(used_at=now)
     )
-    db.add(user)
-    try:
+    db.add(EmailVerificationCode(user_id=user.id, code_hash=hash_secret(code), expires_at=expires_at))
+    return code, expires_at
+
+
+def _registration_challenge(expires_at: datetime, resend_after_seconds: int, now: datetime) -> RegistrationChallengeOut:
+    return RegistrationChallengeOut(
+        message="Verification code has been sent.",
+        expires_in_seconds=_seconds_until(expires_at, now),
+        resend_after_seconds=resend_after_seconds,
+    )
+
+
+@router.post("/register", response_model=RegistrationChallengeOut, status_code=status.HTTP_202_ACCEPTED)
+def register(payload: UserCreate, db: Session = Depends(get_db)):
+    settings = get_settings()
+    now = datetime.now(timezone.utc)
+    user = db.scalar(select(User).where(User.email == payload.email).with_for_update())
+    if user and user.is_active:
+        raise HTTPException(status_code=409, detail="Email already exists")
+
+    if user is None:
+        user = User(
+            email=payload.email,
+            password_hash=hash_password(payload.password),
+            display_name=payload.display_name,
+            role="admin",
+            is_active=False,
+        )
+        db.add(user)
+        try:
+            db.flush()
+        except IntegrityError as exc:
+            db.rollback()
+            raise HTTPException(status_code=409, detail="Email already exists") from exc
+    else:
+        user.password_hash = hash_password(payload.password)
+        user.display_name = payload.display_name
+
+    latest_code = db.scalar(
+        select(EmailVerificationCode)
+        .where(EmailVerificationCode.user_id == user.id, EmailVerificationCode.used_at.is_(None))
+        .order_by(EmailVerificationCode.created_at.desc())
+        .limit(1)
+    )
+    if latest_code and latest_code.expires_at > now:
         db.commit()
-    except IntegrityError as exc:
-        db.rollback()
-        raise HTTPException(status_code=409, detail="Email already exists") from exc
-    db.refresh(user)
-    return user
+        remaining = _seconds_until(latest_code.expires_at, now)
+        return _registration_challenge(latest_code.expires_at, remaining, now)
+
+    code, expires_at = _new_signup_code(db, user, now)
+    db.commit()
+    send_signup_verification_code_task.delay(user.email, code)
+    return _registration_challenge(expires_at, settings.signup_verification_resend_seconds, now)
+
+
+@router.post("/register/resend", response_model=RegistrationChallengeOut)
+def resend_registration_code(payload: RegistrationResend, db: Session = Depends(get_db)):
+    settings = get_settings()
+    now = datetime.now(timezone.utc)
+    user = db.scalar(select(User).where(User.email == payload.email).with_for_update())
+    if not user or user.is_active:
+        raise HTTPException(status_code=400, detail="Account is not waiting for verification")
+
+    latest_code = db.scalar(
+        select(EmailVerificationCode)
+        .where(EmailVerificationCode.user_id == user.id)
+        .order_by(EmailVerificationCode.created_at.desc())
+        .limit(1)
+    )
+    if latest_code:
+        resend_at = latest_code.created_at + timedelta(seconds=settings.signup_verification_resend_seconds)
+        retry_after = _seconds_until(resend_at, now)
+        if retry_after > 0:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Verification code can be resent in {retry_after} seconds",
+                headers={"Retry-After": str(retry_after)},
+            )
+
+    code, expires_at = _new_signup_code(db, user, now)
+    db.commit()
+    send_signup_verification_code_task.delay(user.email, code)
+    return _registration_challenge(expires_at, settings.signup_verification_resend_seconds, now)
+
+
+@router.post("/register/confirm", response_model=TokenOut)
+def confirm_registration(payload: RegistrationVerify, db: Session = Depends(get_db)):
+    user = db.scalar(select(User).where(User.email == payload.email).with_for_update())
+    if not user or user.is_active:
+        raise HTTPException(status_code=400, detail="Invalid or expired verification code")
+
+    now = datetime.now(timezone.utc)
+    code_row = db.scalar(
+        select(EmailVerificationCode)
+        .where(
+            EmailVerificationCode.user_id == user.id,
+            EmailVerificationCode.code_hash == hash_secret(payload.code),
+            EmailVerificationCode.used_at.is_(None),
+            EmailVerificationCode.expires_at > now,
+        )
+        .order_by(EmailVerificationCode.created_at.desc())
+        .limit(1)
+    )
+    if not code_row:
+        raise HTTPException(status_code=400, detail="Invalid or expired verification code")
+
+    user.is_active = True
+    user.email_verified_at = now
+    code_row.used_at = now
+    db.commit()
+    return TokenOut(access_token=create_access_token(user.uid))
 
 
 def _issue_token(email: str, password: str, db: Session):
@@ -51,7 +164,7 @@ def _issue_token(email: str, password: str, db: Session):
     if not user or not verify_password(password, user.password_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
     if not user.is_active:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User is disabled")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Email verification is required")
     return TokenOut(access_token=create_access_token(user.uid))
 
 
