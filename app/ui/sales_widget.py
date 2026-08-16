@@ -658,7 +658,10 @@ class SalesWidget(QWidget):
         self.cashier_combo.blockSignals(False)
 
     def _cashier_display_name(self, user):
-        name = (user.get("username") or user.get("email") or "User").strip()
+        username = (user.get("username") or "").strip()
+        if username and "@" not in username:
+            return username
+        name = (username or user.get("email") or "User").strip()
         if "@" in name:
             name = name.split("@", 1)[0]
         name = name.replace(".", " ").replace("_", " ")

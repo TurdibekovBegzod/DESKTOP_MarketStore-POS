@@ -3426,14 +3426,17 @@ def get_users():
         return [Row(dict(id=u.id, username=u.username, email=u.email, role=u.role, created_at=u.created_at)) for u in rows]
 
 
-def add_user(email, password, role="cashier", username=None):
+def add_user(email, password=None, role="cashier", username=None):
     email = _normalize_email(email)
     username = (username or email if email else "").strip()
     username = username.strip()
-    if not email or not password:
-        raise AppError("Email va parol kiriting.")
+    if not email:
+        raise AppError("Email kiriting.")
+    if not username:
+        raise AppError("To'liq ismni kiriting.")
     if role not in ("admin", "cashier"):
         raise AppError("Role noto'g'ri.")
+    password = password or secrets.token_urlsafe(32)
     with session_scope() as session:
         try:
             user = User(username=username, email=email, password=_hash_password(password), role=role)

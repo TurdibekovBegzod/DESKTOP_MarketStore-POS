@@ -34,7 +34,7 @@ class AccountDatabaseIsolationTest(unittest.TestCase):
 
     def test_products_and_cashiers_are_isolated_per_account(self):
         first_owner = self._open_account("account-one", "one@example.com")
-        db.add_user("cashier.one@example.com", "secret1", role="cashier", username="Cashier One")
+        db.add_user("cashier.one@example.com", role="cashier", username="Cashier One")
         db.add_product({
             "barcode": "ONE-1",
             "name": "First account product",

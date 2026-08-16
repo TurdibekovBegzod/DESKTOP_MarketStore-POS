@@ -676,6 +676,28 @@ TRANSLATIONS["ru"].update({
     "Kassir:": "Кассир:",
 })
 
+TRANSLATIONS["en"].update({
+    "To'liq ism": "Full name",
+    "To'liq ism *:": "Full name *:",
+    "Ism Familiya": "Full name",
+    "Rol": "Role",
+    "Rol:": "Role:",
+    "Email *:": "Email *:",
+    "Kassir qo'shish": "Add cashier",
+    "Foydalanuvchini tahrirlash": "Edit user",
+})
+
+TRANSLATIONS["ru"].update({
+    "To'liq ism": "Полное имя",
+    "To'liq ism *:": "Полное имя *:",
+    "Ism Familiya": "Имя и фамилия",
+    "Rol": "Роль",
+    "Rol:": "Роль:",
+    "Email *:": "Email *:",
+    "Kassir qo'shish": "Добавить кассира",
+    "Foydalanuvchini tahrirlash": "Изменить пользователя",
+})
+
 
 def t(text, language="uz"):
     if language == "uz" or not text:

@@ -6,14 +6,17 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 import database as db
 from ui.async_loader import AsyncDataLoader, make_progress_bar
-from ui.i18n import set_language
+from ui.i18n import set_language, t
 
 
 class UserDialog(QDialog):
     def __init__(self, parent=None, user=None):
         super().__init__(parent)
         self.user = user
-        self.setWindowTitle("Kassir qo'shish" if not user else "Foydalanuvchini tahrirlash")
+        self.language = parent.property("app_language") if parent else "uz"
+        self.language = self.language or "uz"
+        title = "Kassir qo'shish" if not user else "Foydalanuvchini tahrirlash"
+        self.setWindowTitle(t(title, self.language))
         self.setFixedWidth(360)
         self._build_ui()
 
@@ -32,22 +35,21 @@ class UserDialog(QDialog):
 
         form = QFormLayout()
         form.setSpacing(10)
+        self.full_name_edit = QLineEdit(self.user.get("username", "") if self.user else "")
+        self.full_name_edit.setPlaceholderText("Ism Familiya")
+        form.addRow("To'liq ism *:", self.full_name_edit)
+
         self.email_edit = QLineEdit((self.user.get("email") or self.user.get("username")) if self.user else "")
         form.addRow("Email *:", self.email_edit)
 
-        self.password_edit = QLineEdit()
-        self.password_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.password_edit.setPlaceholderText("Yangi parol" if self.user else "Parol *")
-        form.addRow("Parol:", self.password_edit)
-
         self.role_combo = QComboBox()
-        self.role_combo.addItem("Kassir", "cashier")
-        self.role_combo.addItem("Admin", "admin")
+        self.role_combo.addItem(t("Kassir", self.language), "cashier")
+        self.role_combo.addItem(t("Admin", self.language), "admin")
         if self.user:
             idx = self.role_combo.findData(self.user["role"])
             if idx >= 0:
                 self.role_combo.setCurrentIndex(idx)
-        form.addRow("Role:", self.role_combo)
+        form.addRow("Rol:", self.role_combo)
         layout.addLayout(form)
 
         btn_row = QHBoxLayout()
@@ -60,20 +62,21 @@ class UserDialog(QDialog):
         btn_row.addWidget(cancel_btn)
         btn_row.addWidget(save_btn)
         layout.addLayout(btn_row)
+        set_language(self, self.language)
 
     def _save(self):
+        if not self.full_name_edit.text().strip():
+            QMessageBox.warning(self, "Xatolik", "To'liq ismni kiriting!")
+            return
         if not self.email_edit.text().strip():
             QMessageBox.warning(self, "Xatolik", "Email kiriting!")
-            return
-        if not self.user and not self.password_edit.text():
-            QMessageBox.warning(self, "Xatolik", "Parol kiriting!")
             return
         self.accept()
 
     def get_data(self):
         return {
+            "full_name": self.full_name_edit.text().strip(),
             "email": self.email_edit.text().strip(),
-            "password": self.password_edit.text(),
             "role": self.role_combo.currentData(),
         }
 
@@ -102,11 +105,12 @@ class UsersWidget(QWidget):
         layout.addLayout(toolbar)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(4)
-        self.table.setHorizontalHeaderLabels(["Email", "Role", "Yaratilgan", "Amallar"])
+        self.table.setColumnCount(5)
+        self.table.setHorizontalHeaderLabels(["To'liq ism", "Email", "Rol", "Yaratilgan", "Amallar"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
-        self.table.setColumnWidth(3, 154)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
+        self.table.setColumnWidth(4, 154)
         self.table.verticalHeader().setDefaultSectionSize(78)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -124,11 +128,12 @@ class UsersWidget(QWidget):
         self.table.setRowCount(0)
         for row, user in enumerate(users):
             self.table.insertRow(row)
-            username_item = QTableWidgetItem(user.get("email") or user["username"])
+            username_item = QTableWidgetItem(user.get("username") or user.get("email") or "")
             username_item.setData(Qt.ItemDataRole.UserRole, dict(user))
             self.table.setItem(row, 0, username_item)
-            self.table.setItem(row, 1, QTableWidgetItem("Admin" if user["role"] == "admin" else "Kassir"))
-            self.table.setItem(row, 2, QTableWidgetItem(user["created_at"] or ""))
+            self.table.setItem(row, 1, QTableWidgetItem(user.get("email") or ""))
+            self.table.setItem(row, 2, QTableWidgetItem("Admin" if user["role"] == "admin" else "Kassir"))
+            self.table.setItem(row, 3, QTableWidgetItem(user["created_at"] or ""))
 
             actions = QWidget()
             actions_layout = QVBoxLayout(actions)
@@ -147,7 +152,7 @@ class UsersWidget(QWidget):
             del_btn.clicked.connect(lambda _, r=row: self._delete_user(r))
             actions_layout.addWidget(edit_btn)
             actions_layout.addWidget(del_btn)
-            self.table.setCellWidget(row, 3, actions)
+            self.table.setCellWidget(row, 4, actions)
         set_language(self, self.property("app_language") or "uz")
 
     def _add_user(self):
@@ -155,7 +160,11 @@ class UsersWidget(QWidget):
         if dlg.exec():
             data = dlg.get_data()
             try:
-                db.add_user(data["email"], data["password"], data["role"])
+                db.add_user(
+                    email=data["email"],
+                    role=data["role"],
+                    username=data["full_name"],
+                )
                 self.load_data()
             except db.AppError as exc:
                 QMessageBox.warning(self, "Saqlanmadi", str(exc))
@@ -169,7 +178,12 @@ class UsersWidget(QWidget):
         if dlg.exec():
             data = dlg.get_data()
             try:
-                db.update_user(user["id"], data["email"], data["password"], data["role"])
+                db.update_user(
+                    user["id"],
+                    data["email"],
+                    role=data["role"],
+                    username=data["full_name"],
+                )
                 self.load_data()
             except db.AppError as exc:
                 QMessageBox.warning(self, "Saqlanmadi", str(exc))

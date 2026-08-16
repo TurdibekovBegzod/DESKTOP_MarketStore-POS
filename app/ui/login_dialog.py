@@ -16,7 +16,13 @@ class PasswordResetDialog(QDialog):
     def __init__(self, email="", parent=None):
         super().__init__(parent)
         self.setWindowTitle("Parolni tiklash")
-        self.setMinimumSize(420, 360)
+        self.setMinimumSize(420, 380)
+        self.reset_countdown = 0
+        self.reset_resend_at = 0.0
+        self.has_sent_once = False
+        self.reset_timer = QTimer(self)
+        self.reset_timer.setInterval(1000)
+        self.reset_timer.timeout.connect(self._tick_reset_countdown)
         self.setStyleSheet("""
             QDialog { background: #0f172a; }
             QLabel#title { color: #e2e8f0; font-size: 20px; font-weight: bold; }
@@ -33,6 +39,9 @@ class PasswordResetDialog(QDialog):
                 border-radius: 8px; padding: 11px; font-weight: bold;
             }
             QPushButton:hover { background: #475569; }
+            QPushButton:disabled {
+                background: #1e293b; color: #64748b; border: 1px solid #334155;
+            }
             QPushButton#primary { background: #3b82f6; color: white; }
             QPushButton#primary:hover { background: #2563eb; }
         """)
@@ -59,9 +68,9 @@ class PasswordResetDialog(QDialog):
         self.email_edit.setMinimumHeight(44)
         layout.addWidget(self.email_edit)
 
-        send_btn = QPushButton("Kod yuborish")
-        send_btn.clicked.connect(self._send_code)
-        layout.addWidget(send_btn)
+        self.send_btn = QPushButton("Kodni jo'natish")
+        self.send_btn.clicked.connect(self._send_code)
+        layout.addWidget(self.send_btn)
 
         self.code_edit = QLineEdit()
         self.code_edit.setPlaceholderText("Verification code")
@@ -87,16 +96,45 @@ class PasswordResetDialog(QDialog):
         confirm_btn.clicked.connect(self._confirm_reset)
         layout.addWidget(confirm_btn)
 
+    def _start_countdown(self, seconds=600):
+        self.reset_countdown = seconds
+        self.reset_resend_at = time.monotonic() + seconds
+        self._update_send_button()
+        self.reset_timer.start()
+
+    def _tick_reset_countdown(self):
+        self.reset_countdown = max(0, math.ceil(self.reset_resend_at - time.monotonic()))
+        if self.reset_countdown == 0:
+            self.reset_timer.stop()
+        self._update_send_button()
+
+    def _update_send_button(self):
+        if self.reset_countdown > 0:
+            self.send_btn.setEnabled(False)
+            minutes, seconds = divmod(self.reset_countdown, 60)
+            self.send_btn.setText(f"Qayta jo'natish ({minutes:02d}:{seconds:02d})")
+        else:
+            self.send_btn.setEnabled(True)
+            if self.has_sent_once:
+                self.send_btn.setText("Qayta jo'natish")
+            else:
+                self.send_btn.setText("Kodni jo'natish")
+
     def _send_code(self):
+        if self.reset_countdown > 0:
+            return
         email = self.email_edit.text().strip()
         if not email:
+            self.error_lbl.setStyleSheet("color: #f87171; font-size: 12px;")
             self.error_lbl.setText("Email kiriting.")
             return
         try:
             api_client.request_password_reset(email)
+            self.has_sent_once = True
             self.error_lbl.setStyleSheet("color: #22c55e; font-size: 12px;")
             self.error_lbl.setText("Agar email mavjud bo'lsa, verification code yuborildi.")
             self.code_edit.setFocus()
+            self._start_countdown(600)
         except api_client.ApiClientError as exc:
             self.error_lbl.setStyleSheet("color: #f87171; font-size: 12px;")
             self.error_lbl.setText(str(exc))
