@@ -33,9 +33,10 @@ services:
   api:
     build: .
     container_name: marketstore-api
-    network_mode: host
+    ports:
+      - "127.0.0.1:${API_PORT_FORWARD:-18080}:8000"
     environment:
-      DATABASE_URL: ${API_DATABASE_URL:-postgresql+psycopg://marketstore:marketstore@127.0.0.1:15432/marketstore}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://marketstore:marketstore@postgres:5432/marketstore}
       SECRET_KEY: ${SECRET_KEY:-change-this-local-dev-secret}
       ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-10080}
       PASSWORD_RESET_CODE_MINUTES: ${PASSWORD_RESET_CODE_MINUTES:-10}
@@ -49,8 +50,8 @@ services:
       SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-}
       SMTP_FROM_NAME: ${SMTP_FROM_NAME:-MarketStore POS}
       SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
-      CELERY_BROKER_URL: ${API_CELERY_BROKER_URL:-redis://127.0.0.1:16379/0}
-      CELERY_RESULT_BACKEND: ${API_CELERY_RESULT_BACKEND:-redis://127.0.0.1:16379/1}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
     depends_on:
       postgres:
         condition: service_healthy
