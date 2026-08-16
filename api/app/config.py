@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://marketstore:marketstore@localhost:5432/marketstore"
     secret_key: str = "change-this-secret-key"
     access_token_expire_minutes: int = 60 * 24 * 7
-    password_reset_code_minutes: int = 10
+    password_reset_code_minutes: int = 3
     signup_verification_code_minutes: int = 3
     signup_verification_resend_seconds: int = 180
     smtp_host: str = "smtp.gmail.com"

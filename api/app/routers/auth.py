@@ -19,6 +19,7 @@ from app.schemas import (
     PasswordResetRequest,
     RegistrationChallengeOut,
     RegistrationResend,
+    RegistrationStart,
     RegistrationVerify,
     TokenOut,
     UserCreate,
@@ -56,6 +57,49 @@ def _registration_challenge(expires_at: datetime, resend_after_seconds: int, now
         expires_in_seconds=_seconds_until(expires_at, now),
         resend_after_seconds=resend_after_seconds,
     )
+
+
+@router.post("/register/start", response_model=RegistrationChallengeOut, status_code=status.HTTP_202_ACCEPTED)
+def register_start(payload: RegistrationStart, db: Session = Depends(get_db)):
+    settings = get_settings()
+    now = datetime.now(timezone.utc)
+    user = db.scalar(select(User).where(User.email == payload.email).with_for_update())
+    if user and user.is_active:
+        raise HTTPException(status_code=409, detail="Email already exists")
+
+    if user is None:
+        user = User(
+            email=payload.email,
+            password_hash=hash_password(secrets.token_urlsafe(32)),
+            display_name=payload.display_name,
+            role="admin",
+            is_active=False,
+        )
+        db.add(user)
+        try:
+            db.flush()
+        except IntegrityError as exc:
+            db.rollback()
+            raise HTTPException(status_code=409, detail="Email already exists") from exc
+    else:
+        if payload.display_name:
+            user.display_name = payload.display_name
+
+    latest_code = db.scalar(
+        select(EmailVerificationCode)
+        .where(EmailVerificationCode.user_id == user.id, EmailVerificationCode.used_at.is_(None))
+        .order_by(EmailVerificationCode.created_at.desc())
+        .limit(1)
+    )
+    if latest_code and latest_code.expires_at > now:
+        db.commit()
+        remaining = _seconds_until(latest_code.expires_at, now)
+        return _registration_challenge(latest_code.expires_at, remaining, now)
+
+    code, expires_at = _new_signup_code(db, user, now)
+    db.commit()
+    send_signup_verification_code_task.delay(user.email, code)
+    return _registration_challenge(expires_at, settings.signup_verification_resend_seconds, now)
 
 
 @router.post("/register", response_model=RegistrationChallengeOut, status_code=status.HTTP_202_ACCEPTED)
@@ -152,6 +196,8 @@ def confirm_registration(payload: RegistrationVerify, db: Session = Depends(get_
     if not code_row:
         raise HTTPException(status_code=400, detail="Invalid or expired verification code")
 
+    if payload.password:
+        user.password_hash = hash_password(payload.password)
     user.is_active = True
     user.email_verified_at = now
     code_row.used_at = now

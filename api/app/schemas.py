@@ -60,9 +60,20 @@ class PasswordResetConfirm(BaseModel):
         return code
 
 
+class RegistrationStart(BaseModel):
+    email: str = Field(min_length=5, max_length=255)
+    display_name: str | None = Field(default=None, max_length=120)
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, value: str) -> str:
+        return normalize_email(value)
+
+
 class RegistrationVerify(BaseModel):
     email: str = Field(min_length=5, max_length=255)
     code: str = Field(min_length=6, max_length=12)
+    password: str | None = Field(default=None, min_length=6, max_length=128)
 
     @field_validator("email")
     @classmethod
