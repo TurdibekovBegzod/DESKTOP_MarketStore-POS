@@ -16,21 +16,33 @@ def _token_for_user(user):
     raise SyncError("Online account token topilmadi. Email va parol orqali qayta kiring.")
 
 
-def push_local_changes(user):
+def push_local_changes(user, batch_size=1000, incremental=True):
     token = _token_for_user(user)
-    records = db.export_sync_records()
-    result = api_client.push_sync_records(
-        token,
-        records,
-        device_key=db.get_sync_device_key(),
-        note="desktop snapshot",
-    )
+    records = db.export_sync_records(incremental=incremental)
+    if not records:
+        db.mark_sync_pushed()
+        db.mark_server_reseed_complete()
+        return {"sent": 0, "saved": 0, "batch_id": None}
+    device_key = db.get_sync_device_key()
+    total_saved = 0
+    last_batch_id = None
+    for i in range(0, len(records), batch_size):
+        chunk = records[i:i + batch_size]
+        result = api_client.push_sync_records(
+            token,
+            chunk,
+            device_key=device_key,
+            note=f"desktop snapshot ({i + len(chunk)}/{len(records)})",
+            timeout=60,
+        )
+        total_saved += result.get("saved", 0)
+        last_batch_id = result.get("batch_id")
     db.mark_sync_pushed()
     db.mark_server_reseed_complete()
     return {
         "sent": len(records),
-        "saved": result.get("saved", 0),
-        "batch_id": result.get("batch_id"),
+        "saved": total_saved,
+        "batch_id": last_batch_id,
     }
 
 

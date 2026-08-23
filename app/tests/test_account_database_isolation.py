@@ -79,6 +79,30 @@ class AccountDatabaseIsolationTest(unittest.TestCase):
         ]
         self.assertEqual([record["local_id"] for record in tombstones], [str(cashier_id)])
 
+    def test_debt_cashiers_exclude_account_owner(self):
+        owner = self._open_account("debt-owner", "owner@example.com")
+        cashier_id = db.add_user(
+            "cashier@example.com",
+            role="cashier",
+            username="Cashier One",
+        )
+        manager_id = db.add_user(
+            "manager@example.com",
+            role="admin",
+            username="Manager One",
+        )
+
+        debt_cashiers = {user["id"]: user for user in db.get_debt_cashiers()}
+        self.assertNotIn(owner["id"], debt_cashiers)
+        self.assertIn(cashier_id, debt_cashiers)
+        self.assertIn(manager_id, debt_cashiers)
+
+        with self.assertRaisesRegex(db.AppError, "owner"):
+            db.add_debtor("Owner", debt_currency="UZS", user_id=owner["id"])
+
+        debtor_id = db.add_debtor("Cashier", debt_currency="UZS", user_id=cashier_id)
+        self.assertGreater(debtor_id, 0)
+
     def test_same_email_keeps_local_database_when_server_uid_changes(self):
         self._open_account("original-server-uid", "stable@example.com")
         db.add_product({

@@ -39,6 +39,7 @@ class DatabaseOrmRegressionTest(unittest.TestCase):
             conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT UNIQUE NOT NULL, password TEXT NOT NULL, role TEXT)")
             conn.execute("CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT)")
             conn.execute("CREATE TABLE categories (id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL)")
+            conn.execute("CREATE TABLE debtors (id INTEGER PRIMARY KEY, name TEXT NOT NULL)")
             conn.execute("""
                 CREATE TABLE products (
                     id INTEGER PRIMARY KEY,
@@ -80,12 +81,28 @@ class DatabaseOrmRegressionTest(unittest.TestCase):
         self.assertIn("section_id", columns)
         self.assertIn("process_quantity", columns)
         self.assertIn("purge_after", columns)
+        self.assertIn("created_by_user_id", columns)
+
+        conn = sqlite3.connect(self.path)
+        try:
+            sale_item_columns = {row[1] for row in conn.execute("PRAGMA table_info(sale_items)").fetchall()}
+        finally:
+            conn.close()
+        self.assertIn("returned_at", sale_item_columns)
+
+        conn = sqlite3.connect(self.path)
+        try:
+            debtor_columns = {row[1] for row in conn.execute("PRAGMA table_info(debtors)").fetchall()}
+        finally:
+            conn.close()
+        self.assertIn("user_id", debtor_columns)
 
     def test_settings_auth_users_and_login_history(self):
         settings = db.get_app_settings()
         self.assertEqual(settings["app_name"], "Market POS")
-        db.save_app_settings({"app_name": "Test POS", "theme": "green", "language": "en"})
+        db.save_app_settings({"app_name": "Test POS", "theme": "green", "language": "en", "currency": "USD"})
         self.assertEqual(db.get_app_settings()["app_name"], "Test POS")
+        self.assertEqual(db.get_app_settings()["currency"], "USD")
 
         admin = db.authenticate("admin@gmail.com", "admin123")
         self.assertIsNotNone(admin)
@@ -93,6 +110,7 @@ class DatabaseOrmRegressionTest(unittest.TestCase):
         db.log_login(admin)
         log = db.get_login_logs(1)[0]
         self.assertEqual(log["username"], "admin@gmail.com")
+
         logged_at = datetime.strptime(log["logged_at"], "%Y-%m-%d %H:%M:%S")
         self.assertLess(abs((logged_at - before).total_seconds()), 120)
         self.assertEqual(db.get_recent_login_user()["email"], "admin@gmail.com")
@@ -122,6 +140,55 @@ class DatabaseOrmRegressionTest(unittest.TestCase):
         self.assertIsNotNone(db.authenticate("cashier2@gmail.com", "pass2"))
         db.delete_user(user["id"])
         self.assertFalse([row for row in db.get_users() if row["email"] == "cashier2@gmail.com"])
+
+    def test_return_timestamp_migration_backfills_existing_returns(self):
+        admin = db.authenticate("admin@gmail.com", "admin123")
+        product_id = db.add_product({
+            "barcode": "RETURN-TIME-1",
+            "name": "Return timestamp product",
+            "template_id": None,
+            "supplier_id": None,
+            "category_id": None,
+            "price": 1000,
+            "cost": 600,
+            "stock": 2,
+            "unit": "dona",
+        })
+        db.create_sale(
+            None,
+            admin["id"],
+            [{"product_id": product_id, "quantity": 1, "price": 1000, "subtotal": 1000}],
+            1000,
+            0,
+            1000,
+            "naqd",
+        )
+        sale_item_id = db.get_product_sales_archive("Return timestamp product")[0]["sale_item_id"]
+        db.return_sale_item(sale_item_id, 1)
+
+        db._get_engine().dispose()
+        conn = sqlite3.connect(self.path)
+        try:
+            movement_time = conn.execute(
+                "SELECT MAX(created_at) FROM stock_movements WHERE product_id=? AND type='qaytarish'",
+                (product_id,),
+            ).fetchone()[0]
+            conn.execute("ALTER TABLE sale_items DROP COLUMN returned_at")
+            conn.execute("DELETE FROM schema_migrations WHERE version='010_add_sale_item_returned_at'")
+            conn.commit()
+        finally:
+            conn.close()
+
+        db.run_migrations()
+        conn = sqlite3.connect(self.path)
+        try:
+            returned_at = conn.execute(
+                "SELECT returned_at FROM sale_items WHERE id=?",
+                (sale_item_id,),
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(returned_at, movement_time)
 
     def test_products_templates_categories_currencies_and_stock(self):
         cat_id = db.add_category("Texnika")
@@ -356,6 +423,9 @@ class DatabaseOrmRegressionTest(unittest.TestCase):
         self.assertLess(abs((archive_created_at - before_sale).total_seconds()), 120)
         self.assertEqual(db.get_sale_cost(sale_id), 1800)
 
+        # Finalize sale so it is included in reports
+        db.finalize_sale(sale_id)
+
         today = datetime.now().strftime("%Y-%m-%d")
         self.assertEqual(db.get_daily_report(today)["count"], 1)
         self.assertTrue(db.get_sales_by_date(today))
@@ -380,28 +450,118 @@ class DatabaseOrmRegressionTest(unittest.TestCase):
             "stock": 5,
             "unit": "dona",
         })
-        db.create_sale(
+        db.add_user("report.cashier@example.com", role="cashier", username="Report Cashier")
+        report_cashier = next(user for user in db.get_users() if user["email"] == "report.cashier@example.com")
+        sec_sale_id = db.create_sale(
             None,
-            admin["id"],
+            report_cashier["id"],
             [{"product_id": section_product_id, "quantity": 2, "price": 500, "subtotal": 1000}],
             1000,
             0,
             1000,
             "naqd",
         )
+        pending_details = db.get_cashier_sales_details(
+            report_cashier["id"],
+            "2000-01-01",
+            "2999-01-01",
+            section_id,
+            only_cashiers=True,
+        )
+        self.assertEqual(len(pending_details), 1)
+        self.assertEqual(pending_details[0]["is_finalized"], 0)
+        self.assertEqual(pending_details[0]["cashier_reward"], 0)
+        db.finalize_sale(sec_sale_id, cashier_reward=150)
         section_rows = db.get_overall_period_series("2000-01-01", "2999-01-01", section_id)
         self.assertEqual(sum(row["sales_count"] for row in section_rows), 1)
         self.assertEqual(sum(row["product_count"] for row in section_rows), 2)
         self.assertEqual(sum(row["revenue"] for row in section_rows), 1000)
         self.assertEqual(sum(row["profit"] for row in section_rows), 400)
+        self.assertEqual(sum(row["cashier_reward"] for row in section_rows), 150)
         cashier_rows = db.get_cashier_period_summary("2000-01-01", "2999-01-01", section_id)
-        admin_row = [row for row in cashier_rows if row["entity_id"] == admin["id"]][0]
-        self.assertEqual(admin_row["product_count"], 2)
+        cashier_row = [row for row in cashier_rows if row["entity_id"] == report_cashier["id"]][0]
+        self.assertEqual(cashier_row["product_count"], 2)
+        salary_rows = db.get_cashier_salary_period_summary("2000-01-01", "2999-01-01", section_id)
+        salary_row = [row for row in salary_rows if row["entity_id"] == report_cashier["id"]][0]
+        self.assertEqual(salary_row["total_salary"], 150)
+        salary_series = db.get_entity_period_series("cashier", report_cashier["id"], "2000-01-01", "2999-01-01", section_id)
+        self.assertEqual(sum(row["total_salary"] for row in salary_series), 150)
+        sale_details = db.get_cashier_sales_details(
+            report_cashier["id"],
+            "2000-01-01",
+            "2999-01-01",
+            section_id,
+            only_cashiers=True,
+        )
+        self.assertEqual(len(sale_details), 1)
+        self.assertEqual(sale_details[0]["product_name"], "Section Sale Product")
+        self.assertEqual(sale_details[0]["net_quantity"], 2)
+        self.assertEqual(sale_details[0]["item_total_after_discount"], 1000)
+        self.assertEqual(sale_details[0]["is_finalized"], 1)
+        self.assertEqual(sale_details[0]["cashier_reward"], 150)
+        db.return_sale_item(sale_details[0]["sale_item_id"], 2, "full return")
+        returned_details = db.get_cashier_sales_details(
+            report_cashier["id"],
+            "2000-01-01",
+            "2999-01-01",
+            section_id,
+            only_cashiers=True,
+        )
+        self.assertEqual(len(returned_details), 1)
+        self.assertEqual(returned_details[0]["sold_quantity"], 2)
+        self.assertEqual(returned_details[0]["returned_quantity"], 2)
+        self.assertIsNotNone(returned_details[0]["returned_at"])
+        self.assertEqual(returned_details[0]["net_quantity"], 0)
+        self.assertEqual(returned_details[0]["item_total_after_discount"], 0)
+        self.assertEqual(returned_details[0]["cashier_reward"], 0)
+        self.assertEqual(
+            db.get_cashier_sales_details(admin["id"], "2000-01-01", "2999-01-01", only_cashiers=True),
+            [],
+        )
 
         db.return_sale_item(archive[0]["sale_item_id"], 1, "return")
         self.assertEqual(db.get_product_by_barcode("SALE1")["stock"], 8)
         db.clear_sales_history()
         self.assertEqual(db.get_product_sales_archive(), [])
+
+    def test_delete_sale_item_restores_stock_and_tracks_sync_deletion(self):
+        admin = db.authenticate("admin@gmail.com", "admin123")
+        product_id = db.add_product({
+            "barcode": "DEL-SALE-1",
+            "name": "Delete sold item",
+            "template_id": None,
+            "supplier_id": None,
+            "category_id": None,
+            "price": 1200,
+            "cost": 700,
+            "stock": 5,
+            "unit": "dona",
+        })
+        sale_id = db.create_sale(
+            None,
+            admin["id"],
+            [{"product_id": product_id, "quantity": 2, "price": 1200, "subtotal": 2400}],
+            2400,
+            0,
+            2400,
+            "naqd",
+        )
+        archive_row = db.get_product_sales_archive("Delete sold item")[0]
+        self.assertEqual(db.get_product_by_id(product_id)["stock"], 3)
+
+        db.delete_sale_item(archive_row["sale_item_id"])
+
+        self.assertEqual(db.get_product_by_id(product_id)["stock"], 5)
+        self.assertEqual(db.get_product_sales_archive("Delete sold item"), [])
+        with db.session_scope() as session:
+            self.assertIsNotNone(session.get(db.SyncTombstone, {
+                "table_name": "sale_items",
+                "local_id": str(archive_row["sale_item_id"]),
+            }))
+            self.assertIsNotNone(session.get(db.SyncTombstone, {
+                "table_name": "sales",
+                "local_id": str(sale_id),
+            }))
 
     def test_sale_respects_process_reserved_stock(self):
         admin = db.authenticate("admin@gmail.com", "admin123")
@@ -437,6 +597,71 @@ class DatabaseOrmRegressionTest(unittest.TestCase):
             "naqd",
         )
         self.assertEqual(db.get_product_by_barcode("RSV1")["stock"], 4)
+
+    def test_cashier_expense_is_deducted_from_salary(self):
+        admin = db.authenticate("admin@gmail.com", "admin123")
+        cashier_id = db.add_user(
+            "salary.cashier@example.com",
+            role="cashier",
+            username="Salary Cashier",
+        )
+        product_id = db.add_product({
+            "barcode": "SALARY-1",
+            "name": "Salary product",
+            "template_id": None,
+            "supplier_id": None,
+            "category_id": None,
+            "price": 5000,
+            "cost": 3000,
+            "stock": 2,
+            "unit": "dona",
+        })
+        sale_id = db.create_sale(
+            None,
+            cashier_id,
+            [{"product_id": product_id, "quantity": 1, "price": 5000, "subtotal": 5000}],
+            5000,
+            0,
+            5000,
+            "naqd",
+        )
+        db.finalize_sale(sale_id, cashier_reward=1000)
+        cashier_category_id = next(
+            category["id"]
+            for category in db.get_expense_categories()
+            if db.is_cashier_expense_category_name(category["name"])
+        )
+        expense_id = db.add_expense(
+            cashier_category_id,
+            200,
+            "UZS",
+            "Salary advance",
+            admin["id"],
+            cashier_id,
+        )
+
+        salary_row = next(
+            row for row in db.get_cashier_salary_period_summary("2000-01-01", "2999-01-01")
+            if row["entity_id"] == cashier_id
+        )
+        self.assertEqual(salary_row["salary_deduction"], 200)
+        self.assertEqual(salary_row["total_salary"], 800)
+        series = db.get_entity_period_series(
+            "cashier_salary", cashier_id, "2000-01-01", "2999-01-01"
+        )
+        self.assertEqual(sum(row["total_salary"] for row in series), 800)
+        expense = next(row for row in db.get_expenses() if row["id"] == expense_id)
+        self.assertEqual(expense["cashier_id"], cashier_id)
+        self.assertEqual(expense["cashier_name"], "Salary Cashier")
+        with self.assertRaises(db.AppError):
+            db.add_expense(
+                cashier_category_id,
+                50,
+                "UZS",
+                "Invalid owner selection",
+                admin["id"],
+                admin["id"],
+            )
 
     def test_discount_archive_stays_proportional_after_return(self):
         admin = db.authenticate("admin@gmail.com", "admin123")
@@ -527,7 +752,56 @@ class DatabaseOrmRegressionTest(unittest.TestCase):
         db.delete_product_section(section_id)
         trash = db.get_product_trash()
         self.assertEqual({row["id"] for row in trash["sections"]}, {section_id})
-        self.assertEqual({row["id"] for row in trash["products"]}, {sold_product_id, deleted_product_id})
+        self.assertEqual(trash["sections"][0]["product_count"], 2)
+        # Deleted products under the deleted section are grouped under the section card
+        self.assertEqual(len(trash["products"]), 0)
+        # Restoring section restores all its products at once
+        db.restore_product_section(section_id)
+        self.assertEqual(len(db.get_all_products(section_id=section_id)), 2)
+
+    def test_section_template_fallback_and_product_creator_tracking(self):
+        cashier_id = db.add_user(
+            "creator.cashier@example.com",
+            role="cashier",
+            username="Creator Cashier",
+        )
+        section_id = db.add_product_section("Cashier Section")
+        self.assertEqual(db.get_templates(section_id), [])
+
+        template_id = db.ensure_product_template_for_section(section_id)
+        self.assertEqual(db.ensure_product_template_for_section(section_id), template_id)
+        templates = db.get_templates(section_id)
+        self.assertEqual(len(templates), 1)
+        self.assertEqual(templates[0]["id"], template_id)
+        self.assertEqual(templates[0]["section_id"], section_id)
+
+        product_id = db.add_product({
+            "barcode": "CREATOR1",
+            "name": "Creator Product",
+            "section_id": section_id,
+            "template_id": template_id,
+            "created_by_user_id": cashier_id,
+            "price": 1000,
+            "cost": 500,
+            "stock": 5,
+            "unit": "dona",
+        })
+        product = db.get_product_by_barcode("CREATOR1")
+        self.assertEqual(product["created_by_user_id"], cashier_id)
+        self.assertEqual(product["created_by_name"], "Creator Cashier")
+
+        sale_id = db.create_sale(
+            None,
+            cashier_id,
+            [{"product_id": product_id, "quantity": 1, "price": 1000, "subtotal": 1000}],
+            1000,
+            0,
+            1000,
+            "naqd",
+        )
+        archive = db.get_product_sales_archive()
+        self.assertEqual(archive[0]["sale_id"], sale_id)
+        self.assertEqual(archive[0]["cashier_id"], cashier_id)
 
     def test_suppliers_debtors_and_expenses(self):
         supplier_id = db.add_supplier("Supplier", "1", "note", "USD")
@@ -548,6 +822,15 @@ class DatabaseOrmRegressionTest(unittest.TestCase):
         self.assertEqual(db.get_all_debtors()[0]["balance"], 50)
         self.assertEqual(len(db.get_debtor_debt_movements(debtor_id)), 2)
 
+        db.add_user("debt.cashier@example.com", role="cashier", username="Debt Cashier")
+        cashier = next(user for user in db.get_users() if user["email"] == "debt.cashier@example.com")
+        cashier_debtor_id = db.add_debtor("Debt Cashier", debt_currency="UZS", user_id=cashier["id"])
+        cashier_debtor = next(row for row in db.get_all_debtors() if row["id"] == cashier_debtor_id)
+        self.assertEqual(cashier_debtor["user_id"], cashier["id"])
+        self.assertEqual(cashier_debtor["cashier_email"], "debt.cashier@example.com")
+        with self.assertRaises(db.AppError):
+            db.add_debtor("Duplicate", debt_currency="UZS", user_id=cashier["id"])
+
         category_id = db.add_expense_category("Office")
         db.update_expense_category(category_id, "Office 2")
         expense_id = db.add_expense(category_id, 25, "UZS", "paper")
@@ -561,6 +844,7 @@ class DatabaseOrmRegressionTest(unittest.TestCase):
 
         db.delete_supplier(supplier_id)
         db.delete_debtor(debtor_id)
+        db.delete_debtor(cashier_debtor_id)
         self.assertEqual(db.get_all_suppliers(), [])
         self.assertEqual(db.get_all_debtors(), [])
 

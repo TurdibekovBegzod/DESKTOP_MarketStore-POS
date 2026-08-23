@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (
     QTextEdit, QDateEdit, QTabWidget, QScrollArea, QCalendarWidget,
     QFileDialog, QMenu, QWidgetAction
 )
-from PyQt6.QtCore import QPoint, QTimer, Qt, pyqtSignal, QEvent
+from PyQt6.QtCore import QPoint, QTimer, Qt, pyqtSignal, pyqtSlot, QEvent, QThread, QObject
 from PyQt6.QtGui import QAction, QPixmap, QPainter, QIcon, QColor, QImage
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -15,16 +15,19 @@ import api_client
 import database as db
 import sync_service
 
-from ui.sales_widget import SalesWidget
+from ui.sales_widget import CurrencyDialog, SalesWidget
 from ui.products_widget import ProductsWidget
+from ui.finalize_sales_widget import FinalizeSalesWidget
 from ui.stock_widget import StockWidget
-from ui.reports_widget import ReportsWidget
+from ui.reports_widget import ReportsWidget, SalesDetailsWidget
 from ui.users_widget import UsersWidget
 from ui.login_history_widget import LoginHistoryWidget
 from ui.supplier_debts_widget import SupplierDebtsWidget
 from ui.expenses_widget import ExpensesWidget
 from ui.finance_widget import FinanceWidget
 from ui.checking_widget import CheckingWidget
+from ui.notifications_widget import NotificationsWidget
+from ui.updater_dialog import UpdaterDialog
 from ui.i18n import set_language
 
 
@@ -167,7 +170,8 @@ THEMES = {
 TEXTS = {
     "uz": {
         "settings": "Sozlamalar", "theme": "Interfeys rangi", "language": "Til",
-        "app_name": "Dastur nomi", "save": "Saqlash", "cancel": "Bekor",
+        "app_name": "Dastur nomi", "currency": "Asosiy valyuta",
+        "exchange_rates": "Kurslarni o'zgartirish", "save": "Saqlash", "cancel": "Bekor",
         "logout": "Chiqish", "logout_q": "Haqiqatan chiqmoqchimisiz?",
         "main_mode": "Asosiy", "cashier_mode": "Kassir",
         "admin_password_title": "Asosiy bo'lim",
@@ -180,14 +184,17 @@ TEXTS = {
         "sync_done": "Sync tugadi", "sync_error": "Sync xatosi",
         "sync_pending_count": "Yuborilmagan o'zgarishlar",
         "Admin": "Admin", "Kassir": "Kassir", "sales": "Sotuv",
-        "products": "Mahsulotlar", "stock": "Ombor",
+        "products": "Mahsulotlar", "stock": "Ombor", "finalize_sales": "Sotishni yakunlash",
+        "sales_details": "Sotuv tafsilotlari",
         "reports": "Hisobotlar", "finance": "Moliya", "supplier_debts": "Qarzlar", "expenses": "Harajatlar",
         "checking": "Tekshiruv",
         "users": "Kassirlar", "login_history": "Kirish tarixi",
+        "notifications": "Bildirishnomalar", "check_updates": "Yangilanishlar",
     },
     "en": {
         "settings": "Settings", "theme": "Interface theme", "language": "Language",
-        "app_name": "App name", "save": "Save", "cancel": "Cancel",
+        "app_name": "App name", "currency": "Default currency",
+        "exchange_rates": "Edit exchange rates", "save": "Save", "cancel": "Cancel",
         "logout": "Logout", "logout_q": "Do you really want to log out?",
         "main_mode": "Main", "cashier_mode": "Cashier",
         "admin_password_title": "Main section",
@@ -200,20 +207,25 @@ TEXTS = {
         "sync_done": "Sync completed", "sync_error": "Sync error",
         "sync_pending_count": "Unsynced changes",
         "Admin": "Admin", "Kassir": "Cashier", "sales": "Sales",
-        "products": "Products", "stock": "Stock",
+        "products": "Products", "stock": "Stock", "finalize_sales": "Finalize sales",
+        "sales_details": "Sales details",
         "reports": "Reports", "finance": "Finance", "supplier_debts": "Debts", "expenses": "Expenses",
         "checking": "Checking",
         "users": "Cashiers", "login_history": "Login history",
+        "notifications": "Notifications", "check_updates": "Updates",
     },
     "ru": {
         "checking": "Проверка",
         "settings": "Настройки", "theme": "Тема интерфейса", "language": "Язык",
-        "app_name": "Название программы", "save": "Сохранить", "cancel": "Отмена",
+        "app_name": "Название программы", "currency": "Основная валюта",
+        "exchange_rates": "Изменить курсы", "save": "Сохранить", "cancel": "Отмена",
         "logout": "Выход", "logout_q": "Вы действительно хотите выйти?",
         "Admin": "Админ", "Kassir": "Кассир", "sales": "Продажи",
-        "products": "Товары", "stock": "Склад",
+        "products": "Товары", "stock": "Склад", "finalize_sales": "Завершение продаж",
+        "sales_details": "Детали продаж",
         "reports": "Отчеты", "finance": "Финансы", "supplier_debts": "Долги", "expenses": "Расходы",
         "users": "Кассиры", "login_history": "История входа",
+        "notifications": "Уведомления", "check_updates": "Обновления",
     },
 }
 
@@ -244,8 +256,9 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.user_role = user_role
         self.settings = settings or db.get_app_settings()
+        self.setProperty("app_language", self.settings.get("language", "uz"))
         self.setWindowTitle(TEXTS.get(self.settings["language"], TEXTS["uz"])["settings"])
-        self.setFixedWidth(420)
+        self.setFixedWidth(520)
         self._build_ui()
 
     def _build_ui(self):
@@ -268,6 +281,18 @@ class SettingsDialog(QDialog):
             self.language_combo.setCurrentIndex(idx)
         form.addRow(labels["theme"] + ":", self.theme_combo)
         form.addRow(labels["language"] + ":", self.language_combo)
+        currency_row = QHBoxLayout()
+        currency_row.setContentsMargins(0, 0, 0, 0)
+        currency_row.setSpacing(8)
+        self.currency_combo = QComboBox()
+        self.currency_combo.setMinimumWidth(150)
+        self.currency_manage_btn = QPushButton(labels["exchange_rates"])
+        self.currency_manage_btn.setFixedHeight(32)
+        self.currency_manage_btn.clicked.connect(self._manage_currencies)
+        currency_row.addWidget(self.currency_combo, 1)
+        currency_row.addWidget(self.currency_manage_btn)
+        form.addRow(labels["currency"] + ":", currency_row)
+        self._load_currency_combo(self.settings.get("currency", "UZS"))
         self.app_name_edit = None
         if self.user_role == "admin":
             self.app_name_edit = QLineEdit(self.settings.get("app_name", "Market POS"))
@@ -289,10 +314,28 @@ class SettingsDialog(QDialog):
         data = {
             "theme": self.theme_combo.currentData(),
             "language": self.language_combo.currentData(),
+            "currency": self.currency_combo.currentData() or "UZS",
         }
         if self.app_name_edit is not None:
             data["app_name"] = self.app_name_edit.text().strip() or "Market POS"
         return data
+
+    def _load_currency_combo(self, selected_code=None):
+        selected_code = selected_code or self.currency_combo.currentData() or "UZS"
+        self.currency_combo.clear()
+        for currency in db.get_currencies():
+            self.currency_combo.addItem(f"{currency['code']} - {currency['name']}", currency["code"])
+        index = self.currency_combo.findData(selected_code)
+        if index < 0:
+            index = self.currency_combo.findData("UZS")
+        if index >= 0:
+            self.currency_combo.setCurrentIndex(index)
+
+    def _manage_currencies(self):
+        selected_code = self.currency_combo.currentData()
+        dialog = CurrencyDialog(self)
+        dialog.exec()
+        self._load_currency_combo(selected_code)
 
 
 class AdminPasswordDialog(QDialog):
@@ -394,6 +437,28 @@ class AdminPasswordDialog(QDialog):
         self.password_edit.setFocus()
 
 
+class SyncWorker(QObject):
+    finished = pyqtSignal(dict)
+    failed = pyqtSignal(str)
+
+    def __init__(self, action, user):
+        super().__init__()
+        self.action = action
+        self.user = user
+
+    def run(self):
+        try:
+            if self.action == "push":
+                res = sync_service.push_local_changes(self.user)
+            elif self.action == "pull":
+                res = sync_service.pull_server_changes(self.user)
+            else:
+                res = sync_service.synchronize_account_storage(self.user)
+            self.finished.emit(res)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class SyncDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -450,11 +515,8 @@ class SyncDialog(QDialog):
         self.pull_btn.clicked.connect(self._pull)
         self.push_btn = QPushButton(self.labels.get("sync_push", "Yuborish"))
         self.push_btn.clicked.connect(self._push)
-        close_btn = QPushButton(self.labels.get("cancel", "Bekor"))
-        close_btn.clicked.connect(self.accept)
         btn_row.addWidget(self.pull_btn)
         btn_row.addWidget(self.push_btn)
-        btn_row.addWidget(close_btn)
         layout.addLayout(btn_row)
 
     def refresh(self):
@@ -480,17 +542,152 @@ class SyncDialog(QDialog):
         self.push_btn.setEnabled(True)
 
     def _pull(self):
+        self.accept()
         if self.parent_window:
             self.parent_window._pull_from_server(show_message=True)
-        self.refresh()
 
     def _push(self):
+        self.accept()
         if self.parent_window:
             self.parent_window._push_to_server(show_message=True)
-        self.refresh()
+
+
+class ToastItem(QFrame):
+    def __init__(self, message, title=None, level="success", duration_ms=4000, on_dismiss=None, parent=None):
+        super().__init__(parent)
+        self.on_dismiss = on_dismiss
+        self.setObjectName("toastItem")
+        self.setFixedWidth(340)
+
+        if level == "success":
+            border_color = "#10b981"
+            icon_text = "✅"
+            default_title = "Muvaffaqiyatli"
+        elif level == "error":
+            border_color = "#ef4444"
+            icon_text = "⚠️"
+            default_title = "Xatolik"
+        elif level == "warning":
+            border_color = "#f59e0b"
+            icon_text = "⚠️"
+            default_title = "Ogohlantirish"
+        else:
+            border_color = "#3b82f6"
+            icon_text = "ℹ️"
+            default_title = "Ma'lumot"
+
+        self.setStyleSheet(f"""
+            QFrame#toastItem {{
+                background: #ffffff;
+                border: 1px solid #e2e8f0;
+                border-left: 5px solid {border_color};
+                border-radius: 8px;
+            }}
+            QLabel {{
+                border: none;
+                background: transparent;
+            }}
+        """)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(10)
+
+        icon_lbl = QLabel(icon_text)
+        icon_lbl.setStyleSheet("font-size: 18px; border: none; background: transparent;")
+        icon_lbl.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+        layout.addWidget(icon_lbl)
+
+        content_lay = QVBoxLayout()
+        content_lay.setSpacing(2)
+
+        title_lbl = QLabel(title or default_title)
+        title_lbl.setStyleSheet("font-weight: bold; font-size: 13px; color: #0f172a; border: none; background: transparent;")
+        content_lay.addWidget(title_lbl)
+
+        msg_lbl = QLabel(message)
+        msg_lbl.setStyleSheet("font-size: 12px; color: #475569; border: none; background: transparent;")
+        msg_lbl.setWordWrap(True)
+        content_lay.addWidget(msg_lbl)
+
+        layout.addLayout(content_lay, 1)
+
+        close_btn = QPushButton("✕")
+        close_btn.setFixedSize(20, 20)
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.setStyleSheet("""
+            QPushButton {
+                border: none; background: transparent; color: #94a3b8; font-size: 13px; font-weight: bold;
+            }
+            QPushButton:hover { color: #0f172a; }
+        """)
+        close_btn.clicked.connect(self.dismiss)
+        layout.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignTop)
+
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self.dismiss)
+        self._timer.start(duration_ms)
+
+    def dismiss(self):
+        self._timer.stop()
+        if self.on_dismiss:
+            self.on_dismiss(self)
+        else:
+            self.deleteLater()
+
+
+class ToastManager(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("toastManager")
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        self.setStyleSheet("background: transparent; border: none;")
+        self.setFixedWidth(340)
+
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(8)
+        self._layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.hide()
+
+    def show_toast(self, message, title=None, level="success", duration_ms=4000):
+        item = ToastItem(
+            message=message,
+            title=title,
+            level=level,
+            duration_ms=duration_ms,
+            on_dismiss=self._remove_item,
+            parent=self,
+        )
+        self._layout.addWidget(item)
+        item.show()
+        self.adjustSize()
+        self.reposition()
+        self.show()
+        self.raise_()
+
+    def _remove_item(self, item):
+        self._layout.removeWidget(item)
+        item.deleteLater()
+        self.adjustSize()
+        self.reposition()
+        if self._layout.count() == 0:
+            self.hide()
+
+    def reposition(self):
+        if not self.parent():
+            return
+        parent_rect = self.parent().rect()
+        x = parent_rect.width() - self.width() - 24
+        y = 68
+        self.move(max(10, x), y)
+        self.raise_()
 
 
 class MainWindow(QMainWindow):
+    activity_signal = pyqtSignal(str, str, str, str, str, str)
+
     def __init__(self, user):
         super().__init__()
         self.user = user
@@ -508,12 +705,30 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(self.settings["app_name"])
         self.setWindowIcon(QIcon(APP_ICON_PATH))
         self.setMinimumSize(1280, 780)
+        self.activity_signal.connect(self._handle_activity_toast)
+        db.register_activity_listener(self._on_database_activity)
         self._build_ui()
         self._start_clock()
         self._save_user_activity(force=True)
         app = QApplication.instance()
         if app:
             app.installEventFilter(self)
+
+    def _on_database_activity(self, action, title, message, level, target, badge):
+        self.activity_signal.emit(action, title, message, level, target, badge)
+
+    def _handle_activity_toast(self, action, title, message, level, target, badge):
+        self.show_toast(message, title=title, level=level, duration_ms=4000)
+        self._refresh_notif_badge()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "toast_manager"):
+            self.toast_manager.reposition()
+
+    def show_toast(self, message, title=None, level="success", duration_ms=4000):
+        if hasattr(self, "toast_manager"):
+            self.toast_manager.show_toast(message, title=title, level=level, duration_ms=duration_ms)
 
     def eventFilter(self, obj, event):
         if event.type() in self._activity_event_types:
@@ -523,6 +738,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         if not self._logging_out:
             self._save_user_activity(force=True)
+        db.unregister_activity_listener(self._on_database_activity)
         app = QApplication.instance()
         if app:
             app.removeEventFilter(self)
@@ -571,56 +787,86 @@ class MainWindow(QMainWindow):
         self.nav_group_buttons = {}
         self.nav_group_widgets = {}
         self.nav_group_items = {
-            "products_group": ("products", "stock"),
-            "reports_group": ("reports", "finance"),
+            "reports_group": ("reports", "sales_details"),
         }
+        if self.user["role"] == "admin":
+            self.nav_group_items["products_group"] = ("products", "stock", "finalize_sales")
         nav_frame = QWidget()
         nav_frame.setStyleSheet("background: transparent;")
         nav_layout = QVBoxLayout(nav_frame)
         nav_layout.setContentsMargins(12, 16, 12, 0)
         nav_layout.setSpacing(4)
 
-        nav_items = [
-            (self.labels["sales"], "sales"),
-            (self.labels.get("checking", "Checking"), "checking"),
-        ]
+        # 1. Sales
+        btn_sales = QPushButton(f"  {self.labels['sales']}")
+        btn_sales.setFixedHeight(46)
+        btn_sales.setCheckable(True)
+        btn_sales.setObjectName("nav_sales")
+        btn_sales.setStyleSheet(self._nav_btn_style())
+        btn_sales.clicked.connect(lambda checked: self._switch_page("sales"))
+        nav_layout.addWidget(btn_sales)
+        self.nav_buttons["sales"] = btn_sales
+
+        # 2. Products (Dropdown for admin, single button for cashier)
         if self.user["role"] == "admin":
-            nav_items.extend([
+            self._add_nav_group(
+                nav_layout,
+                "products_group",
+                self.labels["products"],
+                [
+                    (self.labels["products"], "products"),
+                    (self.labels["stock"], "stock"),
+                    (self.labels.get("finalize_sales", "Sotishni yakunlash"), "finalize_sales"),
+                ],
+            )
+        else:
+            btn_products = QPushButton(f"  {self.labels['products']}")
+            btn_products.setFixedHeight(46)
+            btn_products.setCheckable(True)
+            btn_products.setObjectName("nav_products")
+            btn_products.setStyleSheet(self._nav_btn_style())
+            btn_products.clicked.connect(lambda checked: self._switch_page("products"))
+            nav_layout.addWidget(btn_products)
+            self.nav_buttons["products"] = btn_products
+
+        # 3. Reports (Dropdown: reports, sales_details) - below products for both cashier and admin
+        self._add_nav_group(
+            nav_layout,
+            "reports_group",
+            self.labels["reports"],
+            [
+                (self.labels["reports"], "reports"),
+                (self.labels.get("sales_details", "Sotuv tafsilotlari"), "sales_details"),
+            ],
+        )
+
+        # 4. Checking
+        btn_checking = QPushButton(f"  {self.labels.get('checking', 'Checking')}")
+        btn_checking.setFixedHeight(46)
+        btn_checking.setCheckable(True)
+        btn_checking.setObjectName("nav_checking")
+        btn_checking.setStyleSheet(self._nav_btn_style())
+        btn_checking.clicked.connect(lambda checked: self._switch_page("checking"))
+        nav_layout.addWidget(btn_checking)
+        self.nav_buttons["checking"] = btn_checking
+
+        # 5. Admin-only pages
+        if self.user["role"] == "admin":
+            for label, key in [
+                (self.labels.get("finance", "Finance"), "finance"),
                 (self.labels["supplier_debts"], "supplier_debts"),
                 (self.labels["expenses"], "expenses"),
                 (self.labels["users"], "users"),
                 (self.labels["login_history"], "login_history"),
-            ])
-
-        for label, key in nav_items:
-            btn = QPushButton(f"  {label}")
-            btn.setFixedHeight(46)
-            btn.setCheckable(True)
-            btn.setObjectName(f"nav_{key}")
-            btn.setStyleSheet(self._nav_btn_style())
-            btn.clicked.connect(lambda checked, k=key: self._switch_page(k))
-            nav_layout.addWidget(btn)
-            self.nav_buttons[key] = btn
-
-            if self.user["role"] == "admin" and key == "sales":
-                self._add_nav_group(
-                    nav_layout,
-                    "products_group",
-                    self.labels["products"],
-                    [
-                        (self.labels["products"], "products"),
-                        (self.labels["stock"], "stock"),
-                    ],
-                )
-                self._add_nav_group(
-                    nav_layout,
-                    "reports_group",
-                    self.labels["reports"],
-                    [
-                        (self.labels["reports"], "reports"),
-                        (self.labels.get("finance", "Finance"), "finance"),
-                    ],
-                )
+            ]:
+                btn = QPushButton(f"  {label}")
+                btn.setFixedHeight(46)
+                btn.setCheckable(True)
+                btn.setObjectName(f"nav_{key}")
+                btn.setStyleSheet(self._nav_btn_style())
+                btn.clicked.connect(lambda checked, k=key: self._switch_page(k))
+                nav_layout.addWidget(btn)
+                self.nav_buttons[key] = btn
 
         nav_layout.addStretch()
         self.nav_scroll = QScrollArea()
@@ -680,25 +926,25 @@ class MainWindow(QMainWindow):
         topbar_lay.addWidget(self.page_title_lbl)
         topbar_lay.addStretch()
         self.sync_wrap = QWidget()
-        self.sync_wrap.setFixedSize(46, 40)
+        self.sync_wrap.setFixedSize(40, 36)
         self.sync_btn = QPushButton(self.sync_wrap)
         self.sync_btn.setObjectName("syncIconButton")
-        self.sync_btn.setFixedSize(38, 38)
+        self.sync_btn.setFixedSize(32, 32)
         self.sync_btn.move(0, 2)
         self.sync_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.sync_btn.setToolTip("Sync")
         self.sync_btn.clicked.connect(self._open_sync_dialog)
         self.sync_badge_lbl = QLabel(self.sync_wrap)
         self.sync_badge_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.sync_badge_lbl.setFixedSize(18, 18)
-        self.sync_badge_lbl.move(26, 0)
+        self.sync_badge_lbl.setFixedSize(16, 16)
+        self.sync_badge_lbl.move(24, 0)
         self.sync_badge_lbl.hide()
         sync_pixmap = QPixmap(SYNC_ICON_PATH)
         if not sync_pixmap.isNull():
             self.sync_btn.setIcon(QIcon(sync_pixmap))
             self.sync_btn.setIconSize(sync_pixmap.scaled(
-                20,
-                20,
+                16,
+                16,
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             ).size())
@@ -715,12 +961,20 @@ class MainWindow(QMainWindow):
             self.pages.update({
                 "products": ProductsWidget(self.user),
                 "stock": StockWidget(),
-                "reports": ReportsWidget(),
+                "finalize_sales": FinalizeSalesWidget(self.user),
+                "reports": ReportsWidget(user=self.user),
+                "sales_details": SalesDetailsWidget(user=self.user),
                 "finance": FinanceWidget(),
                 "supplier_debts": SupplierDebtsWidget(),
                 "expenses": ExpensesWidget(self.user),
                 "users": UsersWidget(),
                 "login_history": LoginHistoryWidget(),
+            })
+        else:
+            self.pages.update({
+                "products": ProductsWidget(self.user, cashier_mode=True),
+                "reports": ReportsWidget(user=self.user, cashier_only=True),
+                "sales_details": SalesDetailsWidget(user=self.user, cashier_only=True),
             })
         for widget in self.pages.values():
             self.stack.addWidget(widget)
@@ -729,12 +983,16 @@ class MainWindow(QMainWindow):
         root.addWidget(self.content_area)
 
         self._apply_theme()
+        self.toast_manager = ToastManager(self)
         self._switch_page("sales")
         self._refresh_sync_status()
+        self._refresh_notif_badge()
         self.sync_status_timer = QTimer(self)
         self.sync_status_timer.timeout.connect(self._refresh_sync_status)
+        self.sync_status_timer.timeout.connect(self._refresh_notif_badge)
         self.sync_status_timer.start(1000)
         QTimer.singleShot(1200, self._auto_pull_from_server)
+        QTimer.singleShot(1500, self._show_startup_notifications)
 
     def _nav_btn_style(self):
         theme = THEMES.get(self.settings.get("theme"), THEMES["dark_blue"])
@@ -858,6 +1116,7 @@ class MainWindow(QMainWindow):
     def _switch_page(self, key):
         if key not in self.pages:
             key = "sales"
+
         for k, btn in self.nav_buttons.items():
             btn.setChecked(k == key)
         for group_key, group_btn in self.nav_group_buttons.items():
@@ -871,14 +1130,30 @@ class MainWindow(QMainWindow):
             else:
                 group_btn.setExpanded(self.nav_group_widgets[group_key].isVisible())
             self._sync_nav_group_icon_colors(group_btn)
-        self.stack.setCurrentWidget(self.pages[key])
-        self.page_title_lbl.setText(self.labels.get(key, key))
 
         page = self.pages[key]
+        self.stack.setCurrentWidget(page)
+        self.page_title_lbl.setText(self.labels.get(key, key))
+
         if hasattr(page, "load_data"):
             page.load_data()
         set_language(page, self.settings.get("language", "uz"))
         self._apply_page_theme()
+        self._refresh_notif_badge()
+
+    def _refresh_notif_badge(self):
+        if not hasattr(self, "notif_badge_lbl"):
+            return
+        try:
+            unread_count = db.get_unread_notifications_count(user_id=self.user.get("id"))
+            if unread_count > 0:
+                self.notif_badge_lbl.setText(str(unread_count) if unread_count < 100 else "99+")
+                self.notif_badge_lbl.show()
+                self.notif_badge_lbl.raise_()
+            else:
+                self.notif_badge_lbl.hide()
+        except Exception:
+            pass
 
     def _sync_nav_group_icon_colors(self, button=None):
         theme = THEMES.get(self.settings.get("theme"), THEMES["dark_blue"])
@@ -928,15 +1203,15 @@ class MainWindow(QMainWindow):
             self.sync_badge_lbl.hide()
             return
         text = "99+" if count > 99 else str(count)
-        width = 24 if count > 99 else 18
-        self.sync_badge_lbl.setFixedSize(width, 18)
-        self.sync_badge_lbl.move(44 - width, 0)
+        width = 22 if count > 99 else 16
+        self.sync_badge_lbl.setFixedSize(width, 16)
+        self.sync_badge_lbl.move(40 - width, 0)
         self.sync_badge_lbl.setText(text)
         self.sync_badge_lbl.setStyleSheet("""
             background: #ef4444;
             color: white;
             border: 1px solid white;
-            border-radius: 9px;
+            border-radius: 8px;
             font-size: 9px;
             font-weight: bold;
         """)
@@ -989,40 +1264,100 @@ class MainWindow(QMainWindow):
             pass
         self._refresh_sync_status()
 
+    def _show_startup_notifications(self):
+        try:
+            user_name = self.user.get("username") or self.user.get("email") or "Foydalanuvchi"
+            self.show_toast(
+                f"Tizimga xush kelibsiz, {user_name}! Barcha xizmatlar faol va yangilangan.",
+                title="Tizim faol",
+                level="success",
+                duration_ms=4000,
+            )
+            data = db.get_notifications_data(threshold=5)
+            summary = data.get("summary", {})
+            low_stock = summary.get("low_stock_count", 0)
+            if low_stock > 0:
+                self.show_toast(
+                    f"{low_stock} ta mahsulot omborda kam qolgan yoki tugagan.",
+                    title="Ombor ogohlantirishi",
+                    level="warning",
+                    duration_ms=4000,
+                )
+            debtors_count = summary.get("debtors_count", 0)
+            if debtors_count > 0:
+                self.show_toast(
+                    f"{debtors_count} ta mijozda to'lanmagan qarzdorlik mavjud.",
+                    title="Qarzdorliklar",
+                    level="warning",
+                    duration_ms=4000,
+                )
+        except Exception:
+            pass
+
     def _pull_from_server(self, show_message=False):
         if not self._sync_available():
             self._refresh_sync_status()
             return
-        try:
-            result = sync_service.pull_server_changes(self.user)
-            self._reload_current_page()
-            self._refresh_sync_status()
+        if hasattr(self, "_sync_thread") and self._sync_thread and self._sync_thread.isRunning():
             if show_message:
-                QMessageBox.information(
-                    self,
-                    self.labels.get("sync_done", "Sync tugadi"),
-                    f"Serverdan olindi: {result.get('imported', 0)}",
-                )
-        except Exception as exc:
-            self._refresh_sync_status()
-            QMessageBox.warning(self, self.labels.get("sync_error", "Sync xatosi"), str(exc))
+                self.show_toast("Sinxronizatsiya allaqachon bajarilmoqda...", title="Sync", level="info")
+            return
+        if show_message:
+            self.show_toast("Serverdan ma'lumotlar olinmoqda...", title="Qabul qilinmoqda", level="info", duration_ms=2500)
+
+        self._sync_thread = QThread(self)
+        self._sync_worker = SyncWorker("pull", self.user)
+        self._sync_worker.moveToThread(self._sync_thread)
+        self._sync_thread.started.connect(self._sync_worker.run)
+        self._sync_worker.finished.connect(lambda res: self._on_pull_success(res, show_message))
+        self._sync_worker.failed.connect(self._on_sync_failed)
+        self._sync_thread.start()
+
+    def _on_pull_success(self, result, show_message):
+        self._cleanup_sync_thread()
+        self._reload_current_page()
+        self._refresh_sync_status()
+        if show_message:
+            imported = result.get("imported", 0)
+            self.show_toast(f"Ma'lumotlar serverdan muvaffaqiyatli qabul qilindi ({imported} ta yangilandi)", title="Sync tugadi", level="success")
 
     def _push_to_server(self, show_message=False):
         if not self._sync_available():
             self._refresh_sync_status()
             return
-        try:
-            result = sync_service.push_local_changes(self.user)
-            self._refresh_sync_status()
+        if hasattr(self, "_sync_thread") and self._sync_thread and self._sync_thread.isRunning():
             if show_message:
-                QMessageBox.information(
-                    self,
-                    self.labels.get("sync_done", "Sync tugadi"),
-                    f"Serverga yuborildi: {result.get('saved', 0)}",
-                )
-        except Exception as exc:
-            self._refresh_sync_status()
-            QMessageBox.warning(self, self.labels.get("sync_error", "Sync xatosi"), str(exc))
+                self.show_toast("Sinxronizatsiya allaqachon bajarilmoqda...", title="Sync", level="info")
+            return
+        if show_message:
+            self.show_toast("Ma'lumotlar serverga yuborilmoqda...", title="Yuborilmoqda", level="info", duration_ms=2500)
+
+        self._sync_thread = QThread(self)
+        self._sync_worker = SyncWorker("push", self.user)
+        self._sync_worker.moveToThread(self._sync_thread)
+        self._sync_thread.started.connect(self._sync_worker.run)
+        self._sync_worker.finished.connect(lambda res: self._on_push_success(res, show_message))
+        self._sync_worker.failed.connect(self._on_sync_failed)
+        self._sync_thread.start()
+
+    def _on_push_success(self, result, show_message):
+        self._cleanup_sync_thread()
+        self._refresh_sync_status()
+        if show_message:
+            saved = result.get("saved", 0)
+            self.show_toast(f"Ma'lumotlar serverga muvaffaqiyatli yuborildi ({saved} ta saqlandi)", title="Sync tugadi", level="success")
+
+    def _on_sync_failed(self, error_message):
+        self._cleanup_sync_thread()
+        self._refresh_sync_status()
+        self.show_toast(error_message, title="Sync xatosi", level="error")
+
+    def _cleanup_sync_thread(self):
+        if hasattr(self, "_sync_thread") and self._sync_thread:
+            self._sync_thread.quit()
+            self._sync_thread.wait(3000)
+            self._sync_thread = None
+            self._sync_worker = None
 
     def _set_logo_icon(self):
         pixmap = QPixmap(DESKTOP_ICON_PATH)
@@ -1131,10 +1466,15 @@ class MainWindow(QMainWindow):
             mode_callback = self._unlock_main_area
         menu.addAction(self._menu_button_action(menu, mode_text, mode_callback, theme, width=action_width))
         menu.addAction(self._menu_button_action(menu, self.labels["settings"], self._open_settings, theme, width=action_width))
+        menu.addAction(self._menu_button_action(menu, "🔄 " + self.labels.get("check_updates", "Yangilanishlar"), self._open_updater, theme, width=action_width))
         menu.addAction(self._menu_button_action(menu, self.labels["logout"], self._logout, theme, danger=True, width=action_width))
         size = menu.sizeHint()
         pos = self.user_menu_btn.mapToGlobal(self.user_menu_btn.rect().topLeft())
         menu.popup(pos - QPoint(0, size.height() + 8))
+
+    def _open_updater(self):
+        dlg = UpdaterDialog(self)
+        dlg.exec()
 
     def _menu_button_action(self, menu, text, callback, theme, danger=False, width=None):
         action = QWidgetAction(menu)
@@ -1230,11 +1570,11 @@ class MainWindow(QMainWindow):
             btn.setText(f"  {label}")
             btn.setExpanded(visible)
             btn.setStyleSheet(self._nav_group_style())
-        current_key = next((key for key, page in self.pages.items() if page is self.stack.currentWidget()), "sales")
+        current_page = self.stack.currentWidget()
+        current_key = next((key for key, page in self.pages.items() if page is current_page), "sales")
         self.page_title_lbl.setText(self.labels.get(current_key, current_key))
         for page in self.pages.values():
             set_language(page, self.settings.get("language", "uz"))
-        current_page = self.stack.currentWidget()
         if hasattr(current_page, "load_data"):
             current_page.load_data()
 
@@ -1330,16 +1670,21 @@ class MainWindow(QMainWindow):
         if hasattr(current_page, "apply_theme"):
             current_page.apply_theme(theme)
             return
-        for widget in self.stack.findChildren(QWidget):
-            if current_page and isinstance(current_page, SalesWidget) and current_page.isAncestorOf(widget):
-                continue
-            if self._inside_products_card(widget):
+        if current_page and isinstance(current_page, SalesWidget):
+            self._apply_sales_theme(current_page, theme)
+            return
+
+        target_container = current_page if current_page else self.stack
+        for widget in target_container.findChildren(QWidget):
+            if self._inside_custom_card(widget):
                 continue
             if self._inside_calendar(widget):
                 continue
             if isinstance(widget, QAbstractButton) and self._inside_table(widget):
                 continue
-            if isinstance(widget, (QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QTextEdit, QDateEdit)):
+            if isinstance(widget, QDateEdit):
+                widget.setStyleSheet(self._date_field_style(theme))
+            elif isinstance(widget, (QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QTextEdit)):
                 widget.setStyleSheet(self._field_style(theme))
             elif isinstance(widget, QTableWidget):
                 widget.setStyleSheet(self._table_style(theme))
@@ -1361,11 +1706,9 @@ class MainWindow(QMainWindow):
                 widget.setMinimumSize(400, 300)
                 widget.setStyleSheet(self._calendar_style(theme))
             elif isinstance(widget, QLabel):
-                if widget.objectName() == "productsSectionTitle":
+                if widget.objectName() in {"productsSectionTitle", "summaryCardTitle", "summaryCardValue"}:
                     continue
                 widget.setStyleSheet(self._label_style(theme))
-        if isinstance(current_page, SalesWidget):
-            self._apply_sales_theme(current_page, theme)
 
     def _inside_table(self, widget):
         parent = widget.parent()
@@ -1383,13 +1726,16 @@ class MainWindow(QMainWindow):
             parent = parent.parent()
         return False
 
-    def _inside_products_card(self, widget):
+    def _inside_custom_card(self, widget):
         parent = widget
         while parent is not None:
-            if parent.objectName() in {"sectionCard", "sectionMetrics", "trashCard"}:
+            if parent.objectName() in {"sectionCard", "sectionMetrics", "trashCard", "summaryCard", "notif_card"}:
                 return True
             parent = parent.parent()
         return False
+
+    def _inside_products_card(self, widget):
+        return self._inside_custom_card(widget)
 
     def _calendar_style(self, theme):
         return f"""
@@ -1526,7 +1872,7 @@ class MainWindow(QMainWindow):
 
     def _field_style(self, theme):
         return f"""
-            QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QTextEdit, QDateEdit {{
+            QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QTextEdit {{
                 background: {theme['topbar']};
                 color: {theme['title']};
                 border: 1px solid #cbd5e1;
@@ -1534,12 +1880,39 @@ class MainWindow(QMainWindow):
                 padding: 6px 10px;
                 font-size: 13px;
             }}
-            QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QTextEdit:focus, QDateEdit:focus {{
+            QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QTextEdit:focus {{
                 border-color: {theme['accent']};
             }}
             QComboBox::drop-down {{
                 border: none;
                 width: 22px;
+            }}
+        """
+
+    def _date_field_style(self, theme):
+        return f"""
+            QDateEdit {{
+                background: {theme['topbar']};
+                color: {theme['title']};
+                border: 1px solid #cbd5e1;
+                border-radius: 6px;
+                padding: 0 36px 0 12px;
+                font-size: 13px;
+            }}
+            QDateEdit:focus {{
+                border-color: {theme['accent']};
+            }}
+            QDateEdit::drop-down {{
+                subcontrol-origin: border;
+                subcontrol-position: top right;
+                width: 30px;
+                border-left: 1px solid #e2e8f0;
+                border-top-right-radius: 6px;
+                border-bottom-right-radius: 6px;
+                background: {theme['topbar']};
+            }}
+            QDateEdit::drop-down:hover {{
+                background: {theme['content']};
             }}
         """
 
@@ -1630,6 +2003,10 @@ class MainWindow(QMainWindow):
                 background: {theme['topbar']};
                 border: 1px solid #e2e8f0;
                 border-radius: 8px;
+            }}
+            QFrame QLabel {{
+                border: none;
+                background: transparent;
             }}
         """
 

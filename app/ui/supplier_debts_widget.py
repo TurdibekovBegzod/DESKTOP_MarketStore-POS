@@ -1,7 +1,7 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QTableWidget, QTableWidgetItem, QDialog, QFormLayout, QDoubleSpinBox,
-    QMessageBox, QHeaderView, QComboBox, QTabWidget
+    QMessageBox, QHeaderView, QComboBox, QTabWidget, QMenu
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QDoubleValidator
@@ -20,10 +20,11 @@ def _translated_debt_error(message, language):
 
 
 class PartyDialog(QDialog):
-    def __init__(self, parent=None, party=None, label="Ta'minotchi"):
+    def __init__(self, parent=None, party=None, label="Ta'minotchi", kind="supplier"):
         super().__init__(parent)
         self.party = party
         self.label = label
+        self.kind = kind
         self.language = (parent.property("app_language") if parent else None) or "uz"
         title = f"{label} qo'shish" if not party else f"{label}ni tahrirlash"
         self.setWindowTitle(t(title, self.language))
@@ -38,22 +39,76 @@ class PartyDialog(QDialog):
         self.name_edit = QLineEdit(self.party["name"] if self.party else "")
         self.phone_edit = QLineEdit(self.party["phone"] if self.party and self.party["phone"] else "")
         self.note_edit = QLineEdit(self.party["note"] if self.party and self.party["note"] else "")
+        self.name_lbl = QLabel("Nomi *:")
+        self.phone_lbl = QLabel("Telefon:")
+        self.cashier_lbl = None
+        self.cashier_combo = None
+        self.subject_type_combo = None
+        self.initial_debt_edit = None
+
+        if self.kind == "debtor":
+            self.subject_type_combo = QComboBox()
+            self.subject_type_combo.addItem(t("Qarz oluvchi", self.language), "person")
+            self.subject_type_combo.addItem(t("Kassir", self.language), "cashier")
+            self.cashier_lbl = QLabel("Kassir:")
+            self.cashier_combo = QComboBox()
+            for user in db.get_debt_cashiers():
+                display_name = (user.get("username") or user.get("email") or "").strip()
+                self.cashier_combo.addItem(display_name, dict(user))
+            linked_user_id = self.party.get("user_id") if self.party else None
+            if linked_user_id:
+                self.subject_type_combo.setCurrentIndex(self.subject_type_combo.findData("cashier"))
+                cashier_index = next(
+                    (
+                        index for index in range(self.cashier_combo.count())
+                        if (self.cashier_combo.itemData(index) or {}).get("id") == linked_user_id
+                    ),
+                    -1,
+                )
+                if cashier_index >= 0:
+                    self.cashier_combo.setCurrentIndex(cashier_index)
+            if self.party:
+                self.subject_type_combo.setEnabled(False)
+                self.cashier_combo.setEnabled(False)
+            form.addRow(t("Qarz oluvchi turi:", self.language), self.subject_type_combo)
+
         self.currency_combo = QComboBox()
         for currency in db.get_currencies():
             self.currency_combo.addItem(currency["code"], currency["code"])
-        current_currency = self.party["debt_currency"] if self.party and self.party["debt_currency"] else "UZS"
+        current_currency = (
+            self.party["debt_currency"]
+            if self.party and self.party["debt_currency"]
+            else db.get_app_settings().get("currency", "UZS")
+        )
         idx = self.currency_combo.findData(current_currency)
         if idx >= 0:
             self.currency_combo.setCurrentIndex(idx)
         if self.party and (self.party["balance"] or 0) > 0:
             self.currency_combo.setEnabled(False)
-        for widget in [self.name_edit, self.phone_edit, self.note_edit, self.currency_combo]:
+        styled_widgets = [self.name_edit, self.phone_edit, self.note_edit, self.currency_combo]
+        if self.subject_type_combo is not None:
+            styled_widgets.extend([self.subject_type_combo, self.cashier_combo])
+        for widget in styled_widgets:
             widget.setStyleSheet("border:1px solid #d1d5db;border-radius:6px;padding:7px 10px;background:white;")
-        form.addRow("Nomi *:", self.name_edit)
-        form.addRow("Telefon:", self.phone_edit)
+        form.addRow(self.name_lbl, self.name_edit)
+        form.addRow(self.phone_lbl, self.phone_edit)
+        if self.cashier_combo is not None:
+            form.addRow(self.cashier_lbl, self.cashier_combo)
         form.addRow("Qarz valyutasi:", self.currency_combo)
+        if self.kind == "debtor" and not self.party:
+            self.initial_debt_edit = QLineEdit()
+            self.initial_debt_edit.setPlaceholderText("0.00")
+            validator = QDoubleValidator(0, 999999999999, 2, self)
+            validator.setNotation(QDoubleValidator.Notation.StandardNotation)
+            self.initial_debt_edit.setValidator(validator)
+            self.initial_debt_edit.setStyleSheet("border:1px solid #d1d5db;border-radius:6px;padding:7px 10px;background:white;")
+            form.addRow(t("Boshlang'ich qarz:", self.language), self.initial_debt_edit)
         form.addRow("Izoh:", self.note_edit)
         layout.addLayout(form)
+
+        if self.subject_type_combo is not None:
+            self.subject_type_combo.currentIndexChanged.connect(self._subject_type_changed)
+            self._subject_type_changed()
 
         btns = QHBoxLayout()
         cancel_btn = QPushButton("Bekor")
@@ -67,7 +122,13 @@ class PartyDialog(QDialog):
         layout.addLayout(btns)
 
     def _save(self):
+        if self._is_cashier() and (self.cashier_combo is None or self.cashier_combo.currentData() is None):
+            QMessageBox.warning(self, t("Xatolik", self.language), t("Kassirni tanlang!", self.language))
+            return
         if not self.name_edit.text().strip():
+            if self._is_cashier():
+                self.accept()
+                return
             QMessageBox.warning(
                 self,
                 t("Xatolik", self.language),
@@ -77,12 +138,39 @@ class PartyDialog(QDialog):
         self.accept()
 
     def get_data(self):
+        selected_user = self.cashier_combo.currentData() if self._is_cashier() else None
+        name = (
+            (selected_user.get("username") or selected_user.get("email") or "").strip()
+            if selected_user else self.name_edit.text().strip()
+        )
         return {
-            "name": self.name_edit.text().strip(),
-            "phone": self.phone_edit.text().strip() or None,
+            "name": name,
+            "phone": None if selected_user else self.phone_edit.text().strip() or None,
             "note": self.note_edit.text().strip() or None,
             "debt_currency": self.currency_combo.currentData(),
+            "user_id": selected_user.get("id") if selected_user else self.party.get("user_id") if self.party else None,
+            "initial_debt": self.initial_debt(),
         }
+
+    def initial_debt(self):
+        if self.initial_debt_edit is None:
+            return 0
+        text = self.initial_debt_edit.text().strip().replace(" ", "").replace(",", ".")
+        try:
+            return float(text) if text else 0
+        except ValueError:
+            return 0
+
+    def _is_cashier(self):
+        return self.subject_type_combo is not None and self.subject_type_combo.currentData() == "cashier"
+
+    def _subject_type_changed(self, *_args):
+        is_cashier = self._is_cashier()
+        for widget in (self.name_lbl, self.name_edit, self.phone_lbl, self.phone_edit):
+            widget.setVisible(not is_cashier)
+        if self.cashier_lbl is not None:
+            self.cashier_lbl.setVisible(is_cashier)
+            self.cashier_combo.setVisible(is_cashier)
 
 
 class DebtDialog(QDialog):
@@ -259,7 +347,7 @@ class SupplierDebtsWidget(QWidget):
         total_header = "Jami olingan" if kind == "supplier" else "Jami berilgan"
         table.setHorizontalHeaderLabels(["Nomi", "Telefon", "Valyuta", "Qarz", total_header, "Amallar"])
         table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for column, width in [(1, 150), (2, 80), (3, 140), (4, 140), (5, 430)]:
+        for column, width in [(1, 150), (2, 80), (3, 140), (4, 140), (5, 80)]:
             table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
             table.setColumnWidth(column, width)
         table.verticalHeader().setDefaultSectionSize(54)
@@ -273,17 +361,18 @@ class SupplierDebtsWidget(QWidget):
     def load_data(self):
         if self.isVisible():
             self._async_loader.start(
-                lambda: (db.get_all_suppliers(), db.get_all_debtors(), db.get_currencies()),
+                lambda: (db.get_all_suppliers(), db.get_all_debtors(), db.get_currencies(), db.get_users()),
                 self._apply_loaded_data,
             )
             return
-        self._apply_loaded_data((db.get_all_suppliers(), db.get_all_debtors(), db.get_currencies()))
+        self._apply_loaded_data((db.get_all_suppliers(), db.get_all_debtors(), db.get_currencies(), db.get_users()))
 
     def _apply_loaded_data(self, data):
-        suppliers, debtors, currencies = data
+        suppliers, debtors, currencies, users = data
         self._suppliers = suppliers
         self._debtors = debtors
         self._currencies = currencies
+        self._users_by_id = {user["id"]: dict(user) for user in users}
         self._load_total_currency_combo(currencies)
         self._load_table("supplier", suppliers)
         self._load_table("debtor", debtors)
@@ -305,10 +394,17 @@ class SupplierDebtsWidget(QWidget):
         table.setRowCount(0)
         for row, party in enumerate(rows):
             table.insertRow(row)
-            name_item = QTableWidgetItem(party["name"])
+            display_name = party["name"]
+            contact = party["phone"] or ""
+            if kind == "debtor" and party.get("user_id"):
+                user = self._users_by_id.get(party["user_id"], {})
+                display_name = user.get("username") or party.get("cashier_name") or party["name"]
+                contact = user.get("email") or party.get("cashier_email") or ""
+                display_name = f"{display_name} ({t('Kassir', self.property('app_language') or 'uz')})"
+            name_item = QTableWidgetItem(display_name)
             name_item.setData(Qt.ItemDataRole.UserRole, dict(party))
             table.setItem(row, 0, name_item)
-            table.setItem(row, 1, QTableWidgetItem(party["phone"] or ""))
+            table.setItem(row, 1, QTableWidgetItem(contact))
             table.setItem(row, 2, QTableWidgetItem(party["debt_currency"] or "UZS"))
             table.setItem(row, 3, self._money_item(party["balance"] or 0, party["debt_currency"] or "UZS"))
             total_key = "total_received" if kind == "supplier" else "total_given"
@@ -316,36 +412,76 @@ class SupplierDebtsWidget(QWidget):
             table.setCellWidget(row, 5, self._actions_widget(row, kind))
             table.setRowHeight(row, 54)
 
-    def _actions_widget(self, row, kind):
+    def _menu_button_widget(self, on_click):
         widget = QWidget()
+        widget.setStyleSheet("background:transparent;")
         layout = QHBoxLayout(widget)
-        layout.setContentsMargins(6, 4, 6, 4)
-        layout.setSpacing(6)
-        plus_btn = QPushButton("+")
-        minus_btn = QPushButton("-")
-        history_btn = QPushButton("Tarix")
-        edit_btn = QPushButton("Tahrir")
-        delete_btn = QPushButton("O'chir")
-        for btn in [plus_btn, minus_btn, history_btn, edit_btn, delete_btn]:
-            btn.setFixedHeight(30)
-        plus_btn.setFixedWidth(38)
-        minus_btn.setFixedWidth(38)
-        history_btn.setFixedWidth(82)
-        edit_btn.setFixedWidth(86)
-        delete_btn.setFixedWidth(90)
-        plus_btn.setStyleSheet(self._button_style("#ecfdf5", "#065f46", "#6ee7b7", "#10b981"))
-        minus_btn.setStyleSheet(self._button_style("#fef2f2", "#b91c1c", "#fca5a5", "#ef4444"))
-        history_btn.setStyleSheet(self._button_style("#eff6ff", "#1d4ed8", "#93c5fd", "#3b82f6"))
-        edit_btn.setStyleSheet(self._button_style("#fff7ed", "#9a3412", "#fdba74", "#fb923c"))
-        delete_btn.setStyleSheet(self._button_style("#fef2f2", "#991b1b", "#fca5a5", "#dc2626"))
-        plus_btn.clicked.connect(lambda _, r=row, k=kind: self._change_debt(r, k, "plus"))
-        minus_btn.clicked.connect(lambda _, r=row, k=kind: self._change_debt(r, k, "minus"))
-        history_btn.clicked.connect(lambda _, r=row, k=kind: self._show_history(r, k))
-        edit_btn.clicked.connect(lambda _, r=row, k=kind: self._edit_party(r, k))
-        delete_btn.clicked.connect(lambda _, r=row, k=kind: self._delete_party(r, k))
-        for btn in [plus_btn, minus_btn, history_btn, edit_btn, delete_btn]:
-            layout.addWidget(btn)
+        layout.setContentsMargins(0, 0, 0, 0)
+        button = QPushButton("⋮")
+        button.setFixedSize(34, 32)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        language = self.property("app_language") or "uz"
+        button.setToolTip(t("Amallar", language))
+        button.setStyleSheet("""
+            QPushButton {
+                background:#ffffff;color:#334155;border:1px solid #cbd5e1;
+                border-radius:6px;font-size:20px;font-weight:bold;padding:0;
+            }
+            QPushButton:hover { background:#f1f5f9;border-color:#94a3b8; }
+            QPushButton:pressed { background:#e2e8f0; }
+        """)
+        button.clicked.connect(lambda _=False: on_click(button))
+        layout.addWidget(button, alignment=Qt.AlignmentFlag.AlignCenter)
         return widget
+
+    @staticmethod
+    def _actions_menu_style():
+        return """
+            QMenu { background:#ffffff;color:#1e293b;border:1px solid #cbd5e1;padding:6px; }
+            QMenu::item { min-width:160px;padding:8px 14px;border-radius:4px; }
+            QMenu::item:selected { background:#eff6ff;color:#1d4ed8; }
+            QMenu::item:disabled { color:#94a3b8; }
+        """
+
+    def _build_debt_actions_menu(self, row, kind, parent=None):
+        language = self.property("app_language") or "uz"
+        menu = QMenu(parent or self)
+        menu.setStyleSheet(self._actions_menu_style())
+        if kind == "supplier":
+            plus_label = t("Qarz qo'shish", language)
+            minus_label = t("Qarz to'lash", language)
+        else:
+            plus_label = t("Qarz berish", language)
+            minus_label = t("Qarz qaytarish", language)
+        history_label = t("Tarix", language)
+        edit_label = t("Tahrir", language)
+        delete_label = t("O'chir", language)
+
+        plus_action = menu.addAction(f"➕ {plus_label}")
+        plus_action.triggered.connect(lambda _=False, r=row, k=kind: self._change_debt(r, k, "plus"))
+
+        minus_action = menu.addAction(f"➖ {minus_label}")
+        minus_action.triggered.connect(lambda _=False, r=row, k=kind: self._change_debt(r, k, "minus"))
+
+        history_action = menu.addAction(f"📜 {history_label}")
+        history_action.triggered.connect(lambda _=False, r=row, k=kind: self._show_history(r, k))
+
+        edit_action = menu.addAction(f"✏️ {edit_label}")
+        edit_action.triggered.connect(lambda _=False, r=row, k=kind: self._edit_party(r, k))
+
+        delete_action = menu.addAction(f"🗑️ {delete_label}")
+        delete_action.triggered.connect(lambda _=False, r=row, k=kind: self._delete_party(r, k))
+
+        return menu
+
+    def _show_debt_actions_menu(self, row, kind, button):
+        menu = self._build_debt_actions_menu(row, kind, button)
+        menu.exec(button.mapToGlobal(button.rect().bottomLeft()))
+
+    def _actions_widget(self, row, kind):
+        return self._menu_button_widget(
+            lambda button, r=row, k=kind: self._show_debt_actions_menu(r, k, button)
+        )
 
     def _current_kind(self):
         return "supplier" if self.tabs.currentIndex() == 0 else "debtor"
@@ -370,6 +506,7 @@ class SupplierDebtsWidget(QWidget):
 
     def _load_total_currency_combo(self, currencies=None):
         current = self.total_currency_combo.currentData() if hasattr(self, "total_currency_combo") else "UZS"
+        current = current or db.get_app_settings().get("currency", "UZS")
         self.total_currency_combo.blockSignals(True)
         self.total_currency_combo.clear()
         available = {currency["code"] for currency in (currencies if currencies is not None else db.get_currencies())}
@@ -399,20 +536,39 @@ class SupplierDebtsWidget(QWidget):
 
     def _add_current_party(self):
         kind = self._current_kind()
-        dlg = PartyDialog(self, label=self._label_for(kind))
+        dlg = PartyDialog(self, label=self._label_for(kind), kind=kind)
         if dlg.exec():
             data = dlg.get_data()
-            if kind == "supplier":
-                db.add_supplier(data["name"], data["phone"], data["note"], data["debt_currency"])
-            else:
-                db.add_debtor(data["name"], data["phone"], data["note"], data["debt_currency"])
-            self.load_data()
+            try:
+                if kind == "supplier":
+                    db.add_supplier(data["name"], data["phone"], data["note"], data["debt_currency"])
+                else:
+                    debtor_id = db.add_debtor(
+                        data["name"],
+                        data["phone"],
+                        data["note"],
+                        data["debt_currency"],
+                        user_id=data["user_id"],
+                    )
+                    if data["initial_debt"] > 0:
+                        db.add_debtor_debt(
+                            debtor_id,
+                            data["initial_debt"],
+                            f"{data['name']}ga boshlang'ich qarz berildi",
+                        )
+                self.load_data()
+            except db.AppError as exc:
+                QMessageBox.warning(
+                    self,
+                    t("Xatolik", self.property("app_language") or "uz"),
+                    _translated_debt_error(exc, self.property("app_language") or "uz"),
+                )
 
     def _edit_party(self, row, kind):
         party = self._party_at_row(row, kind)
         if not party:
             return
-        dlg = PartyDialog(self, party, self._label_for(kind))
+        dlg = PartyDialog(self, party, self._label_for(kind), kind=kind)
         if dlg.exec():
             data = dlg.get_data()
             if kind == "supplier":

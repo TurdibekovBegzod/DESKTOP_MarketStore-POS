@@ -1,7 +1,7 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTableWidget,
     QTableWidgetItem, QDialog, QFormLayout, QLineEdit, QComboBox,
-    QMessageBox, QHeaderView
+    QMessageBox, QHeaderView, QMenu
 )
 from PyQt6.QtCore import Qt
 import database as db
@@ -39,9 +39,6 @@ class UserDialog(QDialog):
         self.full_name_edit.setPlaceholderText("Ism Familiya")
         form.addRow("To'liq ism *:", self.full_name_edit)
 
-        self.email_edit = QLineEdit((self.user.get("email") or self.user.get("username")) if self.user else "")
-        form.addRow("Email *:", self.email_edit)
-
         self.role_combo = QComboBox()
         self.role_combo.addItem(t("Kassir", self.language), "cashier")
         self.role_combo.addItem(t("Admin", self.language), "admin")
@@ -68,15 +65,11 @@ class UserDialog(QDialog):
         if not self.full_name_edit.text().strip():
             QMessageBox.warning(self, "Xatolik", "To'liq ismni kiriting!")
             return
-        if not self.email_edit.text().strip():
-            QMessageBox.warning(self, "Xatolik", "Email kiriting!")
-            return
         self.accept()
 
     def get_data(self):
         return {
             "full_name": self.full_name_edit.text().strip(),
-            "email": self.email_edit.text().strip(),
             "role": self.role_combo.currentData(),
         }
 
@@ -105,13 +98,14 @@ class UsersWidget(QWidget):
         layout.addLayout(toolbar)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(5)
-        self.table.setHorizontalHeaderLabels(["To'liq ism", "Email", "Rol", "Yaratilgan", "Amallar"])
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(["To'liq ism", "Rol", "Yaratilgan", "Amallar"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
-        self.table.setColumnWidth(4, 154)
-        self.table.verticalHeader().setDefaultSectionSize(78)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        self.table.setColumnWidth(3, 80)
+        self.table.verticalHeader().setDefaultSectionSize(54)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setAlternatingRowColors(True)
@@ -131,29 +125,63 @@ class UsersWidget(QWidget):
             username_item = QTableWidgetItem(user.get("username") or user.get("email") or "")
             username_item.setData(Qt.ItemDataRole.UserRole, dict(user))
             self.table.setItem(row, 0, username_item)
-            self.table.setItem(row, 1, QTableWidgetItem(user.get("email") or ""))
-            self.table.setItem(row, 2, QTableWidgetItem("Admin" if user["role"] == "admin" else "Kassir"))
-            self.table.setItem(row, 3, QTableWidgetItem(user["created_at"] or ""))
-
-            actions = QWidget()
-            actions_layout = QVBoxLayout(actions)
-            actions_layout.setContentsMargins(8, 6, 8, 6)
-            actions_layout.setSpacing(6)
-
-            edit_btn = QPushButton("Tahrir")
-            edit_btn.setFixedHeight(28)
-            edit_btn.setMinimumWidth(112)
-            edit_btn.setStyleSheet("background:#fff7ed;color:#9a3412;border:1px solid #fdba74;border-radius:6px;font-weight:bold;")
-            edit_btn.clicked.connect(lambda _, r=row: self._edit_user(r))
-            del_btn = QPushButton("O'chir")
-            del_btn.setFixedHeight(28)
-            del_btn.setMinimumWidth(112)
-            del_btn.setStyleSheet("background:#fef2f2;color:#b91c1c;border:1px solid #fca5a5;border-radius:6px;font-weight:bold;")
-            del_btn.clicked.connect(lambda _, r=row: self._delete_user(r))
-            actions_layout.addWidget(edit_btn)
-            actions_layout.addWidget(del_btn)
-            self.table.setCellWidget(row, 4, actions)
+            self.table.setItem(row, 1, QTableWidgetItem("Admin" if user["role"] == "admin" else "Kassir"))
+            self.table.setItem(row, 2, QTableWidgetItem(user["created_at"] or ""))
+            self.table.setCellWidget(row, 3, self._actions_widget(row))
+            self.table.setRowHeight(row, 54)
         set_language(self, self.property("app_language") or "uz")
+
+    def _menu_button_widget(self, on_click):
+        widget = QWidget()
+        widget.setStyleSheet("background:transparent;")
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        button = QPushButton("⋮")
+        button.setFixedSize(34, 32)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        language = self.property("app_language") or "uz"
+        button.setToolTip(t("Amallar", language))
+        button.setStyleSheet("""
+            QPushButton {
+                background:#ffffff;color:#334155;border:1px solid #cbd5e1;
+                border-radius:6px;font-size:20px;font-weight:bold;padding:0;
+            }
+            QPushButton:hover { background:#f1f5f9;border-color:#94a3b8; }
+            QPushButton:pressed { background:#e2e8f0; }
+        """)
+        button.clicked.connect(lambda _=False: on_click(button))
+        layout.addWidget(button, alignment=Qt.AlignmentFlag.AlignCenter)
+        return widget
+
+    @staticmethod
+    def _actions_menu_style():
+        return """
+            QMenu { background:#ffffff;color:#1e293b;border:1px solid #cbd5e1;padding:6px; }
+            QMenu::item { min-width:140px;padding:8px 14px;border-radius:4px; }
+            QMenu::item:selected { background:#eff6ff;color:#1d4ed8; }
+            QMenu::item:disabled { color:#94a3b8; }
+        """
+
+    def _build_user_actions_menu(self, row, parent=None):
+        language = self.property("app_language") or "uz"
+        menu = QMenu(parent or self)
+        menu.setStyleSheet(self._actions_menu_style())
+        edit_label = t("Tahrir", language)
+        delete_label = t("O'chir", language)
+        edit_action = menu.addAction(f"✏️ {edit_label}")
+        edit_action.triggered.connect(lambda _=False, r=row: self._edit_user(r))
+        del_action = menu.addAction(f"🗑️ {delete_label}")
+        del_action.triggered.connect(lambda _=False, r=row: self._delete_user(r))
+        return menu
+
+    def _show_user_actions_menu(self, row, button):
+        menu = self._build_user_actions_menu(row, button)
+        menu.exec(button.mapToGlobal(button.rect().bottomLeft()))
+
+    def _actions_widget(self, row):
+        return self._menu_button_widget(
+            lambda button, r=row: self._show_user_actions_menu(r, button)
+        )
 
     def _add_user(self):
         dlg = UserDialog(self)
@@ -161,7 +189,6 @@ class UsersWidget(QWidget):
             data = dlg.get_data()
             try:
                 db.add_user(
-                    email=data["email"],
                     role=data["role"],
                     username=data["full_name"],
                 )
@@ -180,7 +207,6 @@ class UsersWidget(QWidget):
             try:
                 db.update_user(
                     user["id"],
-                    data["email"],
                     role=data["role"],
                     username=data["full_name"],
                 )
@@ -194,7 +220,7 @@ class UsersWidget(QWidget):
             return
         user = item.data(Qt.ItemDataRole.UserRole)
         reply = QMessageBox.question(
-            self, "O'chirish", f"'{user.get('email') or user['username']}' foydalanuvchisi o'chirilsinmi?",
+            self, "O'chirish", f"'{user.get('username') or user.get('email')}' foydalanuvchisi o'chirilsinmi?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
         if reply == QMessageBox.StandardButton.Yes:

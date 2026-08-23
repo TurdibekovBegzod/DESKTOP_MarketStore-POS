@@ -43,7 +43,7 @@ def main():
         QToolTip { background: #1e293b; color: white; border: none; padding: 4px 8px; border-radius: 4px; }
     """)
 
-    recent_user = db.restore_recent_account_user(max_minutes=15)
+    recent_user = db.restore_recent_account_user(max_days=7)
     if recent_user:
         recent_user["role"] = "cashier"
         try:

@@ -592,25 +592,26 @@ class SalesWidget(QWidget):
     def _load_currencies(self, currencies=None):
         current = self.currency_combo.currentData() if hasattr(self, "currency_combo") else None
         discount_current = self.discount_currency_combo.currentData() if hasattr(self, "discount_currency_combo") else None
+        preferred_code = db.get_app_settings(self.user.get("id")).get("currency", "UZS")
         currencies = currencies if currencies is not None else [dict(currency) for currency in db.get_currencies()]
         self.currency_combo.blockSignals(True)
         self.currency_combo.clear()
         for currency in currencies:
             self.currency_combo.addItem(f"{currency['code']} - {currency['name']}", dict(currency))
-        if current:
-            idx = self.currency_combo.findText(current["code"], Qt.MatchFlag.MatchStartsWith)
-            if idx >= 0:
-                self.currency_combo.setCurrentIndex(idx)
+        selected_code = current["code"] if current else preferred_code
+        idx = self.currency_combo.findText(selected_code, Qt.MatchFlag.MatchStartsWith)
+        if idx >= 0:
+            self.currency_combo.setCurrentIndex(idx)
         self.currency_combo.blockSignals(False)
 
         self.discount_currency_combo.blockSignals(True)
         self.discount_currency_combo.clear()
         for currency in currencies:
             self.discount_currency_combo.addItem(currency["code"], dict(currency))
-        if discount_current:
-            idx = self.discount_currency_combo.findText(discount_current["code"], Qt.MatchFlag.MatchStartsWith)
-            if idx >= 0:
-                self.discount_currency_combo.setCurrentIndex(idx)
+        discount_code = discount_current["code"] if discount_current else preferred_code
+        idx = self.discount_currency_combo.findText(discount_code, Qt.MatchFlag.MatchStartsWith)
+        if idx >= 0:
+            self.discount_currency_combo.setCurrentIndex(idx)
         self.discount_currency_combo.blockSignals(False)
         self._on_currency_changed()
 
@@ -631,7 +632,10 @@ class SalesWidget(QWidget):
             user_id = user.get("id")
             username = (user.get("username") or "").strip().lower()
             email = (user.get("email") or "").strip().lower()
+            u_role = user.get("role")
             if user_id in seen_ids:
+                continue
+            if u_role == "admin":
                 continue
             if username == "admin" and email in ("", "admin@gmail.com"):
                 continue

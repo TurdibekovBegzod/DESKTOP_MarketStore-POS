@@ -225,6 +225,7 @@ class FinanceMoneyDialog(QDialog):
         layout.addLayout(buttons)
 
     def _load_currencies(self):
+        selected_currency = db.get_app_settings().get("currency", "UZS")
         currencies = [dict(currency) for currency in db.get_currencies()]
         priority = {"UZS": 0, "USD": 1, "EUR": 2}
         currencies.sort(key=lambda item: (priority.get(item["code"], 10), item["code"]))
@@ -232,6 +233,9 @@ class FinanceMoneyDialog(QDialog):
             self.currency_combo.addItem(currency["code"], currency)
         if self.currency_combo.count() == 0:
             self.currency_combo.addItem("UZS", {"code": "UZS", "rate_to_uzs": 1})
+        index = self.currency_combo.findText(selected_currency, Qt.MatchFlag.MatchStartsWith)
+        if index >= 0:
+            self.currency_combo.setCurrentIndex(index)
 
     def _accept(self):
         if self.amount() <= 0:
@@ -603,6 +607,8 @@ class FinanceWidget(QWidget):
         return f"{value or 0:,.0f}"
 
     def _load_display_currencies(self):
+        current = self.currency_combo.currentData() if self.currency_combo.count() else None
+        selected_currency = current.get("code") if current else db.get_app_settings().get("currency", "UZS")
         self.currency_combo.clear()
         currencies = [dict(currency) for currency in db.get_currencies()]
         priority = {"UZS": 0, "USD": 1, "EUR": 2}
@@ -611,6 +617,9 @@ class FinanceWidget(QWidget):
             self.currency_combo.addItem(currency["code"], currency)
         if self.currency_combo.count() == 0:
             self.currency_combo.addItem("UZS", {"code": "UZS", "rate_to_uzs": 1})
+        index = self.currency_combo.findText(selected_currency, Qt.MatchFlag.MatchStartsWith)
+        if index >= 0:
+            self.currency_combo.setCurrentIndex(index)
 
     def _selected_currency(self):
         return self.currency_combo.currentData() or {"code": "UZS", "rate_to_uzs": 1}

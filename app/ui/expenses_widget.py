@@ -3,7 +3,7 @@ from datetime import date, timedelta
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QTableWidget, QTableWidgetItem, QDialog, QFormLayout, QDoubleSpinBox,
-    QMessageBox, QHeaderView, QComboBox, QDateEdit
+    QMessageBox, QHeaderView, QComboBox, QDateEdit, QCalendarWidget, QMenu
 )
 from PyQt6.QtCore import Qt, QDate, QPointF
 from PyQt6.QtGui import QPainter, QPen, QColor, QFont, QDoubleValidator
@@ -79,19 +79,36 @@ class ExpenseDialog(QDialog):
         form = QFormLayout()
         self.category_combo = QComboBox()
         self.category_combo.addItem("— Kategoriya —", None)
+        self._cashier_category_ids = set()
         for category in db.get_expense_categories():
             self.category_combo.addItem(category["name"], category["id"])
+            if db.is_cashier_expense_category_name(category["name"]):
+                self._cashier_category_ids.add(category["id"])
         if self.expense and self.expense["category_id"]:
             idx = self.category_combo.findData(self.expense["category_id"])
             if idx >= 0:
                 self.category_combo.setCurrentIndex(idx)
+        self.cashier_combo = QComboBox()
+        self.cashier_combo.addItem(t("— Kassirni tanlang —", self.language), None)
+        for user in db.get_users():
+            if user["role"] != "cashier":
+                continue
+            self.cashier_combo.addItem(user["username"] or user["email"], user["id"])
+        if self.expense and self.expense.get("cashier_id"):
+            idx = self.cashier_combo.findData(self.expense["cashier_id"])
+            if idx >= 0:
+                self.cashier_combo.setCurrentIndex(idx)
         self.currency_combo = QComboBox()
         for currency in db.get_currencies():
             self.currency_combo.addItem(currency["code"], currency["code"])
-        if self.expense and self.expense["currency_code"]:
-            idx = self.currency_combo.findData(self.expense["currency_code"])
-            if idx >= 0:
-                self.currency_combo.setCurrentIndex(idx)
+        selected_currency = (
+            self.expense["currency_code"]
+            if self.expense and self.expense["currency_code"]
+            else db.get_app_settings().get("currency", "UZS")
+        )
+        idx = self.currency_combo.findData(selected_currency)
+        if idx >= 0:
+            self.currency_combo.setCurrentIndex(idx)
         amount_row = QHBoxLayout()
         self.currency_combo.setFixedWidth(92)
         self.amount_edit = QLineEdit()
@@ -105,12 +122,16 @@ class ExpenseDialog(QDialog):
         amount_row.addWidget(self.amount_edit)
         self.description_edit = QLineEdit(self.expense["description"] if self.expense and self.expense["description"] else "")
         self.description_edit.setPlaceholderText("Masalan: ofis ijara, yoqilg'i, reklama")
-        for widget in [self.category_combo, self.amount_edit, self.currency_combo, self.description_edit]:
+        for widget in [self.category_combo, self.cashier_combo, self.amount_edit, self.currency_combo, self.description_edit]:
             widget.setStyleSheet("border:1px solid #d1d5db;border-radius:6px;padding:7px 10px;background:white;")
         form.addRow("Kategoriya:", self.category_combo)
+        self.cashier_label = QLabel(t("Kassir:", self.language))
+        form.addRow(self.cashier_label, self.cashier_combo)
         form.addRow("Summa:", amount_row)
         form.addRow("Description:", self.description_edit)
         layout.addLayout(form)
+        self.category_combo.currentIndexChanged.connect(self._update_cashier_visibility)
+        self._update_cashier_visibility()
 
         btns = QHBoxLayout()
         cancel_btn = QPushButton("Bekor")
@@ -127,6 +148,9 @@ class ExpenseDialog(QDialog):
         if self.amount() <= 0:
             QMessageBox.warning(self, t("Xatolik", self.language), t("Summani kiriting!", self.language))
             return
+        if self._is_cashier_category() and not self.cashier_combo.currentData():
+            QMessageBox.warning(self, t("Xatolik", self.language), t("Kassirni tanlang!", self.language))
+            return
         self.accept()
 
     def get_data(self):
@@ -135,7 +159,16 @@ class ExpenseDialog(QDialog):
             "amount": self.amount(),
             "currency_code": self.currency_combo.currentData() or "UZS",
             "description": self.description_edit.text().strip() or None,
+            "cashier_id": self.cashier_combo.currentData() if self._is_cashier_category() else None,
         }
+
+    def _is_cashier_category(self):
+        return self.category_combo.currentData() in self._cashier_category_ids
+
+    def _update_cashier_visibility(self, *_args):
+        visible = self._is_cashier_category()
+        self.cashier_label.setVisible(visible)
+        self.cashier_combo.setVisible(visible)
 
     def amount(self):
         text = self.amount_edit.text().strip().replace(" ", "").replace(",", ".")
@@ -203,7 +236,7 @@ class CategoryManagerDialog(QDialog):
         self.table.setHorizontalHeaderLabels(["Nomi", "Amallar"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
-        self.table.setColumnWidth(1, 210)
+        self.table.setColumnWidth(1, 80)
         self.table.verticalHeader().setDefaultSectionSize(54)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
@@ -219,21 +252,55 @@ class CategoryManagerDialog(QDialog):
             self.table.setCellWidget(row, 1, self._actions_widget(row))
             self.table.setRowHeight(row, 54)
 
-    def _actions_widget(self, row):
+    def _menu_button_widget(self, on_click):
         widget = QWidget()
+        widget.setStyleSheet("background:transparent;")
         layout = QHBoxLayout(widget)
-        layout.setContentsMargins(6, 4, 6, 4)
-        edit_btn = QPushButton("✏ Tahrir")
-        del_btn = QPushButton("🗑 O'chir")
-        edit_btn.setFixedSize(92, 30)
-        del_btn.setFixedSize(96, 30)
-        edit_btn.setText(t("Tahrir", self.language))
-        del_btn.setText(t("O'chir", self.language))
-        edit_btn.clicked.connect(lambda _, r=row: self._edit_category(r))
-        del_btn.clicked.connect(lambda _, r=row: self._delete_category(r))
-        layout.addWidget(edit_btn)
-        layout.addWidget(del_btn)
+        layout.setContentsMargins(0, 0, 0, 0)
+        button = QPushButton("⋮")
+        button.setFixedSize(34, 32)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setToolTip(t("Amallar", self.language))
+        button.setStyleSheet("""
+            QPushButton {
+                background:#ffffff;color:#334155;border:1px solid #cbd5e1;
+                border-radius:6px;font-size:20px;font-weight:bold;padding:0;
+            }
+            QPushButton:hover { background:#f1f5f9;border-color:#94a3b8; }
+            QPushButton:pressed { background:#e2e8f0; }
+        """)
+        button.clicked.connect(lambda _=False: on_click(button))
+        layout.addWidget(button, alignment=Qt.AlignmentFlag.AlignCenter)
         return widget
+
+    @staticmethod
+    def _actions_menu_style():
+        return """
+            QMenu { background:#ffffff;color:#1e293b;border:1px solid #cbd5e1;padding:6px; }
+            QMenu::item { min-width:140px;padding:8px 14px;border-radius:4px; }
+            QMenu::item:selected { background:#eff6ff;color:#1d4ed8; }
+            QMenu::item:disabled { color:#94a3b8; }
+        """
+
+    def _build_category_actions_menu(self, row, parent=None):
+        menu = QMenu(parent or self)
+        menu.setStyleSheet(self._actions_menu_style())
+        edit_label = t("Tahrir", self.language)
+        delete_label = t("O'chir", self.language)
+        edit_action = menu.addAction(f"✏️ {edit_label}")
+        edit_action.triggered.connect(lambda _=False, r=row: self._edit_category(r))
+        del_action = menu.addAction(f"🗑️ {delete_label}")
+        del_action.triggered.connect(lambda _=False, r=row: self._delete_category(r))
+        return menu
+
+    def _show_category_actions_menu(self, row, button):
+        menu = self._build_category_actions_menu(row, button)
+        menu.exec(button.mapToGlobal(button.rect().bottomLeft()))
+
+    def _actions_widget(self, row):
+        return self._menu_button_widget(
+            lambda button, r=row: self._show_category_actions_menu(r, button)
+        )
 
     def _category_at_row(self, row):
         item = self.table.item(row, 0)
@@ -293,7 +360,30 @@ class ExpenseReportDialog(QDialog):
         toolbar.addWidget(QLabel("Sana:"))
         self.date_edit = QDateEdit()
         self.date_edit.setDate(QDate.currentDate())
+        self.date_edit.setDateRange(QDate(2000, 1, 1), QDate.currentDate().addYears(10))
         self.date_edit.setCalendarPopup(True)
+        calendar = QCalendarWidget(self)
+        calendar.setNavigationBarVisible(True)
+        calendar.setGridVisible(True)
+        calendar.setFirstDayOfWeek(Qt.DayOfWeek.Monday)
+        self.date_edit.setCalendarWidget(calendar)
+        self.date_edit.setDisplayFormat("dd.MM.yyyy")
+        self.date_edit.setFixedSize(145, 36)
+        self.date_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.date_edit.setStyleSheet("""
+            QDateEdit {
+                background: white; border: 1px solid #cbd5e1; border-radius: 6px;
+                padding: 0 6px; font-size: 13px; font-weight: 500; color: #1e293b;
+            }
+            QDateEdit:focus { border-color: #10b981; }
+            QDateEdit::drop-down {
+                subcontrol-origin: padding; subcontrol-position: top right;
+                width: 24px; border-left: 1px solid #e2e8f0;
+                border-top-right-radius: 6px; border-bottom-right-radius: 6px;
+                background: #f8fafc;
+            }
+            QDateEdit::drop-down:hover { background: #f1f5f9; }
+        """)
         self.date_edit.dateChanged.connect(self.load_data)
         toolbar.addWidget(self.date_edit)
         self.period_combo = QComboBox()
@@ -430,7 +520,7 @@ class ExpensesWidget(QWidget):
         self.table.setColumnCount(6)
         self.table.setHorizontalHeaderLabels(["Vaqt", "Kategoriya", "Summa", "Valyuta", "Description", "Amallar"])
         self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
-        for column, width in [(0, 160), (1, 150), (2, 130), (3, 90), (5, 240)]:
+        for column, width in [(0, 160), (1, 150), (2, 130), (3, 90), (5, 80)]:
             self.table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
             self.table.setColumnWidth(column, width)
         self.table.verticalHeader().setDefaultSectionSize(54)
@@ -481,11 +571,15 @@ class ExpensesWidget(QWidget):
         self._update_total_label()
 
     def _load_total_currency_combo(self):
+        selected_currency = db.get_app_settings().get("currency", "UZS")
         self.total_currency_combo.clear()
         available = {currency["code"] for currency in db.get_currencies()}
         for code in ("UZS", "USD", "EUR"):
             if code in available or code == "UZS":
                 self.total_currency_combo.addItem(code, code)
+        index = self.total_currency_combo.findData(selected_currency)
+        if index >= 0:
+            self.total_currency_combo.setCurrentIndex(index)
 
     def _currency_rate_map(self, currencies=None):
         rates = {"UZS": 1}
@@ -504,25 +598,57 @@ class ExpensesWidget(QWidget):
             total_uzs += (expense["amount"] or 0) * source_rate
         return total_uzs / target_rate
 
-    def _actions_widget(self, row):
+    def _menu_button_widget(self, on_click):
         widget = QWidget()
+        widget.setStyleSheet("background:transparent;")
         layout = QHBoxLayout(widget)
-        layout.setContentsMargins(6, 4, 6, 4)
-        layout.setSpacing(6)
-        edit_btn = QPushButton("✏ Tahrir")
-        delete_btn = QPushButton("🗑 O'chir")
-        edit_btn.setFixedSize(92, 30)
-        delete_btn.setFixedSize(96, 30)
+        layout.setContentsMargins(0, 0, 0, 0)
+        button = QPushButton("⋮")
+        button.setFixedSize(34, 32)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
         language = self.property("app_language") or "uz"
-        edit_btn.setText(t("Tahrir", language))
-        delete_btn.setText(t("O'chir", language))
-        edit_btn.setStyleSheet(self._state_button("#fff7ed", "#9a3412", "#fdba74", "#fb923c"))
-        delete_btn.setStyleSheet(self._state_button("#fef2f2", "#991b1b", "#fca5a5", "#dc2626"))
-        edit_btn.clicked.connect(lambda _, r=row: self._edit_expense(r))
-        delete_btn.clicked.connect(lambda _, r=row: self._delete_expense(r))
-        layout.addWidget(edit_btn)
-        layout.addWidget(delete_btn)
+        button.setToolTip(t("Amallar", language))
+        button.setStyleSheet("""
+            QPushButton {
+                background:#ffffff;color:#334155;border:1px solid #cbd5e1;
+                border-radius:6px;font-size:20px;font-weight:bold;padding:0;
+            }
+            QPushButton:hover { background:#f1f5f9;border-color:#94a3b8; }
+            QPushButton:pressed { background:#e2e8f0; }
+        """)
+        button.clicked.connect(lambda _=False: on_click(button))
+        layout.addWidget(button, alignment=Qt.AlignmentFlag.AlignCenter)
         return widget
+
+    @staticmethod
+    def _actions_menu_style():
+        return """
+            QMenu { background:#ffffff;color:#1e293b;border:1px solid #cbd5e1;padding:6px; }
+            QMenu::item { min-width:140px;padding:8px 14px;border-radius:4px; }
+            QMenu::item:selected { background:#eff6ff;color:#1d4ed8; }
+            QMenu::item:disabled { color:#94a3b8; }
+        """
+
+    def _build_expense_actions_menu(self, row, parent=None):
+        language = self.property("app_language") or "uz"
+        menu = QMenu(parent or self)
+        menu.setStyleSheet(self._actions_menu_style())
+        edit_label = t("Tahrir", language)
+        delete_label = t("O'chir", language)
+        edit_action = menu.addAction(f"✏️ {edit_label}")
+        edit_action.triggered.connect(lambda _=False, r=row: self._edit_expense(r))
+        del_action = menu.addAction(f"🗑️ {delete_label}")
+        del_action.triggered.connect(lambda _=False, r=row: self._delete_expense(r))
+        return menu
+
+    def _show_expense_actions_menu(self, row, button):
+        menu = self._build_expense_actions_menu(row, button)
+        menu.exec(button.mapToGlobal(button.rect().bottomLeft()))
+
+    def _actions_widget(self, row):
+        return self._menu_button_widget(
+            lambda button, r=row: self._show_expense_actions_menu(r, button)
+        )
 
     def _expense_at_row(self, row):
         item = self.table.item(row, 0)
@@ -537,14 +663,18 @@ class ExpensesWidget(QWidget):
         dlg = ExpenseDialog(self)
         if dlg.exec():
             data = dlg.get_data()
-            db.add_expense(
-                data["category_id"],
-                data["amount"],
-                data["currency_code"],
-                data["description"],
-                self.user["id"] if self.user else None,
-            )
-            self.load_data()
+            try:
+                db.add_expense(
+                    data["category_id"],
+                    data["amount"],
+                    data["currency_code"],
+                    data["description"],
+                    self.user["id"] if self.user else None,
+                    data["cashier_id"],
+                )
+                self.load_data()
+            except db.AppError as exc:
+                QMessageBox.warning(self, t("Saqlanmadi", self.property("app_language") or "uz"), t(str(exc), self.property("app_language") or "uz"))
 
     def _edit_expense(self, row):
         expense = self._expense_at_row(row)
@@ -553,15 +683,19 @@ class ExpensesWidget(QWidget):
         dlg = ExpenseDialog(self, expense)
         if dlg.exec():
             data = dlg.get_data()
-            db.update_expense(
-                expense["id"],
-                data["category_id"],
-                data["amount"],
-                data["currency_code"],
-                data["description"],
-                self.user["id"] if self.user else None,
-            )
-            self.load_data()
+            try:
+                db.update_expense(
+                    expense["id"],
+                    data["category_id"],
+                    data["amount"],
+                    data["currency_code"],
+                    data["description"],
+                    self.user["id"] if self.user else None,
+                    data["cashier_id"],
+                )
+                self.load_data()
+            except db.AppError as exc:
+                QMessageBox.warning(self, t("Saqlanmadi", self.property("app_language") or "uz"), t(str(exc), self.property("app_language") or "uz"))
 
     def _delete_expense(self, row):
         expense = self._expense_at_row(row)

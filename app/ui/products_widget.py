@@ -26,7 +26,6 @@ def resource_path(relative_path):
     return str(base_path / relative_path)
 
 
-COPY_ICON_PATH = resource_path("images/copy.png")
 TRASH_ICON_PATH = resource_path("images/trash.png")
 LEFT_ARROW_ICON_PATH = resource_path("images/left-arrow.png")
 
@@ -958,12 +957,15 @@ class BarcodePrintDialog(QDialog):
 
 
 class ProductDialog(QDialog):
-    def __init__(self, parent=None, product=None, duplicate=False, section_id=None):
+    def __init__(self, parent=None, product=None, duplicate=False, section_id=None, require_template=False):
         super().__init__(parent)
         self.product = product
         self.duplicate = duplicate
+        self.require_template = bool(require_template)
         self.section_id = section_id if section_id is not None else _row_value(product, "section_id")
         self.language = (parent.property("app_language") if parent else None) or "uz"
+        if self.require_template and self.section_id:
+            db.ensure_product_template_for_section(self.section_id)
         self.attr_edits = {}
         self.attr_fields = {}
         self.currencies = [dict(c) for c in db.get_currencies()]
@@ -1025,9 +1027,14 @@ class ProductDialog(QDialog):
         form.addRow("Kimdan olingan:", self.supplier_combo)
 
         self.template_combo = QComboBox()
-        self.template_combo.addItem("Template tanlanmagan", None)
-        for template in db.get_templates(self.section_id):
+        if not self.require_template:
+            self.template_combo.addItem("Template tanlanmagan", None)
+        templates = db.get_templates(self.section_id)
+        for template in templates:
             self.template_combo.addItem(template["name"], template["id"])
+        self.template_combo.setMinimumWidth(240)
+        if self.require_template and templates:
+            self.template_combo.setCurrentIndex(0)
         template_id = _row_value(self.product, "template_id")
         if self.product and template_id:
             idx = self.template_combo.findData(template_id)
@@ -1147,6 +1154,13 @@ class ProductDialog(QDialog):
         if not self.name_edit.text().strip():
             QMessageBox.warning(self, t("Xatolik", self.language), t("Mahsulot nomini kiriting!", self.language))
             return
+        if self.require_template and self.template_combo.currentData() is None:
+            QMessageBox.warning(
+                self,
+                t("Xatolik", self.language),
+                t("Mahsulot qo'shish uchun template tanlang!", self.language),
+            )
+            return
         if self._money_value(self.price_spin) <= 0:
             QMessageBox.warning(self, t("Xatolik", self.language), t("Sotish narxini kiriting!", self.language))
             return
@@ -1262,9 +1276,10 @@ class ProductDialog(QDialog):
 
 
 class ProductsWidget(QWidget):
-    def __init__(self, user=None):
+    def __init__(self, user=None, cashier_mode=False):
         super().__init__()
         self.user = user
+        self.cashier_mode = bool(cashier_mode)
         self._async_loader = None
         self._search_timer = None
         self._render_generation = 0
@@ -1349,6 +1364,16 @@ class ProductsWidget(QWidget):
         self.template_filter.currentIndexChanged.connect(lambda _: self.load_data())
         toolbar.addWidget(self.template_filter)
 
+        self.cashier_filter = QComboBox()
+        self.cashier_filter.setFixedHeight(38)
+        self.cashier_filter.setMinimumWidth(180)
+        self.cashier_filter.setStyleSheet("""
+            QComboBox { border: 1px solid #d1d5db; border-radius: 6px;
+                        padding: 0 10px; font-size: 13px; background: white; }
+        """)
+        self.cashier_filter.currentIndexChanged.connect(lambda _: self.load_data())
+        toolbar.addWidget(self.cashier_filter)
+
         self.display_currency_combo = QComboBox()
         self.display_currency_combo.setFixedHeight(38)
         self.display_currency_combo.setMinimumWidth(92)
@@ -1389,17 +1414,6 @@ class ProductsWidget(QWidget):
         """)
         self.add_btn.clicked.connect(self._add_product)
         toolbar.addWidget(self.add_btn)
-
-        self.clear_sold_btn = QPushButton("Sotilganlarni tozalash")
-        self.clear_sold_btn.setObjectName("danger_clear_sold_btn")
-        self.clear_sold_btn.setFixedHeight(38)
-        self.clear_sold_btn.setStyleSheet("""
-            QPushButton { background:#dc2626;color:white;border:none;border-radius:6px;padding:0 14px;font-size:13px;font-weight:bold; }
-            QPushButton:hover { background:#b91c1c; }
-            QPushButton:pressed { background:#991b1b;padding-top:2px; }
-        """)
-        self.clear_sold_btn.clicked.connect(self._clear_sold_history)
-        toolbar.addWidget(self.clear_sold_btn)
         layout.addLayout(toolbar)
 
         self.section_title_lbl = SectionTitleWidget()
@@ -1427,13 +1441,15 @@ class ProductsWidget(QWidget):
         self.tabs = QTabWidget()
         self.table = self._create_products_table()
         self.process_table = self._create_process_table()
-        self.table.setColumnHidden(5, True)
         self.sold_table = self._create_sold_table()
+        self.table.setColumnHidden(5, True)
+        if self.cashier_mode:
+            self.sold_table.setColumnHidden(8, True)
         self.tabs.addTab(self.table, "Bor mahsulotlar")
         self.tabs.addTab(self.process_table, "Jarayonda")
-        self.tabs.addTab(self.sold_table, "Sotilganlar")
+        self.tabs.addTab(self.sold_table, "Sotilgan")
         self.tabs.currentChanged.connect(self._on_tab_changed)
-        layout.addWidget(self.tabs)
+        layout.addWidget(self.tabs, 1)
 
         self.date_lbl = QLabel("Sana:")
         self.date_edit = QDateEdit()
@@ -1511,8 +1527,8 @@ class ProductsWidget(QWidget):
         ]
         self._load_supplier_filter()
         self._load_template_filter()
+        self._load_cashier_filter()
         self._load_display_currency_combo()
-        self._update_clear_sold_button()
         self._show_sections()
         QTimer.singleShot(0, self._apply_section_title_style)
 
@@ -1536,21 +1552,17 @@ class ProductsWidget(QWidget):
         for widget in product_widgets:
             widget.setVisible(in_section)
         for widget in [
-            self.search_edit, self.supplier_filter, self.template_filter,
-            self.templates_btn, self.add_btn, self.clear_sold_btn,
-            self.back_sections_btn,
+            self.search_edit, self.supplier_filter, self.template_filter, self.cashier_filter,
+            self.add_btn, self.back_sections_btn,
         ]:
             widget.setVisible(in_section)
+        self.templates_btn.setVisible(in_section and not self.cashier_mode)
         for widget in getattr(self, "period_widgets", []):
             widget.setVisible(in_section)
-        self.section_add_btn.setVisible(not in_section and not trash)
-        self.trash_btn.setVisible(not in_section and not trash)
+        self.section_add_btn.setVisible(not self.cashier_mode and not in_section and not trash)
+        self.trash_btn.setVisible(not self.cashier_mode and not in_section and not trash)
         self.back_sections_btn.setVisible(in_section or trash)
         self.section_title_lbl.setVisible(not in_section or trash)
-        if in_section:
-            self._update_clear_sold_button()
-        else:
-            self.clear_sold_btn.setVisible(False)
 
     def apply_theme(self, _theme):
         self._theme = _theme or {}
@@ -1570,6 +1582,8 @@ class ProductsWidget(QWidget):
         self._load_sections()
 
     def _show_trash(self):
+        if self.cashier_mode:
+            return
         self.current_section = None
         self._set_products_mode(False, trash=True)
         self.section_title_lbl.setText(t("Trash", self.property("app_language") or "uz"))
@@ -1618,7 +1632,7 @@ class ProductsWidget(QWidget):
             QFrame#sectionsEmptyState {
                 background:#ffffff;
                 border:1px solid #dbeafe;
-                border-radius:8px;
+                border-radius:0px;
             }
         """)
         layout = QVBoxLayout(panel)
@@ -1641,23 +1655,28 @@ class ProductsWidget(QWidget):
         panel.setMinimumSize(min_width, min_height)
 
     def _section_card_style(self):
-        accent = self._theme.get("accent", "#3b82f6")
-        border = QColor(accent).lighter(145).name()
-        hover_border = QColor(accent).name()
-        return f"""
-            QFrame#sectionCard {{
+        return """
+            QFrame#sectionCard {
                 background:#ffffff;
-                border:2px solid {border};
-                border-radius:8px;
-            }}
-            QFrame#sectionCard:hover {{
-                background:#ffffff;
-                border-color:{hover_border};
-            }}
-            QFrame#sectionCard:focus {{
+                border:1px solid #e2e8f0;
+                border-radius:0px;
+            }
+            QFrame#sectionCard:hover {
+                background:#f1f5f9;
+                border:1px solid #cbd5e1;
+            }
+            QFrame#sectionCard:focus {
                 outline:0;
-                border:2px solid {border};
-            }}
+            }
+            QFrame#sectionMetrics {
+                background:#f8fbff;
+                border:1px solid #dbeafe;
+                border-radius:0px;
+            }
+            QFrame#sectionCard:hover QFrame#sectionMetrics {
+                background:#e0f2fe;
+                border:1px solid #93c5fd;
+            }
         """
 
     def _section_card(self, section):
@@ -1675,17 +1694,18 @@ class ProductsWidget(QWidget):
         name_lbl = QLabel(section["name"])
         name_lbl.setWordWrap(True)
         name_lbl.setStyleSheet("color:#0f172a;font-size:16px;font-weight:bold;border:none;background:transparent;")
-        menu_btn = QPushButton("⋮")
-        menu_btn.setFixedSize(28, 28)
-        menu_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        menu_btn.setStyleSheet("""
-            QPushButton{background:transparent;border:none;color:#475569;font-size:18px;font-weight:bold;}
-            QPushButton:hover{background:#e2e8f0;border-radius:6px;}
-            QPushButton:focus{outline:0;background:transparent;border:none;}
-        """)
-        menu_btn.clicked.connect(lambda _, s=dict(section), b=menu_btn: self._show_section_menu(s, b))
         top.addWidget(name_lbl, 1)
-        top.addWidget(menu_btn, alignment=Qt.AlignmentFlag.AlignTop)
+        if not self.cashier_mode:
+            menu_btn = QPushButton("⋮")
+            menu_btn.setFixedSize(28, 28)
+            menu_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            menu_btn.setStyleSheet("""
+                QPushButton{background:transparent;border:none;color:#475569;font-size:18px;font-weight:bold;}
+                QPushButton:hover{background:#e2e8f0;border-radius:0px;}
+                QPushButton:focus{outline:0;background:transparent;border:none;}
+            """)
+            menu_btn.clicked.connect(lambda _, s=dict(section), b=menu_btn: self._show_section_menu(s, b))
+            top.addWidget(menu_btn, alignment=Qt.AlignmentFlag.AlignTop)
         layout.addLayout(top)
 
         products_count = len(db.get_all_products(section_id=section["id"]))
@@ -1694,7 +1714,6 @@ class ProductsWidget(QWidget):
         metrics = QFrame()
         metrics.setObjectName("sectionMetrics")
         metrics.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        metrics.setStyleSheet("QFrame#sectionMetrics{background:#f8fbff;border:1px solid #dbeafe;border-radius:8px;}")
         metrics_layout = QVBoxLayout(metrics)
         metrics_layout.setContentsMargins(12, 10, 12, 10)
         metrics_layout.setSpacing(6)
@@ -1735,7 +1754,7 @@ class ProductsWidget(QWidget):
         card.setObjectName("trashCard")
         card.setFixedSize(260, 175)
         card.setStyleSheet("""
-            QFrame#trashCard { background:#fff; border:1px solid #fecaca; border-radius:8px; }
+            QFrame#trashCard { background:#fff; border:1px solid #fecaca; border-radius:0px; }
         """)
         layout = QVBoxLayout(card)
         layout.setContentsMargins(16, 14, 16, 14)
@@ -1747,7 +1766,15 @@ class ProductsWidget(QWidget):
         title_lbl.setWordWrap(True)
         title_lbl.setStyleSheet("color:#111827;font-size:15px;font-weight:bold;border:none;background:transparent;")
         layout.addWidget(title_lbl)
-        type_lbl = QLabel(t("Bo'lim", language) if kind == "section" else t("Mahsulot", language))
+        if kind == "section":
+            sec_title = t("Bo'lim", language)
+            p_count = _row_value(row, "product_count", 0)
+            if p_count > 0:
+                type_lbl = QLabel(f"{sec_title} ({p_count} ta mahsulot)")
+            else:
+                type_lbl = QLabel(sec_title)
+        else:
+            type_lbl = QLabel(t("Mahsulot", language))
         deleted_label = t("O'chirilgan", language)
         deleted_lbl = QLabel(f"{deleted_label}: {_row_value(row, 'deleted_at', '') or ''}")
         purge_lbl = QLabel(f"{t('30 kun ichida', language)}: {_row_value(row, 'purge_after', '') or ''}")
@@ -1774,6 +1801,8 @@ class ProductsWidget(QWidget):
         return card
 
     def _restore_section(self, section_id):
+        if self.cashier_mode:
+            return
         language = self.property("app_language") or "uz"
         try:
             db.restore_product_section(section_id)
@@ -1782,6 +1811,8 @@ class ProductsWidget(QWidget):
             QMessageBox.warning(self, t("Tiklanmadi", language), t(str(exc), language))
 
     def _restore_product(self, product_id):
+        if self.cashier_mode:
+            return
         language = self.property("app_language") or "uz"
         try:
             db.restore_product(product_id)
@@ -1790,6 +1821,8 @@ class ProductsWidget(QWidget):
             QMessageBox.warning(self, t("Tiklanmadi", language), t(str(exc), language))
 
     def _show_section_menu(self, section, button):
+        if self.cashier_mode:
+            return
         menu = QMenu(self)
         language = self.property("app_language") or "uz"
         edit_action = menu.addAction(t("Tahrir", language))
@@ -1801,6 +1834,8 @@ class ProductsWidget(QWidget):
             self._delete_section(section)
 
     def _add_section(self):
+        if self.cashier_mode:
+            return
         language = self.property("app_language") or "uz"
         dlg = ProductSectionDialog(self)
         if dlg.exec():
@@ -1811,6 +1846,8 @@ class ProductsWidget(QWidget):
                 QMessageBox.warning(self, t("Saqlanmadi", language), t(str(exc), language))
 
     def _edit_section(self, section):
+        if self.cashier_mode:
+            return
         language = self.property("app_language") or "uz"
         dlg = ProductSectionDialog(self, section)
         if dlg.exec():
@@ -1821,6 +1858,8 @@ class ProductsWidget(QWidget):
                 QMessageBox.warning(self, t("Saqlanmadi", language), t(str(exc), language))
 
     def _delete_section(self, section):
+        if self.cashier_mode:
+            return
         language = self.property("app_language") or "uz"
         delete_text = t("bo'limi va ichidagi mahsulot/template ma'lumotlari o'chirilsinmi?", language)
         reply = QMessageBox.question(
@@ -1838,75 +1877,79 @@ class ProductsWidget(QWidget):
             QMessageBox.warning(self, t("O'chirilmadi", language), t(str(exc), language))
 
     def _on_tab_changed(self):
-        self._update_clear_sold_button()
         self.load_data()
 
     def _queue_search(self, *_args):
         self._search_timer.start()
 
-    def _update_clear_sold_button(self):
-        if hasattr(self, "clear_sold_btn") and hasattr(self, "tabs"):
-            self.clear_sold_btn.setVisible(self.tabs.currentWidget() is self.sold_table)
-
     def _create_products_table(self):
         table = QTableWidget()
-        table.setColumnCount(8)
+        table.setColumnCount(7)
         table.setHorizontalHeaderLabels([
-            "Nomi", "Template", "Shtrix-kod", "Narx", "Qoldiq", "Zaklad", "Amallar", "Copy"
+            "Nomi", "Template", "Shtrix-kod", "Narx", "Qoldiq", "Zaklad", "Amallar"
         ])
         table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
+        for column, width in [(1, 200), (2, 170), (3, 145), (4, 95), (5, 110)]:
+            table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
+            table.setColumnWidth(column, width)
         table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)
-        table.horizontalHeader().setSectionResizeMode(7, QHeaderView.ResizeMode.Fixed)
-        table.setColumnWidth(5, 130)
-        table.setColumnWidth(6, 180)
-        table.setColumnWidth(7, 70)
+        table.setColumnWidth(6, 64)
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         table.setAlternatingRowColors(True)
         table.setStyleSheet(self._table_style())
-        table.verticalHeader().setDefaultSectionSize(112)
+        table.verticalHeader().setDefaultSectionSize(54)
+        table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         table.doubleClicked.connect(lambda index, t=table: self._show_product_info_from_table(index, t))
         return table
 
     def _create_process_table(self):
         table = QTableWidget()
-        table.setColumnCount(9)
+        table.setColumnCount(11)
         table.setHorizontalHeaderLabels([
-            "Nomi", "Template", "Shtrix-kod", "Narx", "Qoldiq",
-            "Zaklad", "Mijoz", "Telefon", "Amallar"
+            "Vaqt", "Nomi", "Template", "Shtrix-kod", "Narx", "Qoldiq",
+            "Zaklad", "Kassir", "Mijoz", "Telefon", "Amallar"
         ])
-        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for column, width in [(5, 120), (6, 130), (7, 130), (8, 180)]:
-            table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        for column, width in [
+            (0, 110), (2, 160), (3, 140), (4, 130), (5, 80),
+            (6, 110), (7, 110), (8, 130), (9, 120),
+        ]:
+            table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
             table.setColumnWidth(column, width)
+        table.horizontalHeader().setSectionResizeMode(10, QHeaderView.ResizeMode.Fixed)
+        table.setColumnWidth(10, 64)
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         table.setAlternatingRowColors(True)
         table.setStyleSheet(self._table_style())
-        table.verticalHeader().setDefaultSectionSize(112)
+        table.verticalHeader().setDefaultSectionSize(54)
+        table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         table.doubleClicked.connect(lambda index, t=table: self._show_product_info_from_table(index, t))
         return table
 
     def _create_sold_table(self):
         table = QTableWidget()
-        table.setColumnCount(12)
+        table.setColumnCount(9)
         table.setHorizontalHeaderLabels([
-            "Vaqt", "Sotuv", "Mahsulot", "Shtrix-kod", "Sotildi",
-            "Narx", "Chegirma", "Chegirmadan keyin", "To'lov", "Mijoz", "Telefon", "Amal"
+            "Vaqt", "Kassir", "Mahsulot", "Shtrix-kod", "Sotildi",
+            "Narx", "Jami", "To'lov", "Amallar"
         ])
         table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         for column, width in [
-            (0, 150), (1, 70), (3, 110), (4, 80),
-            (5, 120), (6, 110), (7, 140), (8, 110), (9, 130), (10, 130), (11, 130)
+            (0, 150), (1, 130), (3, 120), (4, 75),
+            (5, 130), (6, 140), (7, 110),
         ]:
-            table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
+            table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
             table.setColumnWidth(column, width)
+        table.horizontalHeader().setSectionResizeMode(8, QHeaderView.ResizeMode.Fixed)
+        table.setColumnWidth(8, 64)
         table.verticalHeader().setDefaultSectionSize(54)
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         table.setAlternatingRowColors(True)
         table.setStyleSheet(self._table_style())
+        table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         table.doubleClicked.connect(self._show_product_info_from_sold)
         return table
 
@@ -1950,6 +1993,25 @@ class ProductsWidget(QWidget):
             if idx >= 0:
                 self.template_filter.setCurrentIndex(idx)
         self.template_filter.blockSignals(False)
+
+    def _load_cashier_filter(self, users=None):
+        current = self.cashier_filter.currentData() if hasattr(self, "cashier_filter") else None
+        language = self.property("app_language") or "uz"
+        self.cashier_filter.blockSignals(True)
+        self.cashier_filter.clear()
+        self.cashier_filter.addItem(t("Barcha kassirlar", language), None)
+
+        for user in users if users is not None else db.get_users():
+            if _row_value(user, "role") != "cashier":
+                continue
+            user_id = _row_value(user, "id")
+            name = _row_value(user, "username") or _row_value(user, "email") or "-"
+            self.cashier_filter.addItem(name, user_id)
+
+        index = self.cashier_filter.findData(current)
+        if index >= 0:
+            self.cashier_filter.setCurrentIndex(index)
+        self.cashier_filter.blockSignals(False)
 
     def _load_display_currency_combo(self, currencies=None):
         if not hasattr(self, "display_currency_combo"):
@@ -2002,10 +2064,11 @@ class ProductsWidget(QWidget):
                     "query": query,
                     "start_date": start_date,
                     "end_date": end_date,
-                    "products": db.search_products(query, start_date, end_date, section_id) if query else db.get_all_products(start_date, end_date, section_id),
+                    "products": db.search_products(query, section_id=section_id) if query else db.get_all_products(section_id=section_id),
                     "sold_rows": [dict(row) for row in db.get_product_sales_archive(query, start_date, end_date)],
                     "suppliers": db.get_all_suppliers(),
                     "templates": db.get_templates(section_id),
+                    "users": db.get_users(),
                     "currencies": [dict(currency) for currency in db.get_currencies()],
                 },
                 self._apply_loaded_data,
@@ -2016,16 +2079,18 @@ class ProductsWidget(QWidget):
             "query": query,
             "start_date": start_date,
             "end_date": end_date,
-            "products": db.search_products(query, start_date, end_date, section_id) if query else db.get_all_products(start_date, end_date, section_id),
+            "products": db.search_products(query, section_id=section_id) if query else db.get_all_products(section_id=section_id),
             "sold_rows": [dict(row) for row in db.get_product_sales_archive(query, start_date, end_date)],
             "suppliers": db.get_all_suppliers(),
             "templates": db.get_templates(section_id),
+            "users": db.get_users(),
             "currencies": [dict(currency) for currency in db.get_currencies()],
         })
 
     def _apply_loaded_data(self, data):
         self._load_supplier_filter(data["suppliers"])
         self._load_template_filter(data["templates"])
+        self._load_cashier_filter(data["users"])
         self._load_display_currency_combo(data["currencies"])
         self._currency_rates = {currency["code"]: (currency.get("rate_to_uzs") or 1) for currency in data["currencies"]}
         products = data["products"]
@@ -2041,10 +2106,11 @@ class ProductsWidget(QWidget):
         current_table = self.tabs.currentWidget() if hasattr(self, "tabs") else self.table
         self.table.setRowCount(0)
         self.process_table.setRowCount(0)
-        self.sold_table.setRowCount(0)
+        if hasattr(self, "sold_table"):
+            self.sold_table.setRowCount(0)
         if current_table is self.process_table:
             self._fill_products_table(self.process_table, processing, "process")
-        elif current_table is self.sold_table:
+        elif hasattr(self, "sold_table") and current_table is self.sold_table:
             self._fill_sold_table(sold_rows)
         else:
             self._fill_products_table(self.table, available, "available")
@@ -2090,7 +2156,7 @@ class ProductsWidget(QWidget):
         self.stats_lbl.setText(
             f"{t('Bor', language)}: {available_count} {unit}  |  "
             f"{t('Jarayonda', language)}: {processing_count} {unit}  |  "
-            f"{t('Sotilganlar', language)}: {sold_count} {unit}"
+            f"{t('Sotilgan', language)}: {sold_count} {unit}"
         )
 
     def _language_changed(self, _language):
@@ -2102,6 +2168,13 @@ class ProductsWidget(QWidget):
             self.trash_btn.setToolTip(t("Trash", language))
         if hasattr(self, "section_add_btn"):
             self.section_add_btn.setText(t("+ Bo'lim qo'shish", language))
+        if hasattr(self, "tabs"):
+            if self.tabs.count() >= 1:
+                self.tabs.setTabText(0, t("Bor mahsulotlar", language))
+            if self.tabs.count() >= 2:
+                self.tabs.setTabText(1, t("Jarayonda", language))
+            if self.tabs.count() >= 3:
+                self.tabs.setTabText(2, t("Sotilgan", language))
         if hasattr(self, "section_title_lbl"):
             self._apply_section_title_style()
         if hasattr(self, "sections_scroll") and not self.current_section:
@@ -2125,6 +2198,17 @@ class ProductsWidget(QWidget):
             products = [p for p in products if not _row_value(p, "template_id")]
         elif template_filter:
             products = [p for p in products if _row_value(p, "template_id") == template_filter]
+
+        cashier_filter = self.cashier_filter.currentData() if hasattr(self, "cashier_filter") else None
+        if cashier_filter:
+            products = [
+                product for product in products
+                if (
+                    _row_value(product, "cashier_id")
+                    if _row_value(product, "sale_item_id") is not None
+                    else _row_value(product, "created_by_user_id")
+                ) == cashier_filter
+            ]
         return products
 
     def _filtered_sold_rows(self, query):
@@ -2159,101 +2243,174 @@ class ProductsWidget(QWidget):
 
         QTimer.singleShot(0, render_chunk)
 
+    def _compact_time(self, created_at):
+        if not created_at:
+            return "-"
+        try:
+            parts = str(created_at).split()
+            date_part = parts[0]
+            d_parts = date_part.split("-")
+            day_str = f"{d_parts[2]}.{d_parts[1]}" if len(d_parts) == 3 else date_part
+            if len(parts) > 1:
+                time_part = parts[1][:5]
+                return f"{day_str} {time_part}"
+            return day_str
+        except Exception:
+            return str(created_at)[:16]
+
     def _fill_product_table_row(self, table, row, p, mode):
-            table.insertRow(row)
+        table.insertRow(row)
+        if mode == "process":
+            # 11 columns: Vaqt, Nomi, Template, Shtrix-kod, Narx, Qoldiq, Zaklad, Kassir, Mijoz, Telefon, Amallar
+            time_str = self._compact_time(_row_value(p, "process_date") or _row_value(p, "created_at"))
+            time_item = QTableWidgetItem(time_str)
+            time_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            time_item.setData(Qt.ItemDataRole.UserRole, dict(p))
+            table.setItem(row, 0, time_item)
+
             name_item = QTableWidgetItem(p["name"])
             name_item.setData(Qt.ItemDataRole.UserRole, dict(p))
-            table.setItem(row, 0, name_item)
-            table.setItem(row, 1, QTableWidgetItem(p["template_name"] or ""))
-            table.setItem(row, 2, QTableWidgetItem(p["barcode"] or ""))
+            table.setItem(row, 1, name_item)
+            table.setItem(row, 2, QTableWidgetItem(p["template_name"] or ""))
+            table.setItem(row, 3, QTableWidgetItem(p["barcode"] or ""))
 
             price_item = QTableWidgetItem(self._money_display(p["price"]))
             price_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            table.setItem(row, 3, price_item)
+            table.setItem(row, 4, price_item)
 
-            stock_item = QTableWidgetItem(f"{p['stock']}")
-            if mode == "available":
-                stock_item = QTableWidgetItem(f"{self._available_quantity(p)}")
-            elif mode == "process":
-                stock_item = QTableWidgetItem(f"{_row_value(p, 'process_quantity', 0) or 0}")
-            if p["stock"] <= 0:
-                stock_item.setForeground(QColor("#ef4444"))
-                stock_item.setBackground(QColor("#fef2f2"))
-            table.setItem(row, 4, stock_item)
+            stock_item = QTableWidgetItem(f"{_row_value(p, 'process_quantity', 0) or 0}")
+            table.setItem(row, 5, stock_item)
+
             deposit = _row_value(p, "process_deposit", 0) or 0
             deposit_currency = _row_value(p, "process_deposit_currency", "UZS") or "UZS"
             deposit_rate = getattr(self, "_currency_rates", {}).get(deposit_currency, 1) or 1
-            deposit_text = self._money_display(deposit * deposit_rate) if mode == "process" else ""
-            table.setItem(row, 5, QTableWidgetItem(deposit_text))
-            action_column = 6
-            if mode == "process":
-                table.setItem(row, 6, QTableWidgetItem(_row_value(p, "process_customer_name", "") or ""))
-                table.setItem(row, 7, QTableWidgetItem(_row_value(p, "process_customer_phone", "") or ""))
-                action_column = 8
-            elif mode == "available":
-                copy_wrap = QWidget()
-                copy_layout = QHBoxLayout(copy_wrap)
-                copy_layout.setContentsMargins(0, 0, 0, 0)
-                duplicate_btn = QPushButton()
-                duplicate_btn.setIcon(QIcon(COPY_ICON_PATH))
-                duplicate_btn.setFixedSize(34, 28)
-                duplicate_btn.setIconSize(QSizeF(18, 18).toSize())
-                duplicate_btn.setToolTip(t("Nusxalash", self.property("app_language") or "uz"))
-                duplicate_btn.setStyleSheet("""
-                    QPushButton { background:#f8fafc;color:#334155;border:1px solid #cbd5e1;
-                                  border-radius:6px;font-size:14px;font-weight:bold; }
-                    QPushButton:hover { background:#e0f2fe;color:#0369a1;border-color:#7dd3fc; }
-                    QPushButton:pressed { background:#0f172a;color:white;padding-top:2px; }
-                """)
-                duplicate_btn.clicked.connect(lambda _, r=row, t=table: self._duplicate_product(r, t))
-                copy_layout.addWidget(duplicate_btn, alignment=Qt.AlignmentFlag.AlignCenter)
-                table.setCellWidget(row, 7, copy_wrap)
+            deposit_text = self._money_display(deposit * deposit_rate) if deposit else ""
+            table.setItem(row, 6, QTableWidgetItem(deposit_text))
 
-            actions_widget = QWidget()
-            actions_widget.setStyleSheet("background: transparent;")
-            actions_layout = QVBoxLayout(actions_widget)
-            actions_layout.setContentsMargins(8, 6, 8, 6)
-            actions_layout.setSpacing(5)
+            # col 7: Kassir
+            cashier_name = _row_value(p, "process_cashier_name", "") or ""
+            table.setItem(row, 7, QTableWidgetItem(cashier_name))
 
-            if mode == "available":
-                process_btn = self._action_button("Jarayonga", "#eff6ff", "#1d4ed8", "#93c5fd", "#3b82f6")
-                process_btn.clicked.connect(lambda _, r=row, t=table: self._move_to_process(r, t))
-                actions_layout.addWidget(process_btn)
+            # col 8: Mijoz
+            table.setItem(row, 8, QTableWidgetItem(_row_value(p, "process_customer_name", "") or ""))
+            # col 9: Telefon
+            table.setItem(row, 9, QTableWidgetItem(_row_value(p, "process_customer_phone", "") or ""))
 
-                edit_btn = self._action_button("Tahrir", "#fff7ed", "#9a3412", "#fdba74", "#fb923c")
-                edit_btn.clicked.connect(lambda _, r=row, t=table: self._edit_product(r, t))
-                actions_layout.addWidget(edit_btn)
+            table.setCellWidget(
+                row,
+                10,
+                self._menu_button_widget(
+                    lambda button, r=row, t=table: self._show_process_actions_menu(r, t, button)
+                ),
+            )
+            table.setRowHeight(row, 54)
+            return
 
-                barcode_btn = self._action_button("Barcode", "#eff6ff", "#1d4ed8", "#93c5fd", "#3b82f6")
-                barcode_btn.clicked.connect(lambda _, r=row, t=table: self._print_barcode(r, t))
-                actions_layout.addWidget(barcode_btn)
+        # mode == "available" (7 columns: Nomi, Template, Shtrix-kod, Narx, Qoldiq, Zaklad, Amallar)
+        name_item = QTableWidgetItem(p["name"])
+        name_item.setData(Qt.ItemDataRole.UserRole, dict(p))
+        table.setItem(row, 0, name_item)
+        table.setItem(row, 1, QTableWidgetItem(p["template_name"] or ""))
+        table.setItem(row, 2, QTableWidgetItem(p["barcode"] or ""))
 
-                del_btn = self._action_button("O'chir", "#fef2f2", "#b91c1c", "#fca5a5", "#ef4444")
-                del_btn.clicked.connect(lambda _, r=row, t=table: self._delete_product(r, t))
-                actions_layout.addWidget(del_btn)
-            else:
-                actions_widget.setStyleSheet("background: transparent; border: none;")
-                actions_layout.setContentsMargins(0, 8, 0, 8)
-                actions_layout.setSpacing(5)
-                edit_btn = self._action_button("Tahrir", "#ffffff", "#9a3412", "#fdba74", "#fff7ed", hover_fg="#9a3412")
-                edit_btn.setFixedSize(156, 24)
-                edit_btn.clicked.connect(lambda _, r=row, t=table: self._edit_process(r, t))
-                actions_layout.addWidget(edit_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+        price_item = QTableWidgetItem(self._money_display(p["price"]))
+        price_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        table.setItem(row, 3, price_item)
 
-                back_btn = self._action_button("Bor mahsulotlarga", "#ffffff", "#2563eb", "#93c5fd", "#eff6ff", hover_fg="#1d4ed8")
-                back_btn.setFixedSize(156, 24)
-                back_btn.clicked.connect(lambda _, r=row, t=table: self._move_to_available(r, t))
-                actions_layout.addWidget(back_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+        stock_item = QTableWidgetItem(f"{self._available_quantity(p)}")
+        if p["stock"] <= 0:
+            stock_item.setForeground(QColor("#ef4444"))
+            stock_item.setBackground(QColor("#fef2f2"))
+        table.setItem(row, 4, stock_item)
+        table.setItem(row, 5, QTableWidgetItem(""))
 
-                sell_btn = self._action_button("Sotuvni yakunlash", "#ffffff", "#047857", "#86efac", "#ecfdf5", hover_fg="#065f46")
-                sell_btn.setFixedSize(156, 24)
-                sell_btn.clicked.connect(lambda _, r=row, t=table: self._complete_process_sale(r, t))
-                actions_layout.addWidget(sell_btn, alignment=Qt.AlignmentFlag.AlignCenter)
-            table.setCellWidget(row, action_column, actions_widget)
-            table.setRowHeight(row, 140 if mode == "available" else 112)
+        table.setCellWidget(
+            row,
+            6,
+            self._menu_button_widget(
+                lambda button, r=row, t=table: self._show_product_actions_menu(r, t, button)
+            ),
+        )
+        table.setRowHeight(row, 54)
+
+    def _build_process_actions_menu(self, row, table, parent=None):
+        language = self.property("app_language") or "uz"
+        menu = QMenu(parent or self)
+        menu.setStyleSheet(self._actions_menu_style())
+        actions = [
+            (f"✅ {t('Sotuvni yakunlash', language)}", lambda: self._complete_process_sale(row, table)),
+            (f"✏️ {t('Tahrir', language)}", lambda: self._edit_process(row, table)),
+            (f"📦 {t('Bor mahsulotlarga', language)}", lambda: self._move_to_available(row, table)),
+        ]
+        for label, callback in actions:
+            action = menu.addAction(label)
+            action.triggered.connect(lambda _=False, fn=callback: fn())
+        return menu
+
+    def _show_process_actions_menu(self, row, table, button):
+        menu = self._build_process_actions_menu(row, table, button)
+        menu.exec(button.mapToGlobal(button.rect().bottomLeft()))
 
     def _available_quantity(self, product):
         return max(0, (product["stock"] or 0) - (_row_value(product, "process_quantity", 0) or 0))
+
+    def _menu_button_widget(self, on_click):
+        widget = QWidget()
+        widget.setStyleSheet("background:transparent;")
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        button = QPushButton("⋮")
+        button.setFixedSize(34, 32)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setToolTip(t("Amallar", self.property("app_language") or "uz"))
+        button.setStyleSheet("""
+            QPushButton {
+                background:#ffffff;color:#334155;border:1px solid #cbd5e1;
+                border-radius:6px;font-size:20px;font-weight:bold;padding:0;
+            }
+            QPushButton:hover { background:#f1f5f9;border-color:#94a3b8; }
+            QPushButton:pressed { background:#e2e8f0; }
+        """)
+        button.clicked.connect(lambda _=False: on_click(button))
+        layout.addWidget(button, alignment=Qt.AlignmentFlag.AlignCenter)
+        return widget
+
+    @staticmethod
+    def _actions_menu_style():
+        return """
+            QMenu { background:#ffffff;color:#1e293b;border:1px solid #cbd5e1;padding:6px; }
+            QMenu::item { min-width:170px;padding:8px 14px;border-radius:4px; }
+            QMenu::item:selected { background:#eff6ff;color:#1d4ed8; }
+            QMenu::item:disabled { color:#94a3b8; }
+        """
+
+    def _build_product_actions_menu(self, row, table, parent=None):
+        language = self.property("app_language") or "uz"
+        menu = QMenu(parent or self)
+        menu.setStyleSheet(self._actions_menu_style())
+        if self.cashier_mode:
+            actions = [
+                (f"⏳ {t('Jarayonga', language)}", lambda: self._move_to_process(row, table)),
+                (f"🏷️ {t('Shtrix-kod', language)}", lambda: self._print_barcode(row, table)),
+                (f"📄 {t('Nusxalash', language)}", lambda: self._duplicate_product(row, table)),
+            ]
+        else:
+            delete_label = t("O'chir", language)
+            actions = [
+                (f"⏳ {t('Jarayonga', language)}", lambda: self._move_to_process(row, table)),
+                (f"✏️ {t('Tahrir', language)}", lambda: self._edit_product(row, table)),
+                (f"🏷️ {t('Shtrix-kod', language)}", lambda: self._print_barcode(row, table)),
+                (f"🗑️ {delete_label}", lambda: self._delete_product(row, table)),
+                (f"📄 {t('Nusxalash', language)}", lambda: self._duplicate_product(row, table)),
+            ]
+        for label, callback in actions:
+            action = menu.addAction(label)
+            action.triggered.connect(lambda _=False, fn=callback: fn())
+        return menu
+
+    def _show_product_actions_menu(self, row, table, button):
+        menu = self._build_product_actions_menu(row, table, button)
+        menu.exec(button.mapToGlobal(button.rect().bottomLeft()))
 
     def _action_button(self, text, bg, fg, border, hover, hover_fg="white"):
         btn = QPushButton(text)
@@ -2294,49 +2451,90 @@ class ProductsWidget(QWidget):
         QTimer.singleShot(0, render_chunk)
 
     def _fill_sold_table_row(self, row_index, archive_row):
-            self.sold_table.insertRow(row_index)
-            data = dict(archive_row)
-            values = [
-                data["created_at"] or "",
-                f"#{data['sale_id']}",
-                data["product_name"] or "",
-                data["barcode"] or "",
-                str(data["quantity"]),
-                self._money_display(data["price"]),
-                self._money_display(data.get("item_discount", data.get("discount", 0)) or 0),
-                self._money_display(data.get("item_total_after_discount", data.get("active_subtotal", data.get("subtotal", 0))) or 0),
-                self._payment_label(data["payment_method"]),
-                data["customer_name"] or "",
-                data["customer_phone"] or "",
-            ]
-            for column, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                if column == 0:
-                    item.setData(Qt.ItemDataRole.UserRole, data)
-                if column in (4, 5, 6, 7):
-                    item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                self.sold_table.setItem(row_index, column, item)
-            self.sold_table.setCellWidget(row_index, 11, self._sold_actions_widget(row_index))
-            self.sold_table.setRowHeight(row_index, 54)
+        self.sold_table.insertRow(row_index)
+        data = dict(archive_row)
+        values = [
+            data.get("created_at") or "",
+            data.get("cashier_name") or "-",
+            data.get("product_name") or "",
+            data.get("barcode") or "-",
+            str(data.get("quantity", 0)),
+            self._money_display(data.get("price", 0)),
+            self._money_display(data.get("item_total_after_discount", data.get("active_subtotal", data.get("subtotal", 0))) or 0),
+            self._payment_label(data.get("payment_method")),
+        ]
+        for column, value in enumerate(values):
+            item = QTableWidgetItem(value)
+            if column == 0:
+                item.setData(Qt.ItemDataRole.UserRole, data)
+            if column in (4, 5, 6):
+                item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.sold_table.setItem(row_index, column, item)
+
+        # Actions (Column 8)
+        if not self.cashier_mode:
+            self.sold_table.setCellWidget(row_index, 8, self._sold_actions_widget(row_index))
+        self.sold_table.setRowHeight(row_index, 54)
 
     def _sold_actions_widget(self, row):
-        widget = QWidget()
-        layout = QHBoxLayout(widget)
-        layout.setContentsMargins(6, 4, 6, 4)
-        btn = QPushButton("Qaytarish")
-        btn.setFixedSize(100, 30)
+        return self._menu_button_widget(
+            lambda button, r=row: self._show_sold_actions_menu(r, button)
+        )
+
+    def _build_sold_actions_menu(self, row, parent=None):
+        language = self.property("app_language") or "uz"
         archive_row = self._sold_at_row(row)
-        available = (archive_row["quantity"] - archive_row["returned_quantity"]) if archive_row else 0
-        btn.setEnabled(available > 0)
-        btn.setStyleSheet("""
-            QPushButton{background:#ecfdf5;color:#065f46;border:1px solid #6ee7b7;border-radius:6px;font-weight:bold;}
-            QPushButton:hover{background:#10b981;color:white;border-color:#10b981;}
-            QPushButton:pressed{background:#047857;color:white;padding-top:2px;}
-            QPushButton:disabled{background:#f1f5f9;color:#94a3b8;border-color:#e2e8f0;}
-        """)
-        btn.clicked.connect(lambda _, r=row: self._return_sold_item(r))
-        layout.addWidget(btn, alignment=Qt.AlignmentFlag.AlignCenter)
-        return widget
+        available = (
+            archive_row.get("quantity", 0) - archive_row.get("returned_quantity", 0)
+            if archive_row else 0
+        )
+        menu = QMenu(parent or self)
+        menu.setStyleSheet(self._actions_menu_style())
+        return_action = menu.addAction(f"↩️ {t('Qaytarish', language)}")
+        return_action.setEnabled(available > 0)
+        return_action.triggered.connect(lambda _=False, r=row: self._return_sold_item(r))
+        delete_label = t("O'chirish", language)
+        delete_action = menu.addAction(f"🗑️ {delete_label}")
+        delete_action.triggered.connect(lambda _=False, r=row: self._delete_sold_item(r))
+        return menu
+
+    def _show_sold_actions_menu(self, row, button):
+        menu = self._build_sold_actions_menu(row, button)
+        menu.exec(button.mapToGlobal(button.rect().bottomLeft()))
+
+    def _finalize_sale_from_row(self, row):
+        if self.cashier_mode:
+            return
+        language = self.property("app_language") or "uz"
+        archive_row = self._sold_at_row(row)
+        if not archive_row:
+            return
+        sale_id = archive_row.get("sale_id")
+        try:
+            db.finalize_sale(sale_id)
+            self.load_data()
+        except db.AppError as exc:
+            QMessageBox.warning(self, t("Xatolik", language), str(exc))
+
+    def _finalize_all_sales(self):
+        if self.cashier_mode:
+            return
+        language = self.property("app_language") or "uz"
+        reply = QMessageBox.question(
+            self,
+            t("Sotishni yakunlash", language),
+            t("Barcha kutilayotgan sotuvlar yakunlanib, hisobotlar bo'limiga qo'shilsinmi?", language),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            count = db.finalize_all_pending_sales()
+            if count == 0:
+                QMessageBox.information(self, t("Ma'lumot", language), t("Barcha sotuvlar allaqachon yakunlangan.", language))
+            self.load_data()
+        except db.AppError as exc:
+            QMessageBox.warning(self, t("Xatolik", language), str(exc))
 
     def _sold_at_row(self, row):
         item = self.sold_table.item(row, 0)
@@ -2351,6 +2549,8 @@ class ProductsWidget(QWidget):
         return labels.get(value, value or "")
 
     def _return_sold_item(self, row):
+        if self.cashier_mode:
+            return
         language = self.property("app_language") or "uz"
         archive_row = self._sold_at_row(row)
         if not archive_row:
@@ -2369,7 +2569,35 @@ class ProductsWidget(QWidget):
             except db.AppError as exc:
                 QMessageBox.warning(self, t("Qaytarilmadi", language), str(exc))
 
+    def _delete_sold_item(self, row):
+        if self.cashier_mode:
+            return
+        language = self.property("app_language") or "uz"
+        archive_row = self._sold_at_row(row)
+        if not archive_row:
+            return
+        reply = QMessageBox.question(
+            self,
+            t("Sotilgan yozuvni o'chirish", language),
+            t("Yozuv o'chiriladi va qolgan mahsulot omborga qaytariladi. Davom etilsinmi?", language),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            db.delete_sale_item(archive_row["sale_item_id"])
+            self.load_data()
+            QMessageBox.information(
+                self,
+                t("O'chirildi", language),
+                t("Sotilgan yozuv o'chirildi.", language),
+            )
+        except db.AppError as exc:
+            QMessageBox.warning(self, t("O'chirilmadi", language), str(exc))
+
     def _clear_sold_history(self):
+        if self.cashier_mode:
+            return
         language = self.property("app_language") or "uz"
         reply = QMessageBox.question(
             self,
@@ -2387,27 +2615,44 @@ class ProductsWidget(QWidget):
             QMessageBox.warning(self, t("Tozalanmadi", language), str(exc))
 
     def _manage_templates(self):
-        if not self.current_section:
+        if self.cashier_mode or not self.current_section:
             return
         dlg = TemplateManagerDialog(self, self.current_section["id"])
         dlg.exec()
         self.load_data()
 
     def _show_archive(self):
+        if self.cashier_mode:
+            return
         dlg = ProductArchiveDialog(self)
         dlg.exec()
         self.load_data()
 
     def _add_product(self):
         language = self.property("app_language") or "uz"
+        section_id = self.current_section["id"] if self.current_section else None
+        if self.cashier_mode and not section_id:
+            return
+        if self.cashier_mode and not db.get_templates(section_id):
+            try:
+                db.ensure_product_template_for_section(section_id)
+            except db.AppError as exc:
+                QMessageBox.warning(self, t("Xatolik", language), t(str(exc), language))
+                return
         try:
-            dlg = ProductDialog(self, section_id=self.current_section["id"] if self.current_section else None)
+            dlg = ProductDialog(
+                self,
+                section_id=section_id,
+                require_template=self.cashier_mode,
+            )
         except db.AppError as exc:
             QMessageBox.warning(self, t("Xatolik", language), f"{t('Mahsulot oynasi ochilmadi:', language)}\n{exc}")
             return
         if dlg.exec():
             try:
-                product_id = db.add_product(dlg.get_data())
+                product_data = dlg.get_data()
+                product_data["created_by_user_id"] = _row_value(self.user, "id")
+                product_id = db.add_product(product_data)
                 db.save_product_attributes(product_id, dlg.get_attributes())
                 self.load_data()
                 if dlg.print_barcode_check.isChecked():
@@ -2424,13 +2669,21 @@ class ProductsWidget(QWidget):
         if not product:
             return
         try:
-            dlg = ProductDialog(self, product, duplicate=True, section_id=self.current_section["id"] if self.current_section else None)
+            dlg = ProductDialog(
+                self,
+                product,
+                duplicate=True,
+                section_id=self.current_section["id"] if self.current_section else None,
+                require_template=self.cashier_mode,
+            )
         except db.AppError as exc:
             QMessageBox.warning(self, t("Xatolik", language), f"{t('Mahsulot oynasi ochilmadi:', language)}\n{exc}")
             return
         if dlg.exec():
             try:
-                product_id = db.add_product(dlg.get_data())
+                product_data = dlg.get_data()
+                product_data["created_by_user_id"] = _row_value(self.user, "id")
+                product_id = db.add_product(product_data)
                 db.save_product_attributes(product_id, dlg.get_attributes())
                 self.load_data()
                 if dlg.print_barcode_check.isChecked():
@@ -2440,6 +2693,8 @@ class ProductsWidget(QWidget):
 
     def _product_item(self, row, table=None):
         table = table or self.table
+        if table is self.process_table:
+            return table.item(row, 1) or table.item(row, 0)
         return table.item(row, 0)
 
     def _show_product_info_from_table(self, index, table):
@@ -2485,6 +2740,7 @@ class ProductsWidget(QWidget):
                     data["deposit_currency"],
                     data["customer_name"],
                     data["customer_phone"],
+                    cashier_name=_row_value(self.user, "username") or _row_value(self.user, "email") or "",
                 )
                 moved_text = t("jarayonga o'tkazildi.", language)
                 deposit_label = t("Zaklad", language)
@@ -2546,6 +2802,7 @@ class ProductsWidget(QWidget):
                     data["deposit_currency"],
                     data["customer_name"],
                     data["customer_phone"],
+                    cashier_name=_row_value(self.user, "username") or _row_value(self.user, "email") or "",
                 )
                 language = self.property("app_language") or "uz"
                 QMessageBox.information(
@@ -2583,9 +2840,23 @@ class ProductsWidget(QWidget):
         quantity = process_quantity
         try:
             subtotal = product["price"] * quantity
+            # Determine cashier ID from process or current user
+            target_cashier_id = self.user["id"] if self.user else None
+            cashier_name = str(_row_value(product, "process_cashier_name", "") or "").strip().lower()
+            if not cashier_name:
+                cashier_name = str(_row_value(product, "process_customer_name", "") or "").strip().lower()
+            if cashier_name:
+                try:
+                    for u in db.get_users():
+                        if u.get("username", "").strip().lower() == cashier_name:
+                            target_cashier_id = u["id"]
+                            break
+                except Exception:
+                    pass
+
             sale_id = db.create_sale(
                 customer_id=None,
-                cashier_id=self.user["id"] if self.user else None,
+                cashier_id=target_cashier_id,
                 items=[{
                     "product_id": product["id"],
                     "quantity": quantity,
@@ -2596,9 +2867,10 @@ class ProductsWidget(QWidget):
                 discount=0,
                 paid=subtotal,
                 payment_method="naqd",
-                currency_code=product["price_currency"] or "UZS",
-                exchange_rate=product["price_exchange_rate"] or 1,
-                paid_original=(product["price_original"] or product["price"]) * quantity,
+                currency_code=product.get("price_currency") or "UZS",
+                exchange_rate=product.get("price_exchange_rate") or 1,
+                paid_original=(product.get("price_original") or product["price"]) * quantity,
+                is_finalized=0,
             )
             db.reduce_product_process(product["id"], quantity)
             QMessageBox.information(
@@ -2612,6 +2884,8 @@ class ProductsWidget(QWidget):
             QMessageBox.warning(self, t("Sotuv yakunlanmadi", language), str(exc))
 
     def _edit_product(self, row, table=None):
+        if self.cashier_mode:
+            return
         language = self.property("app_language") or "uz"
         item = self._product_item(row, table)
         if not item:
@@ -2631,6 +2905,8 @@ class ProductsWidget(QWidget):
                 QMessageBox.warning(self, t("Saqlanmadi", language), t(str(exc), language))
 
     def _delete_product(self, row, table=None):
+        if self.cashier_mode:
+            return
         item = self._product_item(row, table)
         if not item:
             return

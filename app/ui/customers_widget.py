@@ -1,7 +1,7 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QTableWidget, QTableWidgetItem, QDialog,
-    QFormLayout, QMessageBox, QHeaderView
+    QFormLayout, QMessageBox, QHeaderView, QMenu
 )
 from PyQt6.QtCore import Qt
 import database as db
@@ -49,12 +49,12 @@ class CustomersWidget(QWidget):
         self.table.setColumnWidth(2, 190)
         self.table.setColumnWidth(3, 130)
         self.table.setColumnWidth(4, 145)
-        self.table.setColumnWidth(5, 150)
+        self.table.setColumnWidth(5, 80)
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
         self.table.setStyleSheet("QTableWidget{background:white;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;} QTableWidget::item{padding:7px 10px;} QHeaderView::section{background:#f8fafc;border:none;border-bottom:1px solid #e2e8f0;padding:8px;font-weight:bold;color:#64748b;} QTableWidget::item:alternate{background:#f8fafc;}")
-        self.table.verticalHeader().setDefaultSectionSize(56)
+        self.table.verticalHeader().setDefaultSectionSize(54)
         layout.addWidget(self.table)
 
     def load_data(self):
@@ -83,19 +83,54 @@ class CustomersWidget(QWidget):
             purchases_item = QTableWidgetItem(f"{c['total_purchases']:,.0f} so'm")
             purchases_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.table.setItem(row, 4, purchases_item)
-            edit_btn = QPushButton("✏ Tahrir")
-            edit_btn.setMinimumWidth(94)
-            edit_btn.setFixedHeight(30)
-            edit_btn.setStyleSheet("background:#fff7ed;color:#9a3412;border:1px solid #fdba74;border-radius:6px;padding:4px 10px;font-size:12px;font-weight:bold;")
-            edit_btn.clicked.connect(lambda _, r=row: self._edit_customer(r))
-            actions_widget = QWidget()
-            actions_layout = QHBoxLayout(actions_widget)
-            actions_layout.setContentsMargins(10, 4, 10, 4)
-            actions_layout.addStretch()
-            actions_layout.addWidget(edit_btn)
-            actions_layout.addStretch()
-            self.table.setCellWidget(row, 5, actions_widget)
-            self.table.setRowHeight(row, 56)
+            self.table.setCellWidget(row, 5, self._actions_widget(row))
+            self.table.setRowHeight(row, 54)
+
+    def _menu_button_widget(self, on_click):
+        widget = QWidget()
+        widget.setStyleSheet("background:transparent;")
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        button = QPushButton("⋮")
+        button.setFixedSize(34, 32)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setToolTip("Amallar")
+        button.setStyleSheet("""
+            QPushButton {
+                background:#ffffff;color:#334155;border:1px solid #cbd5e1;
+                border-radius:6px;font-size:20px;font-weight:bold;padding:0;
+            }
+            QPushButton:hover { background:#f1f5f9;border-color:#94a3b8; }
+            QPushButton:pressed { background:#e2e8f0; }
+        """)
+        button.clicked.connect(lambda _=False: on_click(button))
+        layout.addWidget(button, alignment=Qt.AlignmentFlag.AlignCenter)
+        return widget
+
+    @staticmethod
+    def _actions_menu_style():
+        return """
+            QMenu { background:#ffffff;color:#1e293b;border:1px solid #cbd5e1;padding:6px; }
+            QMenu::item { min-width:140px;padding:8px 14px;border-radius:4px; }
+            QMenu::item:selected { background:#eff6ff;color:#1d4ed8; }
+            QMenu::item:disabled { color:#94a3b8; }
+        """
+
+    def _build_customer_actions_menu(self, row, parent=None):
+        menu = QMenu(parent or self)
+        menu.setStyleSheet(self._actions_menu_style())
+        edit_action = menu.addAction("✏️ Tahrir")
+        edit_action.triggered.connect(lambda _=False, r=row: self._edit_customer(r))
+        return menu
+
+    def _show_customer_actions_menu(self, row, button):
+        menu = self._build_customer_actions_menu(row, button)
+        menu.exec(button.mapToGlobal(button.rect().bottomLeft()))
+
+    def _actions_widget(self, row):
+        return self._menu_button_widget(
+            lambda button, r=row: self._show_customer_actions_menu(r, button)
+        )
 
     def _add_customer(self):
         dlg = CustomerDialog(self)

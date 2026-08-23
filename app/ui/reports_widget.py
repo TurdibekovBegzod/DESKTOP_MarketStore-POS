@@ -201,10 +201,12 @@ class LineChart(QWidget):
 
 
 class ReportsWidget(QWidget):
-    def __init__(self):
+    def __init__(self, user=None, cashier_only=False):
         super().__init__()
-        self.detail_mode = "overall"
-        self.detail_metric = "revenue"
+        self.user = user
+        self.cashier_only = bool(cashier_only) or ((user or {}).get("role") == "cashier")
+        self.detail_mode = "cashier" if self.cashier_only else "overall"
+        self.detail_metric = "count" if self.cashier_only else "revenue"
         self.selected_entity_id = None
         self._async_loader = None
         self._build_ui()
@@ -273,6 +275,22 @@ class ReportsWidget(QWidget):
         self.section_combo.setMinimumWidth(180)
         self._load_section_combo()
         self.section_combo.currentIndexChanged.connect(self.load_data)
+        self.report_type_lbl = QLabel("Hisobot turi:")
+        self.report_type_lbl.setStyleSheet("color:#64748b;font-size:12px;font-weight:bold;")
+        self.report_type_combo = QComboBox()
+        self.report_type_combo.setFixedHeight(34)
+        self.report_type_combo.setMinimumWidth(190)
+        if not self.cashier_only:
+            self.report_type_combo.addItem("Umumiy hisobot", "overall")
+        self.report_type_combo.addItem("Kassirlar hisoboti", "cashier")
+        self.report_type_combo.currentIndexChanged.connect(self._report_type_changed)
+        self.metric_lbl = QLabel("Grafik:")
+        self.metric_lbl.setStyleSheet("color:#64748b;font-size:12px;font-weight:bold;")
+        self.metric_combo = QComboBox()
+        self.metric_combo.setFixedHeight(34)
+        self.metric_combo.setMinimumWidth(170)
+        self.metric_combo.currentIndexChanged.connect(self._metric_changed)
+        self._load_metric_combo()
         self.report_currency_combo = QComboBox()
         self.report_currency_combo.setFixedHeight(34)
         self.report_currency_combo.setMinimumWidth(92)
@@ -282,12 +300,15 @@ class ReportsWidget(QWidget):
         self.summary_layout = QGridLayout()
         self.summary_layout.setSpacing(12)
         self.summary_cards = {}
+        self.summary_card_frames = {}
+        self.summary_card_widgets = []
         for index, (key, title, color) in enumerate([
             ("revenue", "Daromad", "#059669"),
             ("profit", "Foyda", "#8b5cf6"),
             ("count", "Sotuvlar soni", "#3b82f6"),
             ("products", "Mahsulotlar soni", "#0ea5e9"),
             ("net_profit", "Sof foyda", "#f59e0b"),
+            ("salary", "Oylik", "#ec4899"),
         ]):
             card = QFrame()
             card.setObjectName(f"summary_{key}")
@@ -320,52 +341,38 @@ class ReportsWidget(QWidget):
             card_layout.addWidget(value_lbl)
             card_layout.addStretch()
             self.summary_cards[key] = value_lbl
+            self.summary_card_frames[key] = card
+            self.summary_card_widgets.append(card)
             self.summary_layout.addWidget(card, 0, index)
         layout.addLayout(self.summary_layout)
+        self._update_summary_card_visibility()
 
-        detail_header = QHBoxLayout()
-        report_title = QLabel("Hisobot turi:")
-        report_title.setStyleSheet("font-size:14px;font-weight:bold;color:#1e293b;")
-        detail_header.addWidget(report_title)
-        self.overall_btn = self._mode_button("Umumiy", "overall")
-        self.cashier_btn = self._mode_button("Kassirlar hisoboti", "cashier")
-        detail_header.addWidget(self.overall_btn)
-        detail_header.addWidget(self.cashier_btn)
-        detail_header.addStretch()
-        layout.addLayout(detail_header)
+        report_filters = QHBoxLayout()
+        report_filters.setSpacing(8)
+        report_filters.addWidget(self.report_type_lbl)
+        report_filters.addWidget(self.report_type_combo)
+        report_filters.addSpacing(10)
+        report_filters.addWidget(self.section_lbl)
+        report_filters.addWidget(self.section_combo)
+        report_filters.addSpacing(10)
+        report_filters.addWidget(self.metric_lbl)
+        report_filters.addWidget(self.metric_combo)
+        report_filters.addStretch()
+        layout.addLayout(report_filters)
 
         detail_row = QHBoxLayout()
         detail_row.setSpacing(12)
 
         left_panel = QFrame()
         left_panel.setFrameShape(QFrame.Shape.NoFrame)
+        left_panel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(10)
 
-        metric_label = QLabel("Grafik:")
-        metric_label.setStyleSheet("color:#64748b;font-size:12px;font-weight:bold;")
-        left_layout.addWidget(metric_label)
-        for key, label in [
-            ("all", "Hammasi"),
-            ("revenue", "Daromad"),
-            ("profit", "Foyda"),
-            ("count", "Cheklar"),
-            ("products", "Mahsulotlar"),
-            ("net_profit", "Sof foyda"),
-        ]:
-            btn = QPushButton(label)
-            btn.setCheckable(True)
-            btn.setFixedHeight(32)
-            btn.setMinimumWidth(150)
-            btn.setStyleSheet(self._metric_toggle_style(key))
-            btn.clicked.connect(lambda checked, metric=key: self._set_detail_metric(metric))
-            setattr(self, f"metric_{key}_btn", btn)
-            left_layout.addWidget(btn)
-        left_layout.addSpacing(2)
-
         self.entity_panel = QFrame()
         self.entity_panel.setFrameShape(QFrame.Shape.NoFrame)
+        self.entity_panel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         entity_layout = QVBoxLayout(self.entity_panel)
         entity_layout.setContentsMargins(0, 0, 0, 0)
         self.entity_table = QTableWidget()
@@ -380,12 +387,12 @@ class ReportsWidget(QWidget):
         self.entity_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.entity_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.entity_table.setAlternatingRowColors(True)
-        self.entity_table.setMaximumHeight(220)
+        self.entity_table.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         self.entity_table.setStyleSheet(self._entity_table_style())
         self.entity_table.itemSelectionChanged.connect(self._on_entity_selected)
-        entity_layout.addWidget(self.entity_table)
+        entity_layout.addWidget(self.entity_table, 1)
         left_layout.addWidget(self.entity_panel, 1)
-        left_layout.addStretch()
+        self.entity_container = left_panel
         detail_row.addWidget(left_panel, 0)
 
         chart_panel = QWidget()
@@ -399,9 +406,6 @@ class ReportsWidget(QWidget):
 
         period_controls = QHBoxLayout()
         period_controls.setSpacing(8)
-        period_controls.addWidget(self.section_lbl)
-        period_controls.addWidget(self.section_combo)
-        period_controls.addStretch()
         period_controls.addWidget(self.prev_period_btn)
         period_controls.addWidget(self.date_lbl)
         period_controls.addWidget(self.date_edit)
@@ -444,6 +448,12 @@ class ReportsWidget(QWidget):
         self.section_combo.setFixedHeight(34)
         self.section_combo.setStyleSheet(field_style)
         self.section_lbl.setStyleSheet(f"color:{theme['muted']};font-size:12px;font-weight:bold;")
+        self.report_type_combo.setFixedHeight(34)
+        self.report_type_combo.setStyleSheet(field_style)
+        self.report_type_lbl.setStyleSheet(f"color:{theme['muted']};font-size:12px;font-weight:bold;")
+        self.metric_combo.setFixedHeight(34)
+        self.metric_combo.setStyleSheet(field_style)
+        self.metric_lbl.setStyleSheet(f"color:{theme['muted']};font-size:12px;font-weight:bold;")
         self.report_currency_combo.setFixedHeight(34)
         self.report_currency_combo.setStyleSheet(field_style)
         self.period_range_lbl.setStyleSheet(f"color:{theme['muted']};font-size:12px;font-weight:bold;background:transparent;border:none;")
@@ -472,17 +482,17 @@ class ReportsWidget(QWidget):
 
         button_style = self._toggle_style(theme)
         for button in [
-            self.overall_btn,
-            self.cashier_btn,
             self.prev_period_btn,
             self.next_period_btn,
             self.today_btn,
         ]:
             button.setStyleSheet(button_style)
-        for key in ["all", "revenue", "profit", "count", "products", "net_profit"]:
-            getattr(self, f"metric_{key}_btn").setStyleSheet(self._metric_toggle_style(key))
 
         self.entity_table.setStyleSheet(self._entity_table_style(theme))
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.load_data()
 
     def load_data(self):
         start_date, end_date = self._date_range()
@@ -497,18 +507,30 @@ class ReportsWidget(QWidget):
         self._apply_loaded_data(self._fetch_report_data(start_date, end_date, period, section_id))
 
     def _fetch_report_data(self, start_date, end_date, period, section_id=None):
-        if period == "day":
+        if self.cashier_only:
+            user_id = (self.user or {}).get("id")
+            if period == "day":
+                rows = db.get_overall_day_hourly_series(start_date, section_id)
+            else:
+                rows = db.get_overall_period_series(start_date, end_date, section_id)
+            expense_rows = []
+            salary_rows = db.get_cashier_salary_period_summary(start_date, end_date, section_id)
+            salary_rows = [r for r in salary_rows if r.get("entity_id") == user_id]
+        elif period == "day":
             rows = db.get_overall_day_hourly_series(start_date, section_id)
-            expense_rows = [] if section_id else db.get_expense_hourly_report(start_date)
+            expense_rows = db.get_expense_hourly_report(start_date)
+            salary_rows = db.get_cashier_salary_period_summary(start_date, end_date, section_id)
         else:
             rows = db.get_overall_period_series(start_date, end_date, section_id)
-            expense_rows = [] if section_id else db.get_expense_report(start_date, end_date)
+            expense_rows = db.get_expense_report(start_date, end_date)
+            salary_rows = db.get_cashier_salary_period_summary(start_date, end_date, section_id)
         return {
             "start_date": start_date,
             "end_date": end_date,
             "section_id": section_id,
             "rows": rows,
             "expense_rows": expense_rows,
+            "salary_rows": salary_rows,
             "sections": [dict(section) for section in db.get_product_sections()],
             "currencies": [dict(currency) for currency in db.get_currencies()],
         }
@@ -523,6 +545,9 @@ class ReportsWidget(QWidget):
             self._filled_series(data["rows"], start_date, end_date),
             data["expense_rows"],
             data["currencies"],
+            section_id=data.get("section_id"),
+            start_date=start_date,
+            end_date=end_date,
         )
         currency = self._selected_report_currency()
 
@@ -532,12 +557,15 @@ class ReportsWidget(QWidget):
             "net_profit": sum(row["net_profit"] for row in filled),
             "count": sum(row["sales_count"] for row in filled),
             "products": sum(row["product_count"] for row in filled),
+            "salary": sum(row.get("cashier_reward", 0) or row.get("total_salary", 0) or 0 for row in data.get("salary_rows", [])),
         }
         self.summary_cards["revenue"].setText(self._format_money(totals["revenue"], currency))
         self.summary_cards["profit"].setText(self._format_money(totals["profit"], currency))
         self.summary_cards["count"].setText(f"{totals['count']:,.0f}")
         self.summary_cards["products"].setText(f"{totals['products']:,.0f}")
         self.summary_cards["net_profit"].setText(self._format_money(totals["net_profit"], currency))
+        self.summary_cards["salary"].setText(self._format_money(totals["salary"], currency))
+        self._update_summary_card_visibility()
 
         self.overall_rows = filled
         self._refresh_report_panel(start_date, end_date, filled)
@@ -547,26 +575,33 @@ class ReportsWidget(QWidget):
         if self.detail_mode == "overall":
             self.selected_entity_id = None
             self.entity_panel.hide()
+            self.entity_container.hide()
             titles = {
                 "all": "Barcha ko'rsatkichlar",
                 "revenue": "Umumiy daromad",
                 "profit": "Umumiy foyda",
-                "count": "Umumiy cheklar",
+                "count": "Umumiy sotuvlar soni",
                 "products": "Umumiy sotilgan mahsulotlar",
                 "net_profit": "Foyda - harajatlar",
             }
-            self.detail_chart.title = titles[self.detail_metric]
+            self.detail_chart.title = titles.get(self.detail_metric, "Umumiy hisobot")
             self._set_chart_data(self.detail_chart, overall_rows, self.detail_metric)
             return
 
+        self.entity_container.show()
         self.entity_panel.show()
         self._load_entities(start_date, end_date)
 
     def _load_entities(self, start_date, end_date):
         current = self.selected_entity_id
-        rows = db.get_cashier_period_summary(start_date, end_date, self._selected_section_id())
-        title = "Kassirlar hisoboti"
-        self.detail_chart.title = title
+        rows = db.get_cashier_period_summary(
+            start_date,
+            end_date,
+            self._selected_section_id(),
+            only_cashiers=True,
+        )
+        user_is_cashier = (self.user or {}).get("role") == "cashier"
+        self.detail_chart.title = "Kassirlar hisoboti"
         self.entity_table.blockSignals(True)
         self.entity_table.setRowCount(0)
         selected_row = 0 if rows else -1
@@ -578,9 +613,14 @@ class ReportsWidget(QWidget):
             self.entity_table.setItem(row, 0, name_item)
             if current == item["entity_id"]:
                 selected_row = row
+            elif user_is_cashier and item["entity_id"] == (self.user or {}).get("id"):
+                selected_row = row
         self.entity_table.blockSignals(False)
         if selected_row >= 0:
             self.entity_table.selectRow(selected_row)
+            item = self.entity_table.item(selected_row, 0)
+            self.selected_entity_id = item.data(Qt.ItemDataRole.UserRole) if item else None
+            self._refresh_detail_chart()
         else:
             self.selected_entity_id = None
             self.detail_chart.set_data([])
@@ -596,19 +636,71 @@ class ReportsWidget(QWidget):
             self.detail_chart.set_data([])
             return
         start_date, end_date = self._date_range()
-        rows = self._entity_series(self.detail_mode, self.selected_entity_id, start_date, end_date)
+        rows = self._entity_series("cashier", self.selected_entity_id, start_date, end_date)
         filled_rows = self._filled_series(rows, start_date, end_date)
-        filled = filled_rows if self._selected_section_id() else self._with_entity_net_profit(filled_rows, start_date, end_date)
-        label = self.entity_table.item(self.entity_table.currentRow(), 0).text()
+        if self._selected_section_id():
+            for row in filled_rows:
+                row["expense"] = 0
+                row["net_profit"] = (row["profit"] or 0) - self._cashier_cost(row)
+            filled = filled_rows
+        else:
+            filled = self._with_entity_net_profit(filled_rows, start_date, end_date)
+
+        # Update top summary cards for the selected cashier
+        if hasattr(self, "summary_cards") and self.summary_cards:
+            currency = self._selected_report_currency()
+            cashier_totals = {
+                "revenue": sum(row.get("revenue", 0) or 0 for row in filled),
+                "profit": sum(row.get("profit", 0) or 0 for row in filled),
+                "count": sum(row.get("sales_count", 0) or 0 for row in filled),
+                "products": sum(row.get("product_count", 0) or 0 for row in filled),
+                "salary": sum(row.get("cashier_reward", 0) or row.get("total_salary", 0) or row.get("salary", 0) or 0 for row in filled),
+            }
+            cashier_totals["net_profit"] = cashier_totals["profit"] - cashier_totals["salary"]
+
+            if "revenue" in self.summary_cards:
+                self.summary_cards["revenue"].setText(self._format_money(cashier_totals["revenue"], currency))
+            if "profit" in self.summary_cards:
+                self.summary_cards["profit"].setText(self._format_money(cashier_totals["profit"], currency))
+            if "count" in self.summary_cards:
+                self.summary_cards["count"].setText(f"{cashier_totals['count']:,.0f}")
+            if "products" in self.summary_cards:
+                self.summary_cards["products"].setText(f"{cashier_totals['products']:,.0f}")
+            if "net_profit" in self.summary_cards:
+                self.summary_cards["net_profit"].setText(self._format_money(cashier_totals["net_profit"], currency))
+            if "salary" in self.summary_cards:
+                self.summary_cards["salary"].setText(self._format_money(cashier_totals["salary"], currency))
+
+        self._update_summary_card_visibility()
+
+        entity = self._selected_entity()
+        label = (entity["username"] or entity.get("email") or "") if entity else (
+            self.entity_table.item(self.entity_table.currentRow(), 0).text()
+            if self.entity_table.currentRow() >= 0
+            else ""
+        )
+        if self.detail_metric == "cashier_salary":
+            self.detail_chart.title = f"{label}: Ajratilgan oylik"
+            self.detail_chart.color = "#ec4899"
+            points = [
+                (
+                    row.get("display_label") or row["label"][5:],
+                    self._converted_money(row.get("cashier_reward", 0) or row.get("total_salary", 0) or row.get("salary", 0)),
+                )
+                for row in filled
+            ]
+            self.detail_chart.set_data(points)
+            return
+
         titles = {
             "all": "barcha ko'rsatkichlar",
             "revenue": "daromad",
             "profit": "foyda",
-            "count": "cheklar",
+            "count": "sotuvlar soni",
             "products": "mahsulotlar",
             "net_profit": "foyda - harajatlar",
         }
-        self.detail_chart.title = f"{label}: {titles[self.detail_metric]}"
+        self.detail_chart.title = f"{label}: {titles.get(self.detail_metric, '')}"
         self._set_chart_data(self.detail_chart, filled, self.detail_metric)
 
     def _set_chart_data(self, chart, rows, metric):
@@ -653,6 +745,8 @@ class ReportsWidget(QWidget):
         return chart_rows
 
     def _metric_value(self, row, metric):
+        if metric == "cashier_salary":
+            return self._converted_money(row.get("total_salary", 0) or row.get("salary", 0))
         if metric == "net_profit":
             return self._converted_money(row["net_profit"])
         if metric == "count":
@@ -694,11 +788,45 @@ class ReportsWidget(QWidget):
             self.report_currency_combo.addItem(currency["code"], currency)
         if self.report_currency_combo.count() == 0:
             self.report_currency_combo.addItem("UZS", {"code": "UZS", "rate_to_uzs": 1})
-        if current:
-            index = self.report_currency_combo.findText(current["code"], Qt.MatchFlag.MatchStartsWith)
-            if index >= 0:
-                self.report_currency_combo.setCurrentIndex(index)
+        selected_code = current["code"] if current else db.get_app_settings().get("currency", "UZS")
+        index = self.report_currency_combo.findText(selected_code, Qt.MatchFlag.MatchStartsWith)
+        if index >= 0:
+            self.report_currency_combo.setCurrentIndex(index)
         self.report_currency_combo.blockSignals(False)
+
+    def _load_metric_combo(self):
+        if not hasattr(self, "metric_combo"):
+            return
+        current = self.detail_metric
+        language = self.property("app_language") or "uz"
+        is_cashier_user = self.cashier_only or ((self.user or {}).get("role") == "cashier")
+        if is_cashier_user:
+            options = [
+                ("count", "Sotuvlar soni"),
+                ("products", "Mahsulotlar"),
+                ("cashier_salary", "Oylik"),
+            ]
+        else:
+            options = [
+                ("all", "Hammasi"),
+                ("revenue", "Daromad"),
+                ("profit", "Foyda"),
+                ("count", "Sotuvlar soni"),
+                ("products", "Mahsulotlar"),
+                ("net_profit", "Sof foyda"),
+            ]
+            if self.detail_mode == "cashier":
+                options.append(("cashier_salary", "Kassirlar oyligi"))
+        self.metric_combo.blockSignals(True)
+        self.metric_combo.clear()
+        for key, label in options:
+            self.metric_combo.addItem(t(label, language), key)
+        index = self.metric_combo.findData(current)
+        if index < 0:
+            index = 0
+            self.detail_metric = self.metric_combo.itemData(index)
+        self.metric_combo.setCurrentIndex(index)
+        self.metric_combo.blockSignals(False)
 
     def _load_section_combo(self, sections=None):
         if not hasattr(self, "section_combo"):
@@ -717,13 +845,21 @@ class ReportsWidget(QWidget):
         self.section_combo.blockSignals(False)
 
     def _chart_metrics(self):
-        return [
+        is_cashier_user = self.cashier_only or ((self.user or {}).get("role") == "cashier")
+        if is_cashier_user:
+            return [
+                ("count", "Sotuvlar soni", self._metric_color("count")),
+                ("products", "Mahsulotlar", self._metric_color("products")),
+                ("cashier_salary", "Oylik", self._metric_color("cashier_salary")),
+            ]
+        metrics = [
             ("revenue", "Daromad", self._metric_color("revenue")),
             ("profit", "Foyda", self._metric_color("profit")),
-            ("count", "Cheklar", self._metric_color("count")),
+            ("count", "Sotuvlar soni", self._metric_color("count")),
             ("products", "Mahsulotlar", self._metric_color("products")),
             ("net_profit", "Sof foyda", self._metric_color("net_profit")),
         ]
+        return metrics
 
     def _metric_color(self, metric):
         return {
@@ -733,6 +869,7 @@ class ReportsWidget(QWidget):
             "count": "#f97316",
             "products": "#8b5cf6",
             "net_profit": "#ef4444",
+            "cashier_salary": "#ec4899",
         }.get(metric, "#3b82f6")
 
     def _date_range(self):
@@ -790,6 +927,9 @@ class ReportsWidget(QWidget):
             item["product_count"] += row.get("product_count", 0) or 0
             item["revenue"] += row.get("revenue", 0) or 0
             item["profit"] += row.get("profit", 0) or 0
+            item["cashier_reward"] += row.get("cashier_reward", 0) or 0
+            item["salary"] += row.get("salary", 0) or 0
+            item["total_salary"] += row.get("total_salary", 0) or row.get("salary", 0) or 0
 
         filled = []
         for key in self._period_keys(start_date, end_date, period):
@@ -805,6 +945,10 @@ class ReportsWidget(QWidget):
             "product_count": 0,
             "revenue": 0,
             "profit": 0,
+            "cashier_reward": 0,
+            "salary": 0,
+            "total_salary": 0,
+            "salary_deduction": 0,
         }
 
     def _period_keys(self, start_date, end_date, period):
@@ -903,11 +1047,21 @@ class ReportsWidget(QWidget):
         expenses = self._expense_totals_by_period(start_date, end_date)
         for row in rows:
             row["expense"] = expenses.get(row["label"], 0)
-            row["net_profit"] = (row["profit"] or 0) - row["expense"]
+            row["net_profit"] = (row["profit"] or 0) - row["expense"] - self._cashier_cost(row)
         return rows
 
-    def _with_net_profit_from_expenses(self, rows, expense_rows, currencies):
+    def _with_net_profit_from_expenses(self, rows, expense_rows, currencies, section_id=None, start_date=None, end_date=None):
         rates = {currency["code"]: currency["rate_to_uzs"] or 1 for currency in currencies}
+        
+        ratio = 1.0
+        if section_id and start_date and end_date:
+            section_rev = sum(r.get("revenue", 0) or 0 for r in rows)
+            period = self.period_combo.currentData()
+            all_rows = db.get_overall_period_series(start_date, end_date) if period != "day" else db.get_overall_day_hourly_series(start_date)
+            total_rev = sum(r.get("revenue", 0) or 0 for r in all_rows)
+            ratio = (section_rev / total_rev) if total_rev > 0 else 1.0
+            ratio = max(0.0, min(1.0, ratio))
+
         totals = {}
         for expense in expense_rows:
             try:
@@ -915,10 +1069,10 @@ class ReportsWidget(QWidget):
             except (TypeError, ValueError):
                 continue
             currency = expense["currency_code"] or "UZS"
-            totals[label] = totals.get(label, 0) + (expense["amount"] or 0) * (rates.get(currency, 1) or 1)
+            totals[label] = totals.get(label, 0) + (expense["amount"] or 0) * (rates.get(currency, 1) or 1) * ratio
         for row in rows:
             row["expense"] = totals.get(row["label"], 0)
-            row["net_profit"] = (row["profit"] or 0) - row["expense"]
+            row["net_profit"] = (row["profit"] or 0) - row["expense"] - self._cashier_cost(row)
         return rows
 
     def _with_entity_net_profit(self, rows, start_date, end_date):
@@ -927,12 +1081,21 @@ class ReportsWidget(QWidget):
             expenses = self._expense_totals_by_period(start_date, end_date, user_id=entity["id"], include_unassigned=True)
             for row in rows:
                 row["expense"] = expenses.get(row["label"], 0)
-                row["net_profit"] = (row["profit"] or 0) - row["expense"]
+                row["net_profit"] = (row["profit"] or 0) - row["expense"] - self._cashier_cost(row)
             return rows
         for row in rows:
             row["expense"] = 0
-            row["net_profit"] = row["profit"] or 0
+            row["net_profit"] = (row["profit"] or 0) - self._cashier_cost(row)
         return rows
+
+    @staticmethod
+    def _cashier_cost(row):
+        return (
+            row.get("cashier_reward", 0)
+            or row.get("total_salary", 0)
+            or row.get("salary", 0)
+            or 0
+        )
 
     def _expense_totals_by_period(self, start_date, end_date, user_id=None, include_unassigned=False):
         rates = {currency["code"]: currency["rate_to_uzs"] or 1 for currency in db.get_currencies()}
@@ -1014,11 +1177,28 @@ class ReportsWidget(QWidget):
         return btn
 
     def _set_detail_mode(self, mode):
+        if self.cashier_only:
+            mode = "cashier"
+        if mode not in {"overall", "cashier"}:
+            mode = "overall"
         self.detail_mode = mode
         self.selected_entity_id = None
+        self._load_metric_combo()
         self._sync_buttons()
-        start_date, end_date = self._date_range()
-        self._refresh_report_panel(start_date, end_date, self.overall_rows)
+        self._update_summary_card_visibility()
+        self.load_data()
+
+    def _update_summary_card_visibility(self):
+        if not hasattr(self, "summary_card_frames"):
+            return
+        is_cashier_user = self.cashier_only or ((self.user or {}).get("role") == "cashier")
+        if is_cashier_user:
+            for key, card in self.summary_card_frames.items():
+                card.setVisible(key in ("count", "products", "salary"))
+        else:
+            is_cashier_mode = self.detail_mode == "cashier"
+            for key, card in self.summary_card_frames.items():
+                card.setVisible(True if is_cashier_mode else (key != "salary"))
 
     def _set_detail_metric(self, metric):
         self.detail_metric = metric
@@ -1029,11 +1209,42 @@ class ReportsWidget(QWidget):
         else:
             self._refresh_detail_chart()
 
+    def _report_type_changed(self, _index):
+        mode = self.report_type_combo.currentData()
+        if mode:
+            self._set_detail_mode(mode)
+
+    def _metric_changed(self, _index):
+        metric = self.metric_combo.currentData()
+        if metric:
+            self._set_detail_metric(metric)
+
     def _sync_buttons(self):
-        self.overall_btn.setChecked(self.detail_mode == "overall")
-        self.cashier_btn.setChecked(self.detail_mode == "cashier")
-        for key in ["all", "revenue", "profit", "count", "products", "net_profit"]:
-            getattr(self, f"metric_{key}_btn").setChecked(self.detail_metric == key)
+        if hasattr(self, "report_type_combo"):
+            self.report_type_combo.blockSignals(True)
+            index = self.report_type_combo.findData(self.detail_mode)
+            if index >= 0:
+                self.report_type_combo.setCurrentIndex(index)
+            self.report_type_combo.blockSignals(False)
+        if hasattr(self, "metric_combo"):
+            self.metric_combo.blockSignals(True)
+            index = self.metric_combo.findData(self.detail_metric)
+            if index >= 0:
+                self.metric_combo.setCurrentIndex(index)
+            self.metric_combo.blockSignals(False)
+
+    def _language_changed(self, language):
+        self.report_type_lbl.setText(t("Hisobot turi:", language))
+        self.section_lbl.setText(t("Bo'lim:", language))
+        self.metric_lbl.setText(t("Grafik:", language))
+        report_labels = {
+            "overall": "Umumiy hisobot",
+            "cashier": "Kassirlar hisoboti",
+        }
+        for index in range(self.report_type_combo.count()):
+            self.report_type_combo.setItemText(index, t(report_labels[self.report_type_combo.itemData(index)], language))
+        self._load_metric_combo()
+        self._load_section_combo()
 
     def _money_item(self, value):
         item = QTableWidgetItem(f"{value:,.0f} so'm")
@@ -1138,4 +1349,646 @@ class ReportsWidget(QWidget):
             QTableWidget::item:focus{outline:none;border:1px solid #3b82f6;background:#3b82f6;color:white;}
             QHeaderView::section{background:#f8fafc;border:none;border-bottom:1px solid #e2e8f0;padding:8px;font-weight:bold;color:#64748b;}
             QTableWidget::item:alternate{background:#f8fafc;color:#111827;}
+        """
+
+
+class SalesDetailsWidget(QWidget):
+    def __init__(self, user=None, cashier_only=False):
+        super().__init__()
+        self.user = user or {}
+        self.cashier_only = bool(cashier_only)
+        self._async_loader = None
+        self._last_rows = []
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        self.progress_bar = make_progress_bar()
+        layout.addWidget(self.progress_bar)
+        self._async_loader = AsyncDataLoader(self, self.progress_bar)
+
+        filters = QHBoxLayout()
+        filters.setSpacing(8)
+        self.cashier_lbl = QLabel("Kassir:")
+        self.cashier_combo = QComboBox()
+        self.cashier_combo.setMinimumWidth(220)
+        self.cashier_combo.setFixedHeight(36)
+        self.section_lbl = QLabel("Bo'lim:")
+        self.section_combo = QComboBox()
+        self.section_combo.setMinimumWidth(180)
+        self.section_combo.setFixedHeight(36)
+        self.date_lbl = QLabel("Sana:")
+        self.date_edit = QDateEdit(QDate.currentDate())
+        self.date_edit.setCalendarPopup(True)
+        self.date_edit.setDisplayFormat("dd.MM.yyyy")
+        self.date_edit.setFixedSize(150, 36)
+        calendar = QCalendarWidget(self)
+        calendar.setNavigationBarVisible(True)
+        calendar.setGridVisible(True)
+        calendar.setFirstDayOfWeek(Qt.DayOfWeek.Monday)
+        self.date_edit.setCalendarWidget(calendar)
+
+        self.period_combo = QComboBox()
+        self.period_combo.addItem("Kunlik", "day")
+        self.period_combo.addItem("Haftalik", "week")
+        self.period_combo.addItem("Oylik", "month")
+        self.period_combo.addItem("Yillik", "year")
+        self.period_combo.setCurrentIndex(self.period_combo.findData("month"))
+        self.period_combo.setMinimumWidth(110)
+        self.period_combo.setFixedHeight(36)
+        self.prev_period_btn = QPushButton("<")
+        self.prev_period_btn.setFixedSize(36, 36)
+        self.next_period_btn = QPushButton(">")
+        self.next_period_btn.setFixedSize(36, 36)
+        self.today_btn = QPushButton("Bugun")
+        self.today_btn.setFixedHeight(36)
+        self.today_btn.setMinimumWidth(76)
+        self.currency_combo = QComboBox()
+        self.currency_combo.setMinimumWidth(88)
+        self.currency_combo.setFixedHeight(36)
+
+        filters.addWidget(self.cashier_lbl)
+        filters.addWidget(self.cashier_combo)
+        filters.addSpacing(8)
+        filters.addWidget(self.section_lbl)
+        filters.addWidget(self.section_combo)
+        filters.addStretch()
+        filters.addWidget(self.prev_period_btn)
+        filters.addWidget(self.date_lbl)
+        filters.addWidget(self.date_edit)
+        filters.addWidget(self.period_combo)
+        filters.addWidget(self.next_period_btn)
+        filters.addWidget(self.today_btn)
+        filters.addWidget(self.currency_combo)
+        layout.addLayout(filters)
+
+        self.summary_cards = {}
+        self.summary_card_frames = {}
+        if not self.cashier_only:
+            self.summary_layout = QGridLayout()
+            self.summary_layout.setSpacing(12)
+            for index, (key, title, color) in enumerate([
+                ("revenue", "Daromad", "#059669"),
+                ("profit", "Foyda", "#8b5cf6"),
+                ("count", "Sotuvlar soni", "#3b82f6"),
+                ("products", "Mahsulotlar soni", "#0ea5e9"),
+                ("net_profit", "Sof foyda", "#f59e0b"),
+                ("salary", "Oylik", "#ec4899"),
+            ]):
+                card = QFrame()
+                card.setObjectName(f"details_summary_{key}")
+                card.setProperty("accent_color", color)
+                card.setFixedHeight(72)
+                card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+                card.setStyleSheet(f"""
+                    QFrame#details_summary_{key} {{
+                        background:white;
+                        border-left:4px solid {color};
+                        border-top:1px solid #e2e8f0;
+                        border-right:1px solid #e2e8f0;
+                        border-bottom:1px solid #e2e8f0;
+                        border-radius:8px;
+                    }}
+                """)
+                card_layout = QVBoxLayout(card)
+                card_layout.setContentsMargins(14, 8, 14, 8)
+                card_layout.setSpacing(4)
+                title_lbl = QLabel(title)
+                title_lbl.setObjectName("summary_title")
+                title_lbl.setStyleSheet("color:#64748b;font-size:11px;")
+                value_lbl = QLabel("0")
+                value_lbl.setObjectName("summary_value")
+                value_lbl.setProperty("accent_color", color)
+                value_lbl.setStyleSheet(f"color:{color};font-size:14px;font-weight:bold;")
+                value_lbl.setWordWrap(False)
+                value_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+                card_layout.addWidget(title_lbl)
+                card_layout.addWidget(value_lbl)
+                card_layout.addStretch()
+                self.summary_cards[key] = value_lbl
+                self.summary_card_frames[key] = card
+                self.summary_layout.addWidget(card, 0, index)
+            layout.addLayout(self.summary_layout)
+
+        summary = QHBoxLayout()
+        self.summary_title_lbl = QLabel("Sotuv tafsilotlari")
+        self.summary_title_lbl.setStyleSheet("font-size:16px;font-weight:bold;color:#0f172a;")
+        self.summary_stats_lbl = QLabel("")
+        self.summary_stats_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.summary_stats_lbl.setStyleSheet("font-size:13px;font-weight:bold;color:#475569;")
+        self.summary_stats_lbl.hide()
+        summary.addWidget(self.summary_title_lbl)
+        summary.addStretch()
+        summary.addWidget(self.summary_stats_lbl)
+        layout.addLayout(summary)
+
+        self.table = QTableWidget()
+        self.table.setColumnCount(9)
+        self.table.setHorizontalHeaderLabels([
+            "Sana", "Mahsulot", "Shtrix-kod", "Miqdor",
+            "Narx", "Jami", "Kassirga ajratildi", "To'lov", "Holati",
+        ])
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        for column, width in [
+            (0, 105), (2, 130), (3, 80), (4, 130),
+            (5, 140), (6, 155), (7, 110), (8, 160),
+        ]:
+            self.table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
+            self.table.setColumnWidth(column, width)
+        self.table.verticalHeader().setDefaultSectionSize(44)
+        self.table.verticalHeader().setFixedWidth(46)
+        self.table.verticalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.table.verticalHeader().setStyleSheet(self._vertical_header_style())
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.table.setAlternatingRowColors(False)
+        self.table.setStyleSheet(self._table_style())
+        layout.addWidget(self.table, 1)
+
+        self._load_cashiers(initial=True)
+        self._load_sections()
+        self._load_currencies()
+        self.cashier_combo.currentIndexChanged.connect(self.load_data)
+        self.section_combo.currentIndexChanged.connect(self.load_data)
+        self.date_edit.dateChanged.connect(self.load_data)
+        self.period_combo.currentIndexChanged.connect(self.load_data)
+        self.currency_combo.currentIndexChanged.connect(lambda _: self._fill_table(self._last_rows))
+        self.prev_period_btn.clicked.connect(lambda: self._shift_period(-1))
+        self.next_period_btn.clicked.connect(lambda: self._shift_period(1))
+        self.today_btn.clicked.connect(lambda: self.date_edit.setDate(QDate.currentDate()))
+        self.load_data()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.load_data()
+
+    def load_data(self, *_args):
+        cashier_id = self.cashier_combo.currentData()
+        start_date, end_date = self._date_range()
+        section_id = self.section_combo.currentData()
+        fetch = lambda: [dict(row) for row in db.get_cashier_sales_details(
+            cashier_id,
+            start_date,
+            end_date,
+            section_id,
+            only_cashiers=True,
+        )]
+        if self.isVisible():
+            self._async_loader.start(fetch, self._fill_table)
+        else:
+            self._fill_table(fetch())
+
+
+    def _fill_table(self, rows):
+        raw_rows = [dict(row) for row in rows]
+        self._last_rows = raw_rows
+        
+        # Only count successfully finalized sales with positive net quantity for metrics
+        finalized_raw = [
+            r for r in raw_rows
+            if bool(r.get("is_finalized")) and (r.get("net_quantity", 0) or 0) > 0
+        ]
+        
+        rows = self._group_sales_rows(raw_rows)
+        # Filter out purely returned records, only keep sold items
+        rows = [r for r in rows if (r.get("net_quantity", 0) or 0) > 0 or ((r.get("sold_quantity", 0) or 0) > (r.get("returned_quantity", 0) or 0))]
+        self.table.setRowCount(0)
+        self.table.setUpdatesEnabled(False)
+        language = self.property("app_language") or "uz"
+
+        # Update the 6 summary cards with finalized successful sales only
+        distinct_sales = {r.get("sale_id") for r in finalized_raw if r.get("sale_id")}
+        sales_count = len(distinct_sales)
+        products_count = sum(r.get("net_quantity", 0) or 0 for r in finalized_raw)
+        revenue_uzs = sum(r.get("item_total_after_discount", 0) or 0 for r in finalized_raw)
+        cost_uzs = sum((r.get("cost", 0) or 0) * (r.get("net_quantity", 0) or 0) for r in finalized_raw)
+        profit_uzs = max(0, revenue_uzs - cost_uzs)
+        salary_uzs = sum(r.get("cashier_reward", 0) or 0 for r in finalized_raw)
+        net_profit_uzs = max(0, profit_uzs - salary_uzs)
+
+        if hasattr(self, "summary_cards"):
+            if "revenue" in self.summary_cards:
+                self.summary_cards["revenue"].setText(self._format_money(revenue_uzs))
+            if "profit" in self.summary_cards:
+                self.summary_cards["profit"].setText(self._format_money(profit_uzs))
+            if "count" in self.summary_cards:
+                self.summary_cards["count"].setText(f"{sales_count:,.0f}")
+            if "products" in self.summary_cards:
+                self.summary_cards["products"].setText(f"{products_count:,.0f}")
+            if "net_profit" in self.summary_cards:
+                self.summary_cards["net_profit"].setText(self._format_money(net_profit_uzs))
+            if "salary" in self.summary_cards:
+                self.summary_cards["salary"].setText(self._format_money(salary_uzs))
+
+        finalized_table_rows = [r for r in rows if bool(r.get("is_finalized")) and (r.get("net_quantity", 0) or 0) > 0]
+        total_quantity = sum(row.get("net_quantity", 0) or 0 for row in finalized_table_rows)
+        total_value = sum(row.get("item_total_after_discount", 0) or 0 for row in finalized_table_rows)
+        total_cashier_reward = sum(row.get("cashier_reward", 0) or 0 for row in finalized_table_rows)
+        if rows:
+            summary_values = [
+                "",
+                "",
+                "",
+                f"{total_quantity:g}",
+                "",
+                self._format_money(total_value),
+                self._format_money(total_cashier_reward) if total_cashier_reward > 0 else "-",
+                "",
+                "",
+            ]
+            self.table.insertRow(0)
+            self.table.setVerticalHeaderItem(0, QTableWidgetItem(""))
+            for column, value in enumerate(summary_values):
+                item = QTableWidgetItem(value)
+                item.setBackground(QColor("#dbeafe"))
+                item.setForeground(QColor("#1e3a8a"))
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+                if column in (3, 4, 5, 6):
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                elif column in (0, 2, 7, 8):
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table.setItem(0, column, item)
+            self.table.setRowHeight(0, 48)
+
+        for row_index, data in enumerate(rows):
+            table_row = row_index + 1
+            self.table.insertRow(table_row)
+            self.table.setVerticalHeaderItem(table_row, QTableWidgetItem(str(row_index + 1)))
+            returned = data.get("returned_quantity", 0) or 0
+            sold = data.get("sold_quantity", 0) or 0
+            net_quantity = data.get("net_quantity", max(0, sold - returned)) or 0
+            payment = data.get("payment_method") or ""
+            is_finalized = bool(data.get("is_finalized"))
+            cashier_reward = data.get("cashier_reward", 0) or 0
+            if returned > 0 and net_quantity <= 0:
+                status_key, row_hex, status_hex, status_text = (
+                    "Qaytarilgan", "#fee2e2", "#fecaca", "#991b1b"
+                )
+            elif returned > 0:
+                status_key, row_hex, status_hex, status_text = (
+                    "Qisman qaytarilgan", "#fef3c7", "#fde68a", "#92400e"
+                )
+            elif not is_finalized:
+                status_key, row_hex, status_hex, status_text = (
+                    "Hali yakunlanmagan", "#fffbeb", "#fef3c7", "#92400e"
+                )
+            else:
+                status_key = "Yakunlangan"
+                row_hex = {
+                    "naqd": "#ecfdf5",
+                    "plastik karta": "#eff6ff",
+                    "qarz": "#fff7ed",
+                }.get(payment, "#f8fafc")
+                status_hex, status_text = "#bbf7d0", "#166534"
+
+            status_value = self._status_icon(status_key)
+            values = [
+                self._compact_details_time(data.get("created_at")),
+                str(data.get("product_name") or "-"),
+                str(data.get("barcode") or "-"),
+                f"{net_quantity:g}",
+                self._format_money(data.get("price", 0)),
+                self._format_money(data.get("item_total_after_discount", 0)),
+                self._format_money(cashier_reward) if cashier_reward > 0 else "-",
+                self._payment_label(payment),
+                status_value,
+            ]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setBackground(QColor(row_hex))
+                item.setForeground(QColor("#1e293b"))
+                if column in (3, 4, 5, 6):
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                elif column in (0, 2, 7, 8):
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if column == 8:
+                    item.setBackground(QColor(status_hex))
+                    item.setForeground(QColor(status_text))
+                    item.setToolTip(t(status_key, language))
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
+                self.table.setItem(table_row, column, item)
+
+        self.table.setUpdatesEnabled(True)
+        cashier_name_raw = self.cashier_combo.currentText()
+        language = self.property("app_language") or "uz"
+        # Don't show "Barcha kassirlar" as a name prefix in the title
+        cashier_name = cashier_name_raw if self.cashier_combo.currentData() is not None else ""
+        title = t("Sotuv tafsilotlari", language)
+        self.summary_title_lbl.setProperty("i18n_skip", True)
+        self.summary_title_lbl.setText(f"{cashier_name} · {title}" if cashier_name else title)
+        self.summary_stats_lbl.setProperty("i18n_skip", True)
+        self.summary_stats_lbl.setText("")
+
+    def _group_sales_rows(self, rows):
+        states = self._sales_return_states(rows)
+        rows = self._current_sales_rows(rows)
+        grouped = {}
+        for data in rows:
+            is_fin = bool(data.get("is_finalized"))
+            key = (self._sales_product_key(data), is_fin)
+            item = grouped.setdefault(key, {
+                "product_id": data.get("product_id"),
+                "product_name": data.get("product_name") or "-",
+                "barcode": data.get("barcode") or "-",
+                "sold_quantity": 0,
+                "returned_quantity": 0,
+                "net_quantity": 0,
+                "price": data.get("price", 0) or 0,
+                "item_total_after_discount": 0,
+                "cashier_reward": 0,
+                "payment_method": "",
+                "payment_methods": set(),
+                "is_finalized": int(is_fin),
+                "created_at": data.get("created_at") or "",
+            })
+            item["sold_quantity"] += data.get("sold_quantity", 0) or 0
+            item["net_quantity"] += data.get("net_quantity", 0) or 0
+            item["item_total_after_discount"] += data.get("item_total_after_discount", 0) or 0
+            item["cashier_reward"] += data.get("cashier_reward", 0) or 0
+            if data.get("payment_method"):
+                item["payment_methods"].add(data.get("payment_method"))
+            created_at = data.get("created_at") or ""
+            if created_at > (item.get("created_at") or ""):
+                item["created_at"] = created_at
+                item["price"] = data.get("price", 0) or 0
+        for key, item in grouped.items():
+            state = states.get(key, {})
+            item["sold_quantity"] = state.get("sold_quantity", item["sold_quantity"])
+            item["net_quantity"] = state.get("net_quantity", item["net_quantity"])
+            item["returned_quantity"] = state.get("outstanding_returns", 0)
+            methods = item.pop("payment_methods")
+            item["payment_method"] = next(iter(methods)) if len(methods) == 1 else ""
+        return sorted(
+            grouped.values(),
+            key=lambda row: row.get("created_at") or "",
+            reverse=True,
+        )
+
+    @staticmethod
+    def _sales_product_key(data):
+        return data.get("product_id") or (
+            data.get("product_name") or "-",
+            data.get("barcode") or "-",
+        )
+
+    @classmethod
+    def _sales_return_states(cls, rows):
+        states = {}
+        for data in rows:
+            is_fin = bool(data.get("is_finalized"))
+            key = (cls._sales_product_key(data), is_fin)
+            state = states.setdefault(key, {
+                "sold_quantity": 0,
+                "net_quantity": 0,
+                "returned_quantity": 0,
+                "events": [],
+            })
+            sold = data.get("sold_quantity", 0) or 0
+            returned = data.get("returned_quantity", 0) or 0
+            net_quantity = data.get("net_quantity", max(0, sold - returned)) or 0
+            item_id = int(data.get("sale_item_id") or 0)
+            state["sold_quantity"] += sold
+            state["net_quantity"] += net_quantity
+            state["returned_quantity"] += returned
+            state["events"].append((str(data.get("created_at") or ""), 0, item_id, sold))
+            if returned > 0:
+                returned_at = data.get("returned_at") or data.get("created_at") or ""
+                state["events"].append((str(returned_at), 1, item_id, returned))
+
+        for state in states.values():
+            outstanding = 0
+            for _event_time, event_type, _item_id, quantity in sorted(state.pop("events")):
+                if event_type == 0:
+                    outstanding = max(0, outstanding - quantity)
+                else:
+                    outstanding += quantity
+            state["outstanding_returns"] = min(outstanding, state["returned_quantity"])
+        return states
+
+    @classmethod
+    def _current_sales_rows(cls, rows):
+        active_rows = []
+        latest_returns = {}
+        active_products = set()
+        for data in rows:
+            sold = data.get("sold_quantity", 0) or 0
+            returned = data.get("returned_quantity", 0) or 0
+            net_quantity = data.get("net_quantity", max(0, sold - returned)) or 0
+            product_key = cls._sales_product_key(data)
+            if net_quantity > 0:
+                active_rows.append(data)
+                active_products.add(product_key)
+                continue
+            if returned <= 0:
+                continue
+            order_key = (
+                str(data.get("returned_at") or data.get("created_at") or ""),
+                int(data.get("sale_item_id") or 0),
+            )
+            previous = latest_returns.get(product_key)
+            if previous is None or order_key > previous[0]:
+                latest_returns[product_key] = (order_key, data)
+        return active_rows + [
+            entry[1]
+            for product_key, entry in latest_returns.items()
+            if product_key not in active_products
+        ]
+
+    @staticmethod
+    def _compact_details_time(value):
+        value = str(value or "").replace("T", " ")
+        try:
+            date_part, time_part = value.split(" ", 1)
+            year, month, day = date_part.split("-")
+            return f"{day}.{month} {time_part[:5]}"
+        except ValueError:
+            return value[:16]
+
+    def _load_cashiers(self, initial=False):
+        current_idx = self.cashier_combo.currentIndex()
+        current_data = self.cashier_combo.currentData()
+        self.cashier_combo.blockSignals(True)
+        self.cashier_combo.clear()
+        language = self.property("app_language") or "uz"
+
+        # Always add "Barcha kassirlar" first
+        self.cashier_combo.addItem(t("Barcha kassirlar", language), None)
+
+        for user in db.get_users():
+            u_role = user.get("role") if isinstance(user, dict) else user["role"]
+            if u_role != "cashier":
+                continue
+            name = user.get("username") or user.get("email") or t("Noma'lum", language)
+            uid = user.get("id")
+            self.cashier_combo.addItem(name, uid)
+
+        user_role = (self.user or {}).get("role", "")
+        user_id = (self.user or {}).get("id")
+        user_is_cashier = (user_role == "cashier")
+
+        # Determine which index to select
+        if initial and user_is_cashier and user_id:
+            idx = self.cashier_combo.findData(user_id)
+            if idx >= 0:
+                self.cashier_combo.setCurrentIndex(idx)
+        elif current_idx >= 0 and current_idx < self.cashier_combo.count() and self.cashier_combo.itemData(current_idx) == current_data:
+            self.cashier_combo.setCurrentIndex(current_idx)
+        else:
+            idx = self.cashier_combo.findData(current_data) if current_data is not None else 0
+            self.cashier_combo.setCurrentIndex(max(0, idx))
+        self.cashier_combo.blockSignals(False)
+
+    def _load_sections(self):
+        current = self.section_combo.currentData()
+        language = self.property("app_language") or "uz"
+        self.section_combo.blockSignals(True)
+        self.section_combo.clear()
+        self.section_combo.addItem(t("Barcha bo'limlar", language), None)
+        for section in db.get_product_sections():
+            self.section_combo.addItem(section["name"], section["id"])
+        index = self.section_combo.findData(current)
+        if index >= 0:
+            self.section_combo.setCurrentIndex(index)
+        self.section_combo.blockSignals(False)
+
+    def _load_currencies(self):
+        current = self.currency_combo.currentData()
+        current_code = current.get("code") if isinstance(current, dict) else None
+        self.currency_combo.blockSignals(True)
+        self.currency_combo.clear()
+        currencies = [dict(currency) for currency in db.get_currencies()]
+        currencies.sort(key=lambda currency: ({"UZS": 0, "USD": 1, "EUR": 2}.get(currency["code"], 10), currency["code"]))
+        for currency in currencies:
+            self.currency_combo.addItem(currency["code"], currency)
+        selected_code = current_code or db.get_app_settings().get("currency", "UZS")
+        index = self.currency_combo.findText(selected_code)
+        if index >= 0:
+            self.currency_combo.setCurrentIndex(index)
+        self.currency_combo.blockSignals(False)
+
+    def _date_range(self):
+        selected = self.date_edit.date().toPyDate()
+        period = self.period_combo.currentData()
+        if period == "day":
+            start = end = selected
+        elif period == "week":
+            start = selected - timedelta(days=selected.weekday())
+            end = start + timedelta(days=6)
+        elif period == "month":
+            start = selected.replace(day=1)
+            next_month = selected.replace(year=selected.year + 1, month=1, day=1) if selected.month == 12 else selected.replace(month=selected.month + 1, day=1)
+            end = next_month - timedelta(days=1)
+        else:
+            start = selected.replace(month=1, day=1)
+            end = selected.replace(month=12, day=31)
+        return start.isoformat(), end.isoformat()
+
+    def _shift_period(self, direction):
+        current = self.date_edit.date()
+        period = self.period_combo.currentData()
+        if period == "day":
+            self.date_edit.setDate(current.addDays(direction))
+        elif period == "week":
+            self.date_edit.setDate(current.addDays(direction * 7))
+        elif period == "month":
+            self.date_edit.setDate(current.addMonths(direction))
+        else:
+            self.date_edit.setDate(current.addYears(direction))
+
+    def _format_money(self, value):
+        currency = self.currency_combo.currentData() or {"code": "UZS", "rate_to_uzs": 1}
+        converted = (value or 0) / (currency.get("rate_to_uzs") or 1)
+        if currency.get("code") == "UZS":
+            unit = t("so'm", self.property("app_language") or "uz")
+            return f"{converted:,.0f} {unit}"
+        return f"{converted:,.2f} {currency.get('code', 'UZS')}"
+
+    def _payment_label(self, value):
+        language = self.property("app_language") or "uz"
+        return t({
+            "naqd": "Naqd",
+            "plastik karta": "Plastik karta",
+            "qarz": "Qarz",
+        }.get(value, value or "-"), language)
+
+    @staticmethod
+    def _status_icon(status_key):
+        return {
+            "Yakunlangan": "✅",
+            "Hali yakunlanmagan": "⏳",
+            "Qisman qaytarilgan": "↩️",
+            "Qaytarilgan": "↩️",
+        }.get(status_key, "")
+
+    def _language_changed(self, language):
+        self.cashier_lbl.setText(t("Kassir:", language))
+        self.section_lbl.setText(t("Bo'lim:", language))
+        self.date_lbl.setText(t("Sana:", language))
+        period_labels = {"day": "Kunlik", "week": "Haftalik", "month": "Oylik", "year": "Yillik"}
+        for index in range(self.period_combo.count()):
+            self.period_combo.setItemText(index, t(period_labels[self.period_combo.itemData(index)], language))
+        self.today_btn.setText(t("Bugun", language))
+        self._load_sections()
+        self._fill_table(self._last_rows)
+
+    def apply_theme(self, theme):
+        self.setStyleSheet(f"background:{theme['content']};")
+        field_style = f"""
+            QComboBox, QDateEdit {{
+                background:{theme['topbar']};color:{theme['title']};border:1px solid #cbd5e1;
+                border-radius:6px;padding:0 10px;font-size:13px;
+            }}
+            QComboBox:focus, QDateEdit:focus {{ border-color:{theme['accent']}; }}
+        """
+        for field in (self.cashier_combo, self.section_combo, self.date_edit, self.period_combo, self.currency_combo):
+            field.setStyleSheet(field_style)
+        button_style = f"""
+            QPushButton {{background:{theme['topbar']};color:{theme['title']};border:1px solid #cbd5e1;border-radius:6px;font-weight:bold;}}
+            QPushButton:hover {{background:{theme['content']};border-color:{theme['accent']};}}
+        """
+        for button in (self.prev_period_btn, self.next_period_btn, self.today_btn):
+            button.setStyleSheet(button_style)
+        self.summary_title_lbl.setStyleSheet(f"font-size:16px;font-weight:bold;color:{theme['title']};background:transparent;")
+        self.summary_stats_lbl.setStyleSheet(f"font-size:13px;font-weight:bold;color:{theme['muted']};background:transparent;")
+        self.cashier_lbl.setStyleSheet(f"color:{theme['muted']};font-weight:bold;background:transparent;")
+        self.section_lbl.setStyleSheet(f"color:{theme['muted']};font-weight:bold;background:transparent;")
+        self.date_lbl.setStyleSheet(f"color:{theme['muted']};font-weight:bold;background:transparent;")
+        self.table.setStyleSheet(self._table_style(theme))
+        self.table.verticalHeader().setStyleSheet(self._vertical_header_style())
+
+    @staticmethod
+    def _vertical_header_style():
+        return """
+            QHeaderView::section {
+                background:#f3f4f6;
+                color:#374151;
+                border:none;
+                border-right:1px solid #d1d5db;
+                border-bottom:1px solid #d1d5db;
+                padding:6px;
+                font-weight:600;
+            }
+        """
+
+    def _table_style(self, theme=None):
+        if theme:
+            return f"""
+                QTableWidget {{background:{theme['topbar']};color:{theme['title']};border:1px solid #dbe3ef;border-radius:8px;font-size:13px;gridline-color:#dbe3ef;}}
+                QTableWidget::item {{padding:8px 10px;}}
+                QTableWidget::item:selected {{background:{theme['accent']};color:{theme['nav_active']};}}
+                QHeaderView::section {{background:{theme['sidebar_alt']};color:{theme['nav_text']};border:none;border-right:1px solid {theme['border']};padding:10px;font-size:13px;font-weight:bold;}}
+            """
+        return """
+            QTableWidget{background:white;color:#1e293b;border:1px solid #dbe3ef;border-radius:8px;font-size:13px;gridline-color:#dbe3ef;}
+            QTableWidget::item{padding:8px 10px;}
+            QTableWidget::item:selected{background:#2563eb;color:white;}
+            QHeaderView::section{background:#1e3a5f;color:white;border:none;border-right:1px solid #315579;padding:10px;font-size:13px;font-weight:bold;}
         """

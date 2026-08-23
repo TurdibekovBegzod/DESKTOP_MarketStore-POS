@@ -496,7 +496,7 @@ class LoginDialog(QDialog):
             self._complete_online_login(
                 online_session["token"],
                 online_session["user"],
-                allow_legacy_import=True,
+                allow_legacy_import=False,
             )
         except (api_client.ApiClientError, db.AppError, Exception) as exc:
             self.error_lbl.setStyleSheet("color: #f87171; font-size: 12px;")
@@ -527,7 +527,7 @@ class LoginDialog(QDialog):
         db.remove_foreign_online_accounts(user["id"], user_uid)
         db.save_account_session(api_user, token)
         self.logged_user = dict(user)
-        self.logged_user["role"] = "cashier"
+        # role is already correctly set by sync_online_user (admin for account owners)
         self.logged_user["api_access_token"] = token
         self.logged_user["api_user_id"] = api_user.get("id")
         self.logged_user["api_user_uid"] = user_uid
