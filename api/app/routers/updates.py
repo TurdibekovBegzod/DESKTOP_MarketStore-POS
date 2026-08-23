@@ -80,7 +80,7 @@ async def check_app_version(
     github_url = f"https://api.github.com/repos/{repo}/releases/latest"
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=10.0) as client:
             resp = await client.get(github_url, headers=headers)
             if resp.status_code == 200:
                 release_data = resp.json()
@@ -210,3 +210,26 @@ async def download_app_release(
     except Exception as exc:
         await client.aclose()
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/install.sh")
+async def get_install_sh():
+    """Serve universal Linux & macOS bash installer script."""
+    installer_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "installer", "install.sh")
+    if os.path.exists(installer_path):
+        with open(installer_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        return StreamingResponse(iter([content.encode("utf-8")]), media_type="text/plain")
+    return StreamingResponse(iter([b"echo 'MarketStore POS installer script not found'; exit 1\n"]), media_type="text/plain")
+
+
+@router.get("/install.ps1")
+async def get_install_ps1():
+    """Serve Windows PowerShell installer script."""
+    installer_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "installer", "install.ps1")
+    if os.path.exists(installer_path):
+        with open(installer_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        return StreamingResponse(iter([content.encode("utf-8")]), media_type="text/plain")
+    return StreamingResponse(iter([b"Write-Host 'MarketStore POS installer script not found'\n"]), media_type="text/plain")
+

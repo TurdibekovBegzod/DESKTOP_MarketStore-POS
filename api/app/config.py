@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     password_reset_cooldown_seconds: int = 60
     celery_broker_url: str = "redis://localhost:6379/0"
     celery_result_backend: str = "redis://localhost:6379/1"
-    github_repo: str = "TurdibekovBegzod/MarketStore-POS"
+    github_repo: str = "TurdibekovBegzod/DESKTOP_MarketStore-POS"
     github_token: str | None = None
     app_releases_dir: str = "releases"
 

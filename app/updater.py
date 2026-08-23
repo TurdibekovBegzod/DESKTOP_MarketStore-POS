@@ -120,7 +120,7 @@ class UpdateCheckerThread(QThread):
         self._check_github_direct()
 
     def _check_github_direct(self):
-        github_url = "https://api.github.com/repos/TurdibekovBegzod/MarketStore-POS/releases/latest"
+        github_url = "https://api.github.com/repos/TurdibekovBegzod/DESKTOP_MarketStore-POS/releases/latest"
         try:
             req = urllib.request.Request(
                 github_url,

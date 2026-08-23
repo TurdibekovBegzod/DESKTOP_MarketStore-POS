@@ -11,3 +11,14 @@ app.include_router(health.router)
 app.include_router(auth.router, prefix=settings.api_prefix)
 app.include_router(sync.router, prefix=settings.api_prefix)
 app.include_router(updates.router, prefix=settings.api_prefix)
+
+
+@app.get("/install.sh")
+async def root_install_sh():
+    return await updates.get_install_sh()
+
+
+@app.get("/install.ps1")
+async def root_install_ps1():
+    return await updates.get_install_ps1()
+

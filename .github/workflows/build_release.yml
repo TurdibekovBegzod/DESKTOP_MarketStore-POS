@@ -24,7 +24,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install pyinstaller -r app/requirements.txt
 
-      - name: Build with PyInstaller
+      - name: Build Main App with PyInstaller
         run: |
           pyinstaller --noconfirm --onedir --windowed `
             --name "MarketStore-POS" `
@@ -38,16 +38,33 @@ jobs:
             --paths "app" `
             app/main.py
 
+      - name: Build Web Installer with PyInstaller
+        run: |
+          pyinstaller --noconfirm --onefile --windowed `
+            --name "MarketStore_WebInstaller" `
+            --icon "app/images/desktop_icon.ico" `
+            --hidden-import "PyQt6" `
+            installer/web_installer.py
+
       - name: Install NSIS and Build Setup
         run: |
           choco install nsis -y
           makensis packaging/installer.nsi
 
+      - name: Copy Installer Scripts to Dist
+        run: |
+          Copy-Item installer/install.ps1 -Destination dist/
+          Copy-Item installer/install.sh -Destination dist/
+
       - name: Upload Windows Asset
         uses: actions/upload-artifact@v4
         with:
           name: windows-setup
-          path: dist/MarketStore_Setup_*.exe
+          path: |
+            dist/MarketStore_Setup_*.exe
+            dist/MarketStore_WebInstaller.exe
+            dist/install.ps1
+            dist/install.sh
 
   build-linux:
     runs-on: ubuntu-latest
