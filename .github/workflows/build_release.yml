@@ -1,0 +1,188 @@
+name: Build and Release Cross-Platform Packages
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller -r app/requirements.txt
+
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller --noconfirm --onedir --windowed `
+            --name "MarketStore-POS" `
+            --icon "app/images/desktop_icon.ico" `
+            --add-data "app/images;images" `
+            --hidden-import "PyQt6" `
+            --hidden-import "openpyxl" `
+            --hidden-import "barcode" `
+            --hidden-import "psycopg" `
+            --hidden-import "sqlalchemy" `
+            --paths "app" `
+            app/main.py
+
+      - name: Install NSIS and Build Setup
+        run: |
+          choco install nsis -y
+          makensis packaging/installer.nsi
+
+      - name: Upload Windows Asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-setup
+          path: dist/MarketStore_Setup_*.exe
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb-cursor0 libxkbcommon-x11-0 libegl1-mesa
+          python -m pip install --upgrade pip
+          pip install pyinstaller -r app/requirements.txt
+
+      - name: Build PyInstaller Binary
+        run: |
+          pyinstaller --noconfirm --onedir --windowed \
+            --name "MarketStore-POS" \
+            --add-data "app/images:images" \
+            --hidden-import "PyQt6" \
+            --hidden-import "openpyxl" \
+            --hidden-import "barcode" \
+            --paths "app" \
+            app/main.py
+
+      - name: Create AppImage Structure
+        run: |
+          chmod +x packaging/build_linux.sh
+          # Build AppDir
+          mkdir -p dist/MarketStore.AppDir/usr/bin
+          mkdir -p dist/MarketStore.AppDir/usr/share/icons/hicolor/256x256/apps
+          mkdir -p dist/MarketStore.AppDir/usr/share/applications
+          cp -r dist/MarketStore-POS/* dist/MarketStore.AppDir/usr/bin/
+          cp app/images/desktop.png dist/MarketStore.AppDir/usr/share/icons/hicolor/256x256/apps/marketstore.png
+          cp app/images/desktop.png dist/MarketStore.AppDir/marketstore.png
+
+          cat << 'EOF' > dist/MarketStore.AppDir/marketstore.desktop
+          [Desktop Entry]
+          Name=MarketStore POS
+          Exec=MarketStore-POS
+          Icon=marketstore
+          Type=Application
+          Categories=Office;Finance;
+          EOF
+
+          cat << 'EOF' > dist/MarketStore.AppDir/AppRun
+          #!/bin/sh
+          HERE="$(dirname "$(readlink -f "${0}")")"
+          export PATH="${HERE}/usr/bin:${PATH}"
+          export LD_LIBRARY_PATH="${HERE}/usr/lib:${LD_LIBRARY_PATH}"
+          exec "${HERE}/usr/bin/MarketStore-POS" "$@"
+          EOF
+          chmod +x dist/MarketStore.AppDir/AppRun
+
+          # Download appimagetool
+          wget https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage -O appimagetool
+          chmod +x appimagetool
+          ./appimagetool --appimage-extract
+          ./squashfs-root/AppRun dist/MarketStore.AppDir dist/MarketStore_1.0.0.AppImage
+
+      - name: Upload Linux Asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-appimage
+          path: dist/*.AppImage
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller -r app/requirements.txt
+
+      - name: Build macOS App
+        run: |
+          pyinstaller --noconfirm --windowed \
+            --name "MarketStore POS" \
+            --icon "app/images/desktop_icon.ico" \
+            --add-data "app/images:images" \
+            --hidden-import "PyQt6" \
+            --hidden-import "openpyxl" \
+            --hidden-import "barcode" \
+            --paths "app" \
+            app/main.py
+
+      - name: Create DMG
+        run: |
+          npm install --global create-dmg
+          create-dmg \
+            --volname "MarketStore POS Installer" \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon-size 100 \
+            --app-drop-link 420 185 \
+            "dist/MarketStore_1.0.0.dmg" \
+            "dist/MarketStore POS.app" || true
+
+      - name: Upload macOS Asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: |
+            dist/*.dmg
+            dist/*.app
+
+  publish-release:
+    needs: [build-windows, build-linux, build-macos]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            windows-setup/*
+            linux-appimage/*
+            macos-dmg/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
