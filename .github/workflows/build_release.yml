@@ -6,6 +6,9 @@ on:
       - 'v*'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -49,7 +52,8 @@ jobs:
       - name: Install NSIS and Build Setup
         run: |
           choco install nsis -y
-          makensis packaging/installer.nsi
+          cd packaging
+          makensis installer.nsi
 
       - name: Copy Installer Scripts to Dist
         run: |
@@ -96,10 +100,8 @@ jobs:
             --paths "app" \
             app/main.py
 
-      - name: Create AppImage Structure
+      - name: Create Linux Tarball & AppImage
         run: |
-          chmod +x packaging/build_linux.sh
-          # Build AppDir
           mkdir -p dist/MarketStore.AppDir/usr/bin
           mkdir -p dist/MarketStore.AppDir/usr/share/icons/hicolor/256x256/apps
           mkdir -p dist/MarketStore.AppDir/usr/share/applications
@@ -125,17 +127,24 @@ jobs:
           EOF
           chmod +x dist/MarketStore.AppDir/AppRun
 
-          # Download appimagetool
+          # Create Tarball archive
+          cd dist
+          tar -czf MarketStore_1.0.1_linux_x86_64.tar.gz MarketStore-POS/
+          cd ..
+
+          # Download and build AppImage
           wget https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage -O appimagetool
           chmod +x appimagetool
           ./appimagetool --appimage-extract
-          ./squashfs-root/AppRun dist/MarketStore.AppDir dist/MarketStore_1.0.0.AppImage
+          ARCH=x86_64 ./squashfs-root/AppRun dist/MarketStore.AppDir dist/MarketStore_1.0.1.AppImage || true
 
       - name: Upload Linux Asset
         uses: actions/upload-artifact@v4
         with:
           name: linux-appimage
-          path: dist/*.AppImage
+          path: |
+            dist/*.AppImage
+            dist/*.tar.gz
 
   build-macos:
     runs-on: macos-latest
@@ -166,8 +175,11 @@ jobs:
             --paths "app" \
             app/main.py
 
-      - name: Create DMG
+      - name: Create DMG & Zip
         run: |
+          cd dist
+          zip -r "MarketStore_1.0.1_macos.zip" "MarketStore POS.app"
+          cd ..
           npm install --global create-dmg
           create-dmg \
             --volname "MarketStore POS Installer" \
@@ -175,7 +187,7 @@ jobs:
             --window-size 600 400 \
             --icon-size 100 \
             --app-drop-link 420 185 \
-            "dist/MarketStore_1.0.0.dmg" \
+            "dist/MarketStore_1.0.1.dmg" \
             "dist/MarketStore POS.app" || true
 
       - name: Upload macOS Asset
@@ -184,11 +196,13 @@ jobs:
           name: macos-dmg
           path: |
             dist/*.dmg
-            dist/*.app
+            dist/*.zip
 
   publish-release:
     needs: [build-windows, build-linux, build-macos]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     if: startsWith(github.ref, 'refs/tags/')
     steps:
       - name: Download all artifacts
