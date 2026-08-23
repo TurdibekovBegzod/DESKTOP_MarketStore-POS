@@ -58,6 +58,32 @@ def get_default_api_base() -> str:
         return "http://localhost:8000"
 
 
+def match_asset_for_platform(assets: list, platform_name: str):
+    platform_name = platform_name.lower().strip()
+    patterns = {
+        "windows": [r"\.exe$", r"\.msi$"],
+        "linux": [r"\.appimage$", r"\.deb$", r"\.tar\.gz$"],
+        "macos": [r"\.dmg$", r"\.pkg$", r"\.zip$"],
+    }
+    target_patterns = patterns.get(platform_name, [r"\.exe$"])
+
+    for p in target_patterns:
+        for asset in assets:
+            name = asset.get("name", "").lower()
+            if re.search(p, name) and ("setup" in name or "installer" in name):
+                return asset
+
+    for p in target_patterns:
+        for asset in assets:
+            name = asset.get("name", "").lower()
+            if re.search(p, name):
+                return asset
+
+    if assets:
+        return assets[0]
+    return None
+
+
 class UpdateCheckerThread(QThread):
     """Asynchronously checks for new updates via backend API or direct GitHub."""
     update_available = pyqtSignal(dict)
@@ -71,25 +97,94 @@ class UpdateCheckerThread(QThread):
         self.current_version = APP_VERSION
 
     def run(self):
+        # 1. Try Backend API first if reachable
         url = f"{self.api_base_url}/api/v1/app/version?platform={self.platform}&current_version={self.current_version}"
         try:
             req = urllib.request.Request(
                 url,
                 headers={"User-Agent": f"MarketStore-POS/{self.current_version}"},
             )
-            with urllib.request.urlopen(req, timeout=8) as response:
+            with urllib.request.urlopen(req, timeout=3) as response:
                 if response.status == 200:
                     data = json.loads(response.read().decode("utf-8"))
                     if data.get("has_update"):
                         self.update_available.emit(data)
                     else:
                         self.no_update_available.emit(data)
+                    return
+        except Exception:
+            # Backend server not running or unreachable -> Fallback to GitHub Releases directly
+            pass
+
+        # 2. Direct GitHub Releases API Fallback
+        self._check_github_direct()
+
+    def _check_github_direct(self):
+        github_url = "https://api.github.com/repos/TurdibekovBegzod/MarketStore-POS/releases/latest"
+        try:
+            req = urllib.request.Request(
+                github_url,
+                headers={
+                    "Accept": "application/vnd.github+json",
+                    "User-Agent": f"MarketStore-POS/{self.current_version}",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=8) as response:
+                if response.status == 200:
+                    release_data = json.loads(response.read().decode("utf-8"))
+                    tag_name = release_data.get("tag_name", "1.0.0")
+                    latest_version = re.sub(r"^[^\d]*", "", tag_name)
+                    assets = release_data.get("assets", [])
+                    matching_asset = match_asset_for_platform(assets, self.platform)
+
+                    has_update = is_newer_version(latest_version, self.current_version)
+                    download_url = ""
+                    file_name = ""
+                    file_size = 0
+
+                    if matching_asset:
+                        download_url = matching_asset.get("browser_download_url", "")
+                        file_name = matching_asset.get("name", "")
+                        file_size = matching_asset.get("size", 0)
+                    elif release_data.get("zipball_url"):
+                        download_url = release_data.get("zipball_url")
+
+                    data = {
+                        "has_update": has_update,
+                        "latest_version": latest_version,
+                        "tag_name": tag_name,
+                        "current_version": self.current_version,
+                        "platform": self.platform,
+                        "release_name": release_data.get("name") or f"Release {tag_name}",
+                        "release_notes": release_data.get("body") or "Yangi versiya va yaxshilanishlar.",
+                        "published_at": release_data.get("published_at"),
+                        "download_url": download_url,
+                        "file_name": file_name,
+                        "file_size": file_size,
+                    }
+                    if has_update:
+                        self.update_available.emit(data)
+                    else:
+                        self.no_update_available.emit(data)
+                elif response.status == 404:
+                    self.no_update_available.emit({
+                        "has_update": False,
+                        "latest_version": self.current_version,
+                        "current_version": self.current_version,
+                        "release_notes": "Hozircha yangi release chiqarilmagan.",
+                    })
                 else:
-                    self.check_error.emit(f"Server javobi: {response.status}")
+                    self.check_error.emit(f"GitHub API javobi: {response.status}")
         except urllib.error.HTTPError as exc:
-            self.check_error.emit(f"HTTP Xatolik: {exc.code} {exc.reason}")
-        except urllib.error.URLError as exc:
-            self.check_error.emit(f"Serverga ulanib bo'lmadi: {exc.reason}")
+            if exc.code == 404:
+                self.no_update_available.emit({
+                    "has_update": False,
+                    "latest_version": self.current_version,
+                    "current_version": self.current_version,
+                    "release_notes": "Hozircha yangi release chiqarilmagan.",
+                })
+            else:
+                self.check_error.emit(f"GitHub HTTP xatolik: {exc.code} {exc.reason}")
         except Exception as exc:
             self.check_error.emit(f"Yangilanishni tekshirishda xatolik: {str(exc)}")
 
