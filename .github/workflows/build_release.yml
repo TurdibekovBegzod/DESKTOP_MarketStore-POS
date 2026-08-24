@@ -132,7 +132,7 @@ jobs:
 
           # Create Tarball archive
           cd dist
-          tar -czf MarketStore_1.0.1_linux_x86_64.tar.gz MarketStore-POS/
+          tar -czf MarketStore_${{ github.ref_name }}_linux_x86_64.tar.gz MarketStore-POS/
           cd ..
 
           # Download and build AppImage
@@ -141,7 +141,7 @@ jobs:
             chmod +x appimagetool
             ./appimagetool --appimage-extract || true
             if [ -d squashfs-root ]; then
-              ARCH=x86_64 ./squashfs-root/AppRun dist/MarketStore.AppDir dist/MarketStore_1.0.1.AppImage || true
+              ARCH=x86_64 ./squashfs-root/AppRun dist/MarketStore.AppDir dist/MarketStore_${{ github.ref_name }}.AppImage || true
             fi
           fi
 
@@ -184,7 +184,7 @@ jobs:
       - name: Create DMG & Zip
         run: |
           cd dist
-          zip -r "MarketStore_1.0.1_macos.zip" "MarketStore POS.app"
+          zip -r "MarketStore_${{ github.ref_name }}_macos.zip" "MarketStore POS.app"
           cd ..
           npm install --global create-dmg || true
           create-dmg \
@@ -193,7 +193,7 @@ jobs:
             --window-size 600 400 \
             --icon-size 100 \
             --app-drop-link 420 185 \
-            "dist/MarketStore_1.0.1.dmg" \
+            "dist/MarketStore_${{ github.ref_name }}.dmg" \
             "dist/MarketStore POS.app" || true
 
       - name: Upload macOS Asset
