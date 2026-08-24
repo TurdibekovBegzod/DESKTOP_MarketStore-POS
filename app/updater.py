@@ -48,14 +48,17 @@ def is_newer_version(latest_ver: str, current_ver: str) -> bool:
 
 
 def get_default_api_base() -> str:
-    """Read API base URL from settings or default localhost/server."""
+    """Read API base URL from settings or default live production server."""
     try:
+        from api_client import DEFAULT_API_URL
         from database import get_app_settings
         settings = get_app_settings()
-        url = settings.get("sync_server_url") or "http://localhost:8000"
+        url = settings.get("sync_server_url") or os.environ.get("MARKETSTORE_API_URL") or DEFAULT_API_URL
+        # Strip /api/v1 if present to get root base URL
+        url = re.sub(r"/api/v1/?$", "", str(url).strip())
         return url.rstrip("/")
     except Exception:
-        return "http://localhost:8000"
+        return "http://169.58.152.33:8000"
 
 
 def match_asset_for_platform(assets: list, platform_name: str):
@@ -104,7 +107,7 @@ class UpdateCheckerThread(QThread):
                 url,
                 headers={"User-Agent": f"MarketStore-POS/{self.current_version}"},
             )
-            with urllib.request.urlopen(req, timeout=3) as response:
+            with urllib.request.urlopen(req, timeout=4) as response:
                 if response.status == 200:
                     data = json.loads(response.read().decode("utf-8"))
                     if data.get("has_update"):
@@ -166,6 +169,7 @@ class UpdateCheckerThread(QThread):
                         self.update_available.emit(data)
                     else:
                         self.no_update_available.emit(data)
+                    return
                 elif response.status == 404:
                     self.no_update_available.emit({
                         "has_update": False,
@@ -173,8 +177,7 @@ class UpdateCheckerThread(QThread):
                         "current_version": self.current_version,
                         "release_notes": "Hozircha yangi release chiqarilmagan.",
                     })
-                else:
-                    self.check_error.emit(f"GitHub API javobi: {response.status}")
+                    return
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
                 self.no_update_available.emit({
@@ -183,8 +186,45 @@ class UpdateCheckerThread(QThread):
                     "current_version": self.current_version,
                     "release_notes": "Hozircha yangi release chiqarilmagan.",
                 })
-            else:
-                self.check_error.emit(f"GitHub HTTP xatolik: {exc.code} {exc.reason}")
+                return
+            # On 403 rate limit -> Fallback to web redirect method (no rate limits)
+        except Exception:
+            pass
+
+        # 3. Fallback to GitHub Web Page Redirect (Unlimited / No API rate limits)
+        self._check_github_web_redirect()
+
+    def _check_github_web_redirect(self):
+        try:
+            web_url = "https://github.com/TurdibekovBegzod/DESKTOP_MarketStore-POS/releases/latest"
+            req = urllib.request.Request(web_url, headers={"User-Agent": "Mozilla/5.0"})
+            opener = urllib.request.build_opener(urllib.request.HTTPRedirectHandler)
+            with opener.open(req, timeout=8) as resp:
+                final_url = resp.geturl()
+                tag_name = final_url.rstrip("/").split("/")[-1]
+                latest_version = re.sub(r"^[^\d]*", "", tag_name)
+
+                has_update = is_newer_version(latest_version, self.current_version)
+                download_ext = ".exe" if self.platform == "windows" else (".AppImage" if self.platform == "linux" else ".dmg")
+                download_url = f"https://github.com/TurdibekovBegzod/DESKTOP_MarketStore-POS/releases/download/{tag_name}/MarketStore_Setup_{latest_version}{download_ext}"
+
+                data = {
+                    "has_update": has_update,
+                    "latest_version": latest_version,
+                    "tag_name": tag_name,
+                    "current_version": self.current_version,
+                    "platform": self.platform,
+                    "release_name": f"MarketStore POS {tag_name}",
+                    "release_notes": f"Yangi versiya {tag_name} chiqarildi.",
+                    "published_at": None,
+                    "download_url": download_url,
+                    "file_name": f"MarketStore_Setup_{latest_version}{download_ext}",
+                    "file_size": 0,
+                }
+                if has_update:
+                    self.update_available.emit(data)
+                else:
+                    self.no_update_available.emit(data)
         except Exception as exc:
             self.check_error.emit(f"Yangilanishni tekshirishda xatolik: {str(exc)}")
 

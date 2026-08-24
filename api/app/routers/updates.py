@@ -61,33 +61,80 @@ def match_asset_for_platform(assets: list[dict], platform_name: str) -> Optional
     return None
 
 
+_RELEASE_CACHE = {"data": None, "timestamp": 0}
+CACHE_TTL_SECONDS = 300  # 5 minutes
+
+
 @router.get("/version")
 async def check_app_version(
     platform: str = Query("windows", description="Client OS: windows, linux, macos"),
     current_version: str = Query("1.0.0", description="Current installed client version"),
 ):
+    import time
+    global _RELEASE_CACHE
     settings = get_settings()
     repo = settings.github_repo
     token = settings.github_token
 
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "User-Agent": "MarketStore-Updater/1.0",
-    }
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+    release_data = None
+    now = time.time()
 
-    github_url = f"https://api.github.com/repos/{repo}/releases/latest"
+    # Use in-memory cache if fresh
+    if _RELEASE_CACHE["data"] is not None and (now - _RELEASE_CACHE["timestamp"] < CACHE_TTL_SECONDS):
+        release_data = _RELEASE_CACHE["data"]
+    else:
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "MarketStore-Updater/1.0",
+        }
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
 
-    try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=10.0) as client:
-            resp = await client.get(github_url, headers=headers)
-            if resp.status_code == 200:
-                release_data = resp.json()
-                tag_name = release_data.get("tag_name", "1.0.0")
+        github_url = f"https://api.github.com/repos/{repo}/releases/latest"
+
+        try:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=10.0) as client:
+                resp = await client.get(github_url, headers=headers)
+                if resp.status_code == 200:
+                    release_data = resp.json()
+                    _RELEASE_CACHE = {"data": release_data, "timestamp": now}
+                elif resp.status_code == 403 and _RELEASE_CACHE["data"] is not None:
+                    # Rate limit exceeded on GitHub API -> use cached data
+                    release_data = _RELEASE_CACHE["data"]
+        except Exception:
+            if _RELEASE_CACHE["data"] is not None:
+                release_data = _RELEASE_CACHE["data"]
+
+    if not release_data:
+        # Fallback to web redirect method (no rate limits)
+        try:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=10.0) as client:
+                resp = await client.get(f"https://github.com/{repo}/releases/latest")
+                tag_name = str(resp.url).rstrip("/").split("/")[-1]
                 latest_version = re.sub(r"^[^\d]*", "", tag_name)
-                assets = release_data.get("assets", [])
-                matching_asset = match_asset_for_platform(assets, platform)
+                has_update = is_newer_version(latest_version, current_version)
+                ext = ".exe" if platform == "windows" else (".AppImage" if platform == "linux" else ".dmg")
+                return {
+                    "has_update": has_update,
+                    "latest_version": latest_version,
+                    "tag_name": tag_name,
+                    "current_version": current_version,
+                    "platform": platform,
+                    "release_name": f"MarketStore POS {tag_name}",
+                    "release_notes": f"Yangi versiya {tag_name} chiqarildi.",
+                    "published_at": None,
+                    "download_url": f"https://github.com/{repo}/releases/download/{tag_name}/MarketStore_Setup_{latest_version}{ext}",
+                    "file_name": f"MarketStore_Setup_{latest_version}{ext}",
+                    "file_size": 0,
+                }
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"Versiya ma'lumotlarini olib bo'lmadi: {str(exc)}")
+
+    if release_data:
+        tag_name = release_data.get("tag_name", "1.0.0")
+        latest_version = re.sub(r"^[^\d]*", "", tag_name)
+        assets = release_data.get("assets", [])
+        matching_asset = match_asset_for_platform(assets, platform)
 
                 has_update = is_newer_version(latest_version, current_version)
                 download_url = ""
