@@ -1,4 +1,5 @@
 import unittest
+import ssl
 from PyQt6.QtWidgets import QApplication
 
 import sys
@@ -10,6 +11,7 @@ if app_dir not in sys.path:
     sys.path.insert(0, app_dir)
 
 from version import APP_VERSION, APP_NAME
+from ssl_support import ca_bundle_path, create_ssl_context, verify_ca_bundle
 from updater import (
     _asset_sha256,
     get_client_platform,
@@ -44,6 +46,16 @@ class TestUpdaterModule(unittest.TestCase):
     def test_platform_detection(self):
         platform_name = get_client_platform()
         self.assertIn(platform_name, ["windows", "linux", "macos"])
+
+    def test_verified_https_context_has_trusted_certificates(self):
+        context = create_ssl_context()
+        self.assertIsInstance(context, ssl.SSLContext)
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(context.check_hostname)
+        self.assertGreater(len(context.get_ca_certs()), 0)
+        self.assertTrue(verify_ca_bundle())
+        if ca_bundle_path():
+            self.assertTrue(os.path.isfile(ca_bundle_path()))
 
     def test_update_asset_must_match_platform_and_digest_must_be_sha256(self):
         assets = [{"name": "notes.txt"}, {"name": "MarketStore_Setup_1.2.3.exe"}]

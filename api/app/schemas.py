@@ -1,11 +1,14 @@
+import base64
+import binascii
+import hashlib
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 ALLOWED_SYNC_TABLES = frozenset({
-    "users", "categories", "currencies", "app_settings", "product_sections",
+    "users", "categories", "currencies", "app_settings", "account_assets", "product_sections",
     "product_templates", "product_template_fields", "products", "product_attributes",
     "customers", "suppliers", "supplier_debt_movements", "debtors",
     "debtor_debt_movements", "expense_categories", "expenses", "sales", "sale_items",
@@ -155,6 +158,34 @@ class RecordIn(BaseModel):
         if value not in ALLOWED_SYNC_TABLES:
             raise ValueError("Unsupported sync table")
         return value
+
+    @model_validator(mode="after")
+    def validate_account_asset(self):
+        if self.table_name != "account_assets" or (self.deleted_at and not self.data):
+            return self
+        content = self.data.get("content_base64")
+        if not isinstance(content, str) or len(content) > 700_000:
+            raise ValueError("Account asset payload is invalid or too large")
+        try:
+            raw = base64.b64decode(content, validate=True)
+        except (ValueError, binascii.Error):
+            raise ValueError("Account asset must contain valid base64") from None
+        if not raw or len(raw) > 512 * 1024:
+            raise ValueError("Account asset must be between 1 byte and 512 KB")
+        if self.data.get("media_type") != "image/png" or not raw.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise ValueError("Only PNG account assets are supported")
+        if len(raw) < 24 or raw[12:16] != b"IHDR":
+            raise ValueError("Account asset PNG header is invalid")
+        width = int.from_bytes(raw[16:20], "big")
+        height = int.from_bytes(raw[20:24], "big")
+        if width < 1 or height < 1 or width > 1024 or height > 1024:
+            raise ValueError("Account asset dimensions must be between 1 and 1024 pixels")
+        expected_digest = hashlib.sha256(raw).hexdigest()
+        if self.data.get("sha256") != expected_digest:
+            raise ValueError("Account asset checksum does not match")
+        if str(self.data.get("id") or "") != self.local_id:
+            raise ValueError("Account asset id does not match local_id")
+        return self
 
 
 class RecordOut(RecordIn):

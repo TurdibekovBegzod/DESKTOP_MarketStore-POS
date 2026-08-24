@@ -97,6 +97,19 @@ class DatabaseOrmRegressionTest(unittest.TestCase):
             conn.close()
         self.assertIn("user_id", debtor_columns)
 
+        conn = sqlite3.connect(self.path)
+        try:
+            account_asset_tables = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='account_assets'"
+                ).fetchall()
+            }
+        finally:
+            conn.close()
+        self.assertEqual(account_asset_tables, {"account_assets"})
+        self.assertIn("011_create_account_assets", applied_versions)
+
     def test_settings_auth_users_and_login_history(self):
         settings = db.get_app_settings()
         self.assertEqual(settings["app_name"], "Market POS")
@@ -140,6 +153,34 @@ class DatabaseOrmRegressionTest(unittest.TestCase):
         self.assertIsNotNone(db.authenticate("cashier2@gmail.com", "pass2"))
         db.delete_user(user["id"])
         self.assertFalse([row for row in db.get_users() if row["email"] == "cashier2@gmail.com"])
+
+    def test_account_logo_asset_is_exported_and_deleted_through_sync(self):
+        logo = b"\x89PNG\r\n\x1a\naccount-logo-test"
+        saved = db.save_account_asset("desktop_logo", logo, "image/png")
+        self.assertEqual(saved["size"], len(logo))
+        self.assertEqual(db.get_account_asset("desktop_logo")["content"], logo)
+        self.assertTrue(db.has_pending_sync_for_table("account_assets"))
+
+        exported = [
+            record
+            for record in db.export_sync_records(incremental=True)
+            if record["table_name"] == "account_assets"
+        ]
+        self.assertEqual(len(exported), 1)
+        self.assertEqual(exported[0]["local_id"], "desktop_logo")
+        self.assertEqual(exported[0]["data"]["media_type"], "image/png")
+
+        db.mark_sync_pushed()
+        self.assertTrue(db.delete_account_asset("desktop_logo"))
+        self.assertIsNone(db.get_account_asset("desktop_logo"))
+        deleted = [
+            record
+            for record in db.export_sync_records(incremental=True)
+            if record["table_name"] == "account_assets"
+        ]
+        self.assertEqual(len(deleted), 1)
+        self.assertEqual(deleted[0]["local_id"], "desktop_logo")
+        self.assertIsNotNone(deleted[0]["deleted_at"])
 
     def test_return_timestamp_migration_backfills_existing_returns(self):
         admin = db.authenticate("admin@gmail.com", "admin123")

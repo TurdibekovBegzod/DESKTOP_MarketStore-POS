@@ -27,12 +27,26 @@ jobs:
           python -m pip install --upgrade pip
           pip install pyinstaller -r app/requirements.txt
 
+      - name: Require Windows Signing Credentials
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_BASE64)) {
+            throw "Missing WINDOWS_CERTIFICATE_BASE64 repository secret."
+          }
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)) {
+            throw "Missing WINDOWS_CERTIFICATE_PASSWORD repository secret."
+          }
+
       - name: Build Main App with PyInstaller
         run: |
-          pyinstaller --noconfirm --onedir --windowed `
+          pyinstaller --noconfirm --clean --noupx --onedir --windowed `
             --name "MarketStore-POS" `
             --icon "app/images/desktop_icon.ico" `
             --add-data "app/images;images" `
+            --collect-data "certifi" `
             --hidden-import "PyQt6" `
             --hidden-import "sqlalchemy" `
             --paths "app" `
@@ -40,11 +54,25 @@ jobs:
 
       - name: Build Web Installer with PyInstaller
         run: |
-          pyinstaller --noconfirm --onefile --windowed `
+          pyinstaller --noconfirm --clean --noupx --onefile --windowed `
             --name "MarketStore_WebInstaller" `
             --icon "app/images/desktop_icon.ico" `
+            --collect-data "certifi" `
             --hidden-import "PyQt6" `
+            --paths "app" `
             installer/web_installer.py
+
+      - name: Sign Windows Applications
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          ./packaging/sign_windows.ps1 -Files @(
+            "dist/MarketStore-POS/MarketStore-POS.exe",
+            "dist/MarketStore_WebInstaller.exe"
+          )
 
       - name: Install NSIS and Build Setup
         run: |
@@ -55,6 +83,17 @@ jobs:
           Set-Location packaging
           & $nsisExe "/DPRODUCT_VERSION=$version" installer.nsi
           Set-Location ..
+
+      - name: Sign and Verify Windows Setup
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          $setup = Get-ChildItem "dist/MarketStore_Setup_*.exe" | Select-Object -First 1
+          if ($null -eq $setup) { throw "NSIS setup executable was not created." }
+          ./packaging/sign_windows.ps1 -Files @($setup.FullName)
 
       - name: Copy Installer Scripts to Dist
         run: |
@@ -92,9 +131,10 @@ jobs:
 
       - name: Build PyInstaller Binary
         run: |
-          pyinstaller --noconfirm --onedir --windowed \
+          pyinstaller --noconfirm --clean --noupx --onedir --windowed \
             --name "MarketStore-POS" \
             --add-data "app/images:images" \
+            --collect-data "certifi" \
             --hidden-import "PyQt6" \
             --paths "app" \
             app/main.py
@@ -166,6 +206,57 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r app/requirements.txt
 
+      - name: Require macOS Signing Credentials
+        shell: bash
+        env:
+          MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for name in \
+            MACOS_CERTIFICATE_BASE64 \
+            MACOS_CERTIFICATE_PASSWORD \
+            MACOS_SIGNING_IDENTITY \
+            APPLE_ID \
+            APPLE_TEAM_ID \
+            APPLE_APP_SPECIFIC_PASSWORD; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Missing ${name} repository secret." >&2
+              exit 1
+            fi
+          done
+
+      - name: Import Developer ID Certificate
+        shell: bash
+        env:
+          MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          export CERTIFICATE_PATH="$RUNNER_TEMP/marketstore-developer-id.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/marketstore-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+
+          python -c 'import base64, os, pathlib; pathlib.Path(os.environ["CERTIFICATE_PATH"]).write_bytes(base64.b64decode(os.environ["MACOS_CERTIFICATE_BASE64"]))'
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" \
+            -P "$MACOS_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -s -k "$KEYCHAIN_PASSWORD" \
+            "$KEYCHAIN_PATH"
+
+          rm -f "$CERTIFICATE_PATH"
+          echo "MACOS_KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+
       - name: Resolve Release Version
         shell: bash
         run: |
@@ -177,19 +268,26 @@ jobs:
           echo "APP_VERSION=${APP_VERSION}" >> "$GITHUB_ENV"
 
       - name: Build macOS App
+        env:
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
         run: |
-          pyinstaller --noconfirm --windowed \
+          pyinstaller --noconfirm --clean --noupx --windowed \
             --name "MarketStore POS" \
             --add-data "app/images:images" \
+            --collect-data "certifi" \
             --hidden-import "PyQt6" \
             --target-architecture "arm64" \
             --osx-bundle-identifier "uz.marketstore.pos" \
+            --codesign-identity "$MACOS_SIGNING_IDENTITY" \
             --paths "app" \
             app/main.py
 
       - name: Finalize and Verify App Bundle
         shell: bash
+        env:
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
         run: |
+          set -euo pipefail
           APP="dist/MarketStore POS.app"
           PLIST="$APP/Contents/Info.plist"
           set_plist_string() {
@@ -205,16 +303,49 @@ jobs:
           set_plist_string "CFBundleVersion" "${GITHUB_RUN_NUMBER}"
           set_plist_string "LSMinimumSystemVersion" "11.0"
 
-          codesign --force --deep --sign - "$APP"
+          codesign \
+            --force \
+            --options runtime \
+            --timestamp \
+            --sign "$MACOS_SIGNING_IDENTITY" \
+            "$APP"
           plutil -lint "$PLIST"
           codesign --verify --deep --strict --verbose=2 "$APP"
+          codesign --display --verbose=4 "$APP"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$PLIST")" = "uz.marketstore.pos"
           file "$APP/Contents/MacOS/MarketStore POS" | grep -q "arm64"
           MARKETSTORE_PACKAGING_SMOKE_TEST=1 "$APP/Contents/MacOS/MarketStore POS"
 
+      - name: Notarize and Staple macOS App
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          set -euo pipefail
+          APP="dist/MarketStore POS.app"
+          NOTARY_ZIP="$RUNNER_TEMP/MarketStore-notarization.zip"
+
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "$NOTARY_ZIP"
+          xcrun notarytool submit "$NOTARY_ZIP" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --wait
+          xcrun stapler staple "$APP"
+          xcrun stapler validate "$APP"
+          spctl --assess --type execute --verbose=4 "$APP"
+
       - name: Create and Test macOS Packages
         shell: bash
+        env:
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
         run: |
+          set -euo pipefail
           APP="dist/MarketStore POS.app"
           ZIP="dist/MarketStore_${APP_VERSION}_macos_arm64.zip"
           DMG="dist/MarketStore_${APP_VERSION}_macos_arm64.dmg"
@@ -235,6 +366,16 @@ jobs:
             -srcfolder "$DMG_ROOT" \
             -ov -format UDZO "$DMG"
 
+          codesign --force --timestamp --sign "$MACOS_SIGNING_IDENTITY" "$DMG"
+          xcrun notarytool submit "$DMG" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --wait
+          xcrun stapler staple "$DMG"
+          xcrun stapler validate "$DMG"
+          spctl --assess --type open --context context:primary-signature --verbose=4 "$DMG"
+
           DMG_MOUNT="$(mktemp -d)"
           hdiutil attach "$DMG" -nobrowse -readonly -mountpoint "$DMG_MOUNT"
           trap 'hdiutil detach "$DMG_MOUNT" >/dev/null 2>&1 || true' EXIT
@@ -254,6 +395,14 @@ jobs:
             dist/*_macos_arm64.dmg
             dist/*_macos_arm64.zip
             dist/*_macos_arm64.sha256
+
+      - name: Remove Temporary Signing Keychain
+        if: always()
+        shell: bash
+        run: |
+          if [[ -n "${MACOS_KEYCHAIN_PATH:-}" && -f "$MACOS_KEYCHAIN_PATH" ]]; then
+            security delete-keychain "$MACOS_KEYCHAIN_PATH"
+          fi
 
   publish-release:
     needs: [build-windows, build-linux, build-macos]

@@ -15,6 +15,7 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     String,
+    Text,
     UniqueConstraint,
     and_,
     case,
@@ -69,6 +70,7 @@ SYNC_TABLES = (
     "categories",
     "currencies",
     "app_settings",
+    "account_assets",
     "product_sections",
     "suppliers",
     "customers",
@@ -606,6 +608,15 @@ class AppSetting(Base):
     value = Column(String)
 
 
+class AccountAsset(Base):
+    __tablename__ = "account_assets"
+    id = Column(String, primary_key=True)
+    media_type = Column(String, nullable=False, default="application/octet-stream")
+    content_base64 = Column(Text, nullable=False)
+    sha256 = Column(String, nullable=False)
+    updated_at = Column(String, nullable=False, server_default=text("CURRENT_TIMESTAMP"))
+
+
 class UserSetting(Base):
     __tablename__ = "user_settings"
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
@@ -881,6 +892,7 @@ MIGRATIONS = (
     ("008_add_product_creator", "Track which user created each product."),
     ("009_add_expense_cashier", "Link salary deductions to the selected cashier."),
     ("010_add_sale_item_returned_at", "Track when sold items are returned."),
+    ("011_create_account_assets", "Store account-specific synchronized branding assets."),
 )
 
 
@@ -1210,6 +1222,10 @@ def _migration_add_sale_item_returned_at(conn):
     """)
 
 
+def _migration_create_account_assets(conn):
+    Base.metadata.create_all(bind=conn, tables=[AccountAsset.__table__])
+
+
 MIGRATION_FUNCTIONS = {
     "001_create_missing_tables": _migration_create_missing_tables,
     "002_add_missing_columns": _migration_add_missing_columns,
@@ -1221,6 +1237,7 @@ MIGRATION_FUNCTIONS = {
     "008_add_product_creator": _migration_add_product_creator,
     "009_add_expense_cashier": _migration_add_expense_cashier,
     "010_add_sale_item_returned_at": _migration_add_sale_item_returned_at,
+    "011_create_account_assets": _migration_create_account_assets,
 }
 
 
@@ -1685,6 +1702,8 @@ def import_sync_records(records):
                 table_name = record.get("table_name")
                 if table_name not in SYNC_TABLES or not _has_table(conn, table_name):
                     continue
+                if table_name == "account_assets":
+                    _sync_state_set(conn, "account_assets_server_seen", "1")
                 data = record.get("data") or {}
                 if not isinstance(data, dict):
                     continue
@@ -1772,6 +1791,95 @@ def save_app_settings(settings, user_id=None):
                 row = session.get(UserSetting, {"user_id": user_id, "key": key}) or UserSetting(user_id=user_id, key=key)
                 row.value = str(value)
                 session.merge(row)
+
+
+MAX_ACCOUNT_ASSET_BYTES = 512 * 1024
+
+
+def save_account_asset(asset_id, content, media_type="application/octet-stream"):
+    asset_key = str(asset_id or "").strip()
+    if not asset_key or len(asset_key) > 120:
+        raise AppError("Account asset identifikatori noto'g'ri.")
+    if not isinstance(content, (bytes, bytearray)):
+        raise AppError("Account asset binary formatda bo'lishi kerak.")
+    raw = bytes(content)
+    if not raw:
+        raise AppError("Bo'sh account asset saqlab bo'lmaydi.")
+    if len(raw) > MAX_ACCOUNT_ASSET_BYTES:
+        raise AppError("Logo hajmi 512 KB dan oshmasligi kerak.")
+    digest = hashlib.sha256(raw).hexdigest()
+    encoded = base64.b64encode(raw).decode("ascii")
+    with session_scope() as session:
+        row = session.get(AccountAsset, asset_key) or AccountAsset(id=asset_key)
+        row.media_type = str(media_type or "application/octet-stream")[:120]
+        row.content_base64 = encoded
+        row.sha256 = digest
+        row.updated_at = _utc_now()
+        session.merge(row)
+    return Row(id=asset_key, media_type=row.media_type, sha256=digest, size=len(raw))
+
+
+def get_account_asset(asset_id):
+    asset_key = str(asset_id or "").strip()
+    if not asset_key:
+        return None
+    with session_scope() as session:
+        row = session.get(AccountAsset, asset_key)
+        if row is None:
+            return None
+        try:
+            raw = base64.b64decode(row.content_base64 or "", validate=True)
+        except (ValueError, TypeError):
+            return None
+        if not raw or len(raw) > MAX_ACCOUNT_ASSET_BYTES:
+            return None
+        digest = hashlib.sha256(raw).hexdigest()
+        if row.sha256 and not secrets.compare_digest(digest, row.sha256):
+            return None
+        return Row(
+            id=row.id,
+            media_type=row.media_type,
+            content=raw,
+            sha256=digest,
+            updated_at=row.updated_at,
+        )
+
+
+def delete_account_asset(asset_id):
+    asset_key = str(asset_id or "").strip()
+    if not asset_key:
+        return False
+    with session_scope() as session:
+        row = session.get(AccountAsset, asset_key)
+        if row is None:
+            return False
+        session.delete(row)
+    return True
+
+
+def has_pending_sync_for_table(table_name):
+    if table_name not in SYNC_TABLES:
+        return False
+    with _get_engine().begin() as conn:
+        _ensure_sync_outbox_table(conn)
+        outbox = conn.exec_driver_sql(
+            "SELECT 1 FROM sync_outbox WHERE table_name=? LIMIT 1",
+            (table_name,),
+        ).fetchone()
+        if outbox:
+            return True
+        if not _has_table(conn, "sync_tombstones"):
+            return False
+        tombstone = conn.exec_driver_sql(
+            "SELECT 1 FROM sync_tombstones WHERE table_name=? LIMIT 1",
+            (table_name,),
+        ).fetchone()
+        return tombstone is not None
+
+
+def has_seen_server_account_assets():
+    with _get_engine().begin() as conn:
+        return _sync_state_get(conn, "account_assets_server_seen") == "1"
 
 
 def _product_row(product, category_name=None, template_name=None, supplier_name=None, creator_name=None, creator_role=None):

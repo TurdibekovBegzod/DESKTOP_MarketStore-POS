@@ -46,17 +46,28 @@ def push_local_changes(user, batch_size=1000, incremental=True):
     }
 
 
-def pull_server_changes(user):
+def pull_server_changes(user, table_name=None):
     token = _token_for_user(user)
-    result = api_client.pull_sync_records(token, include_deleted=True)
+    result = api_client.pull_sync_records(
+        token,
+        table_name=table_name,
+        include_deleted=True,
+    )
     records = result.get("records", [])
     imported = db.import_sync_records(records)
-    db.mark_server_bootstrap_complete()
+    if table_name is None:
+        db.mark_server_bootstrap_complete()
     return {
         "received": len(records),
         "imported": imported,
         "server_time": result.get("server_time"),
     }
+
+
+def refresh_account_assets(user):
+    if db.has_pending_sync_for_table("account_assets"):
+        return {"received": 0, "imported": 0, "skipped": "local_changes_pending"}
+    return pull_server_changes(user, table_name="account_assets")
 
 
 def synchronize_account_storage(user):

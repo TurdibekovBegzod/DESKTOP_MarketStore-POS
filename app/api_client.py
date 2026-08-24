@@ -4,6 +4,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from urllib.parse import urlencode
 
+from ssl_support import create_ssl_context
 
 DEFAULT_API_URL = "http://169.58.152.33:8000/api/v1"
 
@@ -59,7 +60,7 @@ def _request_json(path, payload=None, token=None, timeout=10):
 
     request = Request(f"{_api_base_url()}{path}", data=data, headers=headers, method="POST" if payload is not None else "GET")
     try:
-        with urlopen(request, timeout=timeout) as response:
+        with urlopen(request, timeout=timeout, context=create_ssl_context()) as response:
             body = response.read().decode("utf-8")
             return json.loads(body) if body else {}
     except HTTPError as exc:

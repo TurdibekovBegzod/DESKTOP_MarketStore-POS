@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QIcon, QPixmap
 
+from ssl_support import create_ssl_context
 
 API_BASE = "http://169.58.152.33:8000"
 GITHUB_API = "https://api.github.com/repos/TurdibekovBegzod/DESKTOP_MarketStore-POS/releases/latest"
@@ -70,7 +71,7 @@ class InstallWorker(QThread):
         api_url = f"{API_BASE}/api/v1/app/version?platform={self.platform}&current_version=0.0.0"
         try:
             req = urllib.request.Request(api_url, headers={"User-Agent": "MarketStore-Installer"})
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with urllib.request.urlopen(req, timeout=5, context=create_ssl_context()) as resp:
                 if resp.status == 200:
                     data = json.loads(resp.read().decode("utf-8"))
                     if data.get("download_url"):
@@ -85,7 +86,7 @@ class InstallWorker(QThread):
             GITHUB_API,
             headers={"Accept": "application/vnd.github+json", "User-Agent": "MarketStore-Installer"}
         )
-        with urllib.request.urlopen(req, timeout=8) as resp:
+        with urllib.request.urlopen(req, timeout=8, context=create_ssl_context()) as resp:
             if resp.status == 200:
                 data = json.loads(resp.read().decode("utf-8"))
                 tag = data.get("tag_name", "1.0.0")
@@ -132,7 +133,7 @@ class InstallWorker(QThread):
         req = urllib.request.Request(url, headers={"User-Agent": "MarketStore-Installer"})
         start_time = time.time()
 
-        with urllib.request.urlopen(req, timeout=30) as resp, open(target_file, "wb") as out:
+        with urllib.request.urlopen(req, timeout=30, context=create_ssl_context()) as resp, open(target_file, "wb") as out:
             total_bytes = int(resp.headers.get("Content-Length", expected_size or 0))
             downloaded = 0
             chunk_size = 1024 * 64

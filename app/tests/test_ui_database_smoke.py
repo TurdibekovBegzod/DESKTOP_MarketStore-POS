@@ -24,6 +24,40 @@ class UiDatabaseSmokeTest(unittest.TestCase):
                 path = self.path + suffix
                 if os.path.exists(path):
                     os.remove(path)
+            marker = os.path.join(
+                os.path.dirname(self.path),
+                f".{os.path.basename(self.path)}.account_logo_migrated",
+            )
+            if os.path.exists(marker):
+                os.remove(marker)
+
+    def test_account_logo_pixmap_is_stored_as_a_synced_asset(self):
+        from PyQt6.QtGui import QColor, QPixmap
+        from PyQt6.QtWidgets import QApplication
+        from ui.main_window import (
+            ACCOUNT_LOGO_MAX_SIDE,
+            load_custom_logo_pixmap,
+            reset_custom_logo,
+            save_custom_logo,
+        )
+
+        app = QApplication.instance() or QApplication([])
+        pixmap = QPixmap(640, 320)
+        pixmap.fill(QColor("#16a34a"))
+
+        self.assertTrue(save_custom_logo(pixmap))
+        asset = db.get_account_asset("desktop_logo")
+        self.assertIsNotNone(asset)
+        self.assertEqual(asset["media_type"], "image/png")
+        self.assertTrue(asset["content"].startswith(b"\x89PNG\r\n\x1a\n"))
+        restored = load_custom_logo_pixmap()
+        self.assertFalse(restored.isNull())
+        self.assertLessEqual(restored.width(), ACCOUNT_LOGO_MAX_SIDE)
+        self.assertLessEqual(restored.height(), ACCOUNT_LOGO_MAX_SIDE)
+        app.processEvents()
+
+        self.assertTrue(reset_custom_logo())
+        self.assertIsNone(db.get_account_asset("desktop_logo"))
 
     def test_all_database_backed_widgets_load(self):
         from PyQt6.QtWidgets import QApplication

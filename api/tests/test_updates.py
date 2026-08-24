@@ -1,3 +1,5 @@
+import base64
+import hashlib
 import unittest
 
 from pydantic import ValidationError
@@ -26,6 +28,38 @@ class UpdateRouterTest(unittest.TestCase):
         record = RecordIn(table_name="products", local_id="1")
         with self.assertRaises(ValidationError):
             PushRequest(records=[record] * 1001)
+
+    def test_account_logo_payload_is_validated(self):
+        png = (
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+            + (64).to_bytes(4, "big")
+            + (64).to_bytes(4, "big")
+            + b"small-test-logo"
+        )
+        encoded = base64.b64encode(png).decode("ascii")
+        record = RecordIn(
+            table_name="account_assets",
+            local_id="desktop_logo",
+            data={
+                "id": "desktop_logo",
+                "media_type": "image/png",
+                "content_base64": encoded,
+                "sha256": hashlib.sha256(png).hexdigest(),
+            },
+        )
+        self.assertEqual(record.local_id, "desktop_logo")
+
+        with self.assertRaises(ValidationError):
+            RecordIn(
+                table_name="account_assets",
+                local_id="desktop_logo",
+                data={
+                    "id": "desktop_logo",
+                    "media_type": "image/png",
+                    "content_base64": encoded,
+                    "sha256": "0" * 64,
+                },
+            )
 
 
 if __name__ == "__main__":

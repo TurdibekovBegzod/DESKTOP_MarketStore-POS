@@ -15,6 +15,7 @@ import hashlib
 from urllib.parse import urljoin, urlparse
 from PyQt6.QtCore import QThread, pyqtSignal
 
+from ssl_support import create_ssl_context
 from version import APP_VERSION
 
 
@@ -116,7 +117,7 @@ class UpdateCheckerThread(QThread):
                 url,
                 headers={"User-Agent": f"MarketStore-POS/{self.current_version}"},
             )
-            with urllib.request.urlopen(req, timeout=4) as response:
+            with urllib.request.urlopen(req, timeout=4, context=create_ssl_context()) as response:
                 if response.status == 200:
                     data = json.loads(response.read().decode("utf-8"))
                     api_url = urlparse(self.api_base_url)
@@ -145,7 +146,7 @@ class UpdateCheckerThread(QThread):
                     "User-Agent": f"MarketStore-POS/{self.current_version}",
                 },
             )
-            with urllib.request.urlopen(req, timeout=8) as response:
+            with urllib.request.urlopen(req, timeout=8, context=create_ssl_context()) as response:
                 if response.status == 200:
                     release_data = json.loads(response.read().decode("utf-8"))
                     tag_name = release_data.get("tag_name", "1.0.0")
@@ -212,7 +213,10 @@ class UpdateCheckerThread(QThread):
         try:
             web_url = "https://github.com/TurdibekovBegzod/DESKTOP_MarketStore-POS/releases/latest"
             req = urllib.request.Request(web_url, headers={"User-Agent": "Mozilla/5.0"})
-            opener = urllib.request.build_opener(urllib.request.HTTPRedirectHandler)
+            opener = urllib.request.build_opener(
+                urllib.request.HTTPSHandler(context=create_ssl_context()),
+                urllib.request.HTTPRedirectHandler(),
+            )
             with opener.open(req, timeout=8) as resp:
                 final_url = resp.geturl()
                 tag_name = final_url.rstrip("/").split("/")[-1]
@@ -296,7 +300,7 @@ class UpdateDownloaderThread(QThread):
                 url,
                 headers={"User-Agent": f"MarketStore-POS/{APP_VERSION}"},
             )
-            with urllib.request.urlopen(req, timeout=30) as response:
+            with urllib.request.urlopen(req, timeout=30, context=create_ssl_context()) as response:
                 total_size = int(response.headers.get("Content-Length", 0))
                 downloaded = 0
                 digest = hashlib.sha256()

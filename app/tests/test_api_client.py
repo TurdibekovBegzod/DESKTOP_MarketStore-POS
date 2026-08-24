@@ -1,3 +1,4 @@
+import ssl
 import unittest
 from unittest.mock import patch
 
@@ -5,6 +6,18 @@ import api_client
 
 
 class ApiClientPaginationTest(unittest.TestCase):
+    def test_requests_use_verified_ssl_context(self):
+        with patch("api_client.urlopen") as urlopen:
+            response = urlopen.return_value.__enter__.return_value
+            response.read.return_value = b'{"status":"ok"}'
+            result = api_client._request_json("/health")
+
+        self.assertEqual(result, {"status": "ok"})
+        context = urlopen.call_args.kwargs["context"]
+        self.assertIsInstance(context, ssl.SSLContext)
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(context.check_hostname)
+
     def test_pull_collects_all_server_pages(self):
         responses = [
             {

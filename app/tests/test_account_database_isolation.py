@@ -103,6 +103,43 @@ class AccountDatabaseIsolationTest(unittest.TestCase):
         debtor_id = db.add_debtor("Cashier", debt_currency="UZS", user_id=cashier_id)
         self.assertGreater(debtor_id, 0)
 
+    def test_account_logo_moves_between_computers_but_not_between_accounts(self):
+        computer_a = os.path.join(self.storage_root, "computer-a")
+        computer_b = os.path.join(self.storage_root, "computer-b")
+        logo = b"\x89PNG\r\n\x1a\nshared-account-logo"
+
+        db.activate_account_database(
+            "shared-account",
+            email="shared@example.com",
+            storage_root=computer_a,
+        )
+        db.init_db(seed_defaults=False)
+        db.save_account_asset("desktop_logo", logo, "image/png")
+        server_records = [
+            record
+            for record in db.export_sync_records()
+            if record["table_name"] == "account_assets"
+        ]
+        self.assertEqual(len(server_records), 1)
+
+        db.activate_account_database(
+            "shared-account",
+            email="shared@example.com",
+            storage_root=computer_b,
+        )
+        db.init_db(seed_defaults=False)
+        self.assertIsNone(db.get_account_asset("desktop_logo"))
+        self.assertEqual(db.import_sync_records(server_records), 1)
+        self.assertEqual(db.get_account_asset("desktop_logo")["content"], logo)
+
+        db.activate_account_database(
+            "different-account",
+            email="different@example.com",
+            storage_root=computer_b,
+        )
+        db.init_db(seed_defaults=False)
+        self.assertIsNone(db.get_account_asset("desktop_logo"))
+
     def test_same_email_keeps_local_database_when_server_uid_changes(self):
         self._open_account("original-server-uid", "stable@example.com")
         db.add_product({

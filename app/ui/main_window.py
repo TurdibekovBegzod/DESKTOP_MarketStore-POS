@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (
     QTextEdit, QDateEdit, QTabWidget, QScrollArea, QCalendarWidget,
     QFileDialog, QMenu, QWidgetAction
 )
-from PyQt6.QtCore import QPoint, QTimer, Qt, pyqtSignal, pyqtSlot, QEvent, QThread, QObject
+from PyQt6.QtCore import QByteArray, QBuffer, QIODevice, QPoint, QTimer, Qt, pyqtSignal, pyqtSlot, QEvent, QThread, QObject
 from PyQt6.QtGui import QAction, QPixmap, QPainter, QIcon, QColor, QImage
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -43,28 +43,92 @@ DOWN_ARROW_PATH = resource_path("images/down_full.png")
 if not Path(DOWN_ARROW_PATH).exists():
     DOWN_ARROW_PATH = resource_path("images/down_fill.png")
 SYNC_ICON_PATH = resource_path("images/sync.png")
+ACCOUNT_LOGO_ASSET_ID = "desktop_logo"
+ACCOUNT_LOGO_MAX_SIDE = 256
 
 
 def get_custom_logo_path() -> str:
-    return str(Path(db.DATA_DIR) / "custom_logo.png")
+    database_path = Path(db.DB_PATH)
+    return str(database_path.parent / "custom_logo.png")
+
+
+def _logo_migration_marker_path() -> Path:
+    database_path = Path(db.DB_PATH)
+    return database_path.with_name(f".{database_path.name}.account_logo_migrated")
+
+
+def _mark_logo_migration_complete():
+    marker = _logo_migration_marker_path()
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch(exist_ok=True)
+    except OSError:
+        pass
 
 
 def save_custom_logo(pixmap: QPixmap) -> bool:
-    target = Path(get_custom_logo_path())
-    temporary = target.with_name(f".{target.name}.tmp")
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if not pixmap.save(str(temporary), "PNG"):
+        normalized = pixmap
+        if pixmap.width() > ACCOUNT_LOGO_MAX_SIDE or pixmap.height() > ACCOUNT_LOGO_MAX_SIDE:
+            normalized = pixmap.scaled(
+                ACCOUNT_LOGO_MAX_SIDE,
+                ACCOUNT_LOGO_MAX_SIDE,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        encoded = QByteArray()
+        buffer = QBuffer(encoded)
+        if not buffer.open(QIODevice.OpenModeFlag.WriteOnly):
             return False
-        temporary.replace(target)
+        if not normalized.save(buffer, "PNG"):
+            return False
+        buffer.close()
+        db.save_account_asset(ACCOUNT_LOGO_ASSET_ID, bytes(encoded), "image/png")
+        _mark_logo_migration_complete()
         return True
-    except OSError:
+    except (OSError, db.AppError):
         return False
-    finally:
-        try:
-            temporary.unlink(missing_ok=True)
-        except OSError:
-            pass
+
+
+def load_custom_logo_pixmap() -> QPixmap:
+    asset = db.get_account_asset(ACCOUNT_LOGO_ASSET_ID)
+    if asset:
+        pixmap = QPixmap()
+        if pixmap.loadFromData(asset["content"], "PNG") and not pixmap.isNull():
+            return pixmap
+
+    marker = _logo_migration_marker_path()
+    if not marker.exists() and not db.has_seen_server_account_assets():
+        account_logo = Path(get_custom_logo_path())
+        legacy_logo = Path(db.DATA_DIR) / "custom_logo.png"
+        candidates = [account_logo]
+        if legacy_logo != account_logo:
+            candidates.append(legacy_logo)
+        for candidate in candidates:
+            if not candidate.exists():
+                continue
+            pixmap = QPixmap(str(candidate))
+            if not pixmap.isNull() and save_custom_logo(pixmap):
+                try:
+                    candidate.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return pixmap
+        _mark_logo_migration_complete()
+    elif not marker.exists():
+        _mark_logo_migration_complete()
+    return QPixmap(DESKTOP_ICON_PATH)
+
+
+def reset_custom_logo() -> bool:
+    try:
+        db.delete_account_asset(ACCOUNT_LOGO_ASSET_ID)
+        _mark_logo_migration_complete()
+        for path in {Path(get_custom_logo_path()), Path(db.DATA_DIR) / "custom_logo.png"}:
+            path.unlink(missing_ok=True)
+        return True
+    except (OSError, db.AppError):
+        return False
 
 
 class NavGroupButton(QPushButton):
@@ -380,8 +444,7 @@ class SettingsDialog(QDialog):
         layout.addLayout(btns)
 
     def _update_settings_logo_preview(self):
-        custom_logo = get_custom_logo_path()
-        pix = QPixmap(custom_logo) if Path(custom_logo).exists() else QPixmap(DESKTOP_ICON_PATH)
+        pix = load_custom_logo_pixmap()
         if not pix.isNull():
             self.settings_logo_preview.setPixmap(
                 pix.scaled(32, 32, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
@@ -405,21 +468,22 @@ class SettingsDialog(QDialog):
             self._update_settings_logo_preview()
             if self.parent() and hasattr(self.parent(), "_set_logo_icon"):
                 self.parent()._set_logo_icon()
+            if self.parent() and hasattr(self.parent(), "_schedule_logo_sync"):
+                self.parent()._schedule_logo_sync()
             QMessageBox.information(self, labels["logo_saved_title"], labels["logo_saved"])
         else:
             QMessageBox.warning(self, labels["logo_save_error_title"], labels["logo_save_error"])
 
     def _reset_logo_image(self):
         labels = TEXTS.get(self.settings["language"], TEXTS["uz"])
-        custom_logo = Path(get_custom_logo_path())
-        try:
-            custom_logo.unlink(missing_ok=True)
-        except OSError:
+        if not reset_custom_logo():
             QMessageBox.warning(self, labels["logo_save_error_title"], labels["logo_reset_error"])
             return
         self._update_settings_logo_preview()
         if self.parent() and hasattr(self.parent(), "_set_logo_icon"):
             self.parent()._set_logo_icon()
+        if self.parent() and hasattr(self.parent(), "_schedule_logo_sync"):
+            self.parent()._schedule_logo_sync()
         QMessageBox.information(self, labels["logo_reset_title"], labels["logo_reset"])
 
     def get_data(self):
@@ -1367,11 +1431,21 @@ class MainWindow(QMainWindow):
             self._refresh_sync_status()
             return
         if db.get_sync_status()["pending"]:
+            if db.has_pending_sync_for_table("account_assets"):
+                self._push_to_server(show_message=False)
+                return
+            try:
+                result = sync_service.pull_server_changes(self.user, table_name="account_assets")
+                if result.get("imported"):
+                    self._set_logo_icon()
+            except Exception:
+                pass
             self._refresh_sync_status()
             return
         try:
             result = sync_service.pull_server_changes(self.user)
             if result.get("imported"):
+                self._set_logo_icon()
                 self._reload_current_page()
         except Exception:
             pass
@@ -1428,6 +1502,7 @@ class MainWindow(QMainWindow):
 
     def _on_pull_success(self, result, show_message):
         self._cleanup_sync_thread()
+        self._set_logo_icon()
         self._reload_current_page()
         self._refresh_sync_status()
         if show_message:
@@ -1472,9 +1547,16 @@ class MainWindow(QMainWindow):
             self._sync_thread = None
             self._sync_worker = None
 
+    def _schedule_logo_sync(self):
+        if not self._sync_available():
+            return
+        if hasattr(self, "_sync_thread") and self._sync_thread and self._sync_thread.isRunning():
+            QTimer.singleShot(1000, self._schedule_logo_sync)
+            return
+        self._push_to_server(show_message=False)
+
     def _set_logo_icon(self):
-        custom_logo = get_custom_logo_path()
-        pixmap = QPixmap(custom_logo) if Path(custom_logo).exists() else QPixmap(DESKTOP_ICON_PATH)
+        pixmap = load_custom_logo_pixmap()
         if not pixmap.isNull():
             self.logo_icon_lbl.setPixmap(
                 pixmap.scaled(
@@ -1485,6 +1567,9 @@ class MainWindow(QMainWindow):
                 )
             )
             self.setWindowIcon(QIcon(pixmap))
+            app = QApplication.instance()
+            if app:
+                app.setWindowIcon(QIcon(pixmap))
 
     def _change_logo_image(self):
         if self.user.get("role") != "admin":
@@ -1506,6 +1591,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, self.labels["logo_save_error_title"], self.labels["logo_save_error"])
             return
         self._set_logo_icon()
+        self._schedule_logo_sync()
         QMessageBox.information(self, self.labels["logo_saved_title"], self.labels["logo_saved"])
 
     def _user_display_name(self):

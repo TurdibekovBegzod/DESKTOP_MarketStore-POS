@@ -32,7 +32,10 @@ def main():
 
     # Release CI uses this to verify that the packaged Qt runtime can start.
     if os.environ.get("MARKETSTORE_PACKAGING_SMOKE_TEST") == "1":
-        print("MARKETSTORE_PACKAGING_SMOKE_OK")
+        from ssl_support import verify_ca_bundle
+
+        ca_source = verify_ca_bundle()
+        print(f"MARKETSTORE_PACKAGING_SMOKE_OK CA={ca_source}")
         return 0
 
     # Global font
@@ -56,7 +59,12 @@ def main():
     if recent_user:
         recent_user["role"] = "cashier"
         try:
-            sync_service.synchronize_account_storage(recent_user)
+            sync_result = sync_service.synchronize_account_storage(recent_user)
+            if sync_result.get("direction") == "none":
+                try:
+                    sync_service.refresh_account_assets(recent_user)
+                except Exception:
+                    pass
         except Exception:
             recent_user = None
     if recent_user:

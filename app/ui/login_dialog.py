@@ -531,7 +531,9 @@ class LoginDialog(QDialog):
         self.logged_user["api_access_token"] = token
         self.logged_user["api_user_id"] = api_user.get("id")
         self.logged_user["api_user_uid"] = user_uid
-        sync_service.synchronize_account_storage(self.logged_user)
+        sync_result = sync_service.synchronize_account_storage(self.logged_user)
+        if sync_result.get("direction") == "none":
+            sync_service.refresh_account_assets(self.logged_user)
         db.log_login(self.logged_user)
         self.accept()
 
