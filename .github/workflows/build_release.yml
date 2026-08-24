@@ -52,8 +52,11 @@ jobs:
       - name: Install NSIS and Build Setup
         run: |
           choco install nsis -y
-          cd packaging
-          makensis installer.nsi
+          $nsisExe = "C:\Program Files (x86)\NSIS\makensis.exe"
+          if (-not (Test-Path $nsisExe)) { $nsisExe = "makensis" }
+          Set-Location packaging
+          & $nsisExe installer.nsi
+          Set-Location ..
 
       - name: Copy Installer Scripts to Dist
         run: |
@@ -85,7 +88,7 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxcb-cursor0 libxkbcommon-x11-0 libegl1-mesa
+          sudo apt-get install -y libxcb-cursor0 libxkbcommon-x11-0 libgl1 libegl1
           python -m pip install --upgrade pip
           pip install pyinstaller -r app/requirements.txt
 
@@ -133,10 +136,14 @@ jobs:
           cd ..
 
           # Download and build AppImage
-          wget https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage -O appimagetool
-          chmod +x appimagetool
-          ./appimagetool --appimage-extract
-          ARCH=x86_64 ./squashfs-root/AppRun dist/MarketStore.AppDir dist/MarketStore_1.0.1.AppImage || true
+          wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage -O appimagetool || true
+          if [ -f appimagetool ]; then
+            chmod +x appimagetool
+            ./appimagetool --appimage-extract || true
+            if [ -d squashfs-root ]; then
+              ARCH=x86_64 ./squashfs-root/AppRun dist/MarketStore.AppDir dist/MarketStore_1.0.1.AppImage || true
+            fi
+          fi
 
       - name: Upload Linux Asset
         uses: actions/upload-artifact@v4
@@ -167,7 +174,6 @@ jobs:
         run: |
           pyinstaller --noconfirm --windowed \
             --name "MarketStore POS" \
-            --icon "app/images/desktop_icon.ico" \
             --add-data "app/images:images" \
             --hidden-import "PyQt6" \
             --hidden-import "openpyxl" \
@@ -180,7 +186,7 @@ jobs:
           cd dist
           zip -r "MarketStore_1.0.1_macos.zip" "MarketStore POS.app"
           cd ..
-          npm install --global create-dmg
+          npm install --global create-dmg || true
           create-dmg \
             --volname "MarketStore POS Installer" \
             --window-pos 200 120 \
