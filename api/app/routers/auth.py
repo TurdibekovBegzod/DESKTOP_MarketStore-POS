@@ -38,7 +38,7 @@ def _seconds_until(value: datetime, now: datetime | None = None) -> int:
     return max(0, math.ceil((value - now).total_seconds()))
 
 
-def _new_signup_code(db: Session, user: User, now: datetime) -> tuple[str, datetime]:
+def _new_signup_code(db: Session, user: User, now: datetime) -> tuple[str, datetime, EmailVerificationCode]:
     settings = get_settings()
     code = f"{secrets.randbelow(900000) + 100000}"
     expires_at = now + timedelta(minutes=settings.signup_verification_code_minutes)
@@ -47,8 +47,21 @@ def _new_signup_code(db: Session, user: User, now: datetime) -> tuple[str, datet
         .where(EmailVerificationCode.user_id == user.id, EmailVerificationCode.used_at.is_(None))
         .values(used_at=now)
     )
-    db.add(EmailVerificationCode(user_id=user.id, code_hash=hash_secret(code), expires_at=expires_at))
-    return code, expires_at
+    code_row = EmailVerificationCode(user_id=user.id, code_hash=hash_secret(code), expires_at=expires_at)
+    db.add(code_row)
+    return code, expires_at, code_row
+
+
+def _enqueue_email_or_invalidate(db: Session, code_row, task, *args) -> None:
+    try:
+        task.delay(*args)
+    except Exception as exc:
+        code_row.used_at = datetime.now(timezone.utc)
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Email service is temporarily unavailable. Please try again.",
+        ) from exc
 
 
 def _registration_challenge(expires_at: datetime, resend_after_seconds: int, now: datetime) -> RegistrationChallengeOut:
@@ -96,9 +109,9 @@ def register_start(payload: RegistrationStart, db: Session = Depends(get_db)):
         remaining = _seconds_until(latest_code.expires_at, now)
         return _registration_challenge(latest_code.expires_at, remaining, now)
 
-    code, expires_at = _new_signup_code(db, user, now)
+    code, expires_at, code_row = _new_signup_code(db, user, now)
     db.commit()
-    send_signup_verification_code_task.delay(user.email, code)
+    _enqueue_email_or_invalidate(db, code_row, send_signup_verification_code_task, user.email, code)
     return _registration_challenge(expires_at, settings.signup_verification_resend_seconds, now)
 
 
@@ -139,9 +152,9 @@ def register(payload: UserCreate, db: Session = Depends(get_db)):
         remaining = _seconds_until(latest_code.expires_at, now)
         return _registration_challenge(latest_code.expires_at, remaining, now)
 
-    code, expires_at = _new_signup_code(db, user, now)
+    code, expires_at, code_row = _new_signup_code(db, user, now)
     db.commit()
-    send_signup_verification_code_task.delay(user.email, code)
+    _enqueue_email_or_invalidate(db, code_row, send_signup_verification_code_task, user.email, code)
     return _registration_challenge(expires_at, settings.signup_verification_resend_seconds, now)
 
 
@@ -169,9 +182,9 @@ def resend_registration_code(payload: RegistrationResend, db: Session = Depends(
                 headers={"Retry-After": str(retry_after)},
             )
 
-    code, expires_at = _new_signup_code(db, user, now)
+    code, expires_at, code_row = _new_signup_code(db, user, now)
     db.commit()
-    send_signup_verification_code_task.delay(user.email, code)
+    _enqueue_email_or_invalidate(db, code_row, send_signup_verification_code_task, user.email, code)
     return _registration_challenge(expires_at, settings.signup_verification_resend_seconds, now)
 
 
@@ -252,10 +265,11 @@ def request_password_reset(payload: PasswordResetRequest, db: Session = Depends(
         .where(PasswordResetCode.user_id == user.id, PasswordResetCode.used_at.is_(None))
         .values(used_at=datetime.now(timezone.utc))
     )
-    db.add(PasswordResetCode(user_id=user.id, code_hash=hash_secret(code), expires_at=expires_at))
+    code_row = PasswordResetCode(user_id=user.id, code_hash=hash_secret(code), expires_at=expires_at)
+    db.add(code_row)
     db.commit()
 
-    send_password_reset_code_task.delay(user.email, code)
+    _enqueue_email_or_invalidate(db, code_row, send_password_reset_code_task, user.email, code)
     return generic_response
 
 

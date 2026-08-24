@@ -4,6 +4,16 @@ from typing import Any
 from pydantic import BaseModel, Field, field_validator
 
 
+ALLOWED_SYNC_TABLES = frozenset({
+    "users", "categories", "currencies", "app_settings", "product_sections",
+    "product_templates", "product_template_fields", "products", "product_attributes",
+    "customers", "suppliers", "supplier_debt_movements", "debtors",
+    "debtor_debt_movements", "expense_categories", "expenses", "sales", "sale_items",
+    "stock_movements", "inventory_check_sessions", "inventory_check_items",
+    "finance_manual_movements",
+})
+
+
 def normalize_email(value: str) -> str:
     normalized = (value or "").strip().lower()
     if "@" not in normalized or "." not in normalized.rsplit("@", 1)[-1]:
@@ -139,6 +149,13 @@ class RecordIn(BaseModel):
     deleted_at: str | None = Field(default=None, max_length=40)
     source_device_key: str | None = Field(default=None, max_length=120)
 
+    @field_validator("table_name")
+    @classmethod
+    def validate_table_name(cls, value: str) -> str:
+        if value not in ALLOWED_SYNC_TABLES:
+            raise ValueError("Unsupported sync table")
+        return value
+
 
 class RecordOut(RecordIn):
     id: int
@@ -152,8 +169,8 @@ class RecordOut(RecordIn):
 
 class PushRequest(BaseModel):
     device: DeviceIn | None = None
-    records: list[RecordIn] = Field(default_factory=list)
-    note: str | None = None
+    records: list[RecordIn] = Field(default_factory=list, max_length=1000)
+    note: str | None = Field(default=None, max_length=500)
 
 
 class PushResponse(BaseModel):
@@ -164,6 +181,8 @@ class PushResponse(BaseModel):
 class PullResponse(BaseModel):
     records: list[RecordOut]
     server_time: datetime
+    has_more: bool = False
+    next_offset: int | None = None
 
 
 class SummaryItem(BaseModel):

@@ -1,4 +1,6 @@
-FROM nginx:1.27-alpine
+FROM docker.io/library/nginx:1.27-alpine
+
+ARG SERVER_NAME=169.58.152.33
 
 RUN apk add --no-cache openssl \
     && mkdir -p /etc/nginx/certs \
@@ -6,7 +8,7 @@ RUN apk add --no-cache openssl \
         -newkey rsa:2048 \
         -keyout /etc/nginx/certs/marketstore.key \
         -out /etc/nginx/certs/marketstore.crt \
-        -subj "/CN=169.58.152.33" \
-        -addext "subjectAltName=IP:169.58.152.33"
+        -subj "/CN=${SERVER_NAME}" \
+        -addext "subjectAltName=IP:${SERVER_NAME}"
 
 COPY default.conf /etc/nginx/conf.d/default.conf

@@ -65,16 +65,13 @@ db.sqlite3
 db.sqlite3-journal
 
 # Local POS data/runtime files
-data/*.db
-data/*.db-shm
-data/*.db-wal
-data/*.db-journal
-data/backups/
-data/repair/
-data/tmp/
+*.db
 *.db-shm
 *.db-wal
 *.db-journal
+data/backups/
+data/repair/
+data/tmp/
 *.db.backup_*
 
 # Flask stuff:
@@ -152,7 +149,9 @@ celerybeat.pid
 
 # Environments
 .env
-!api/.env
+.env.*
+!.env.example
+!**/.env.example
 .envrc
 .venv
 env/

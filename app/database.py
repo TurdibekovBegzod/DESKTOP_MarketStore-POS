@@ -70,16 +70,16 @@ SYNC_TABLES = (
     "currencies",
     "app_settings",
     "product_sections",
+    "suppliers",
+    "customers",
+    "expense_categories",
     "product_templates",
     "product_template_fields",
     "products",
     "product_attributes",
-    "customers",
-    "suppliers",
     "supplier_debt_movements",
     "debtors",
     "debtor_debt_movements",
-    "expense_categories",
     "expenses",
     "sales",
     "sale_items",
@@ -1494,6 +1494,10 @@ def _ensure_sync_outbox_table(conn):
     """)
 
 
+def _sync_primary_key_column(table_name):
+    return "key" if table_name == "app_settings" else "id"
+
+
 def _record_sync_outbox_entries(entries):
     if not entries:
         return
@@ -1573,7 +1577,7 @@ def export_sync_records(incremental=False):
                     })
                 else:
                     quoted = _quote_identifier(table_name)
-                    pk_col = "key" if table_name == "app_settings" else "code" if table_name == "currencies" else "id"
+                    pk_col = _sync_primary_key_column(table_name)
                     row = conn.exec_driver_sql(
                         f"SELECT * FROM {quoted} WHERE {pk_col} = ?", (local_id,)
                     ).mappings().first()
@@ -1626,7 +1630,8 @@ def export_sync_records(incremental=False):
                 rows = conn.exec_driver_sql(f"SELECT * FROM {quoted}").mappings().all()
             for row in rows:
                 data = dict(row)
-                local_id = str(data.get("id") if "id" in data else data.get("key"))
+                pk_col = _sync_primary_key_column(table_name)
+                local_id = str(data.get(pk_col))
                 if not local_id or local_id == "None":
                     continue
                 local_updated_at = data.get("updated_at") or data.get("created_at") or now
@@ -1665,9 +1670,18 @@ def import_sync_records(records):
     previous = _SYNC_SUSPENDED
     _SYNC_SUSPENDED = True
     try:
+        table_order = {table_name: index for index, table_name in enumerate(SYNC_TABLES)}
+        ordered_records = sorted(
+            records,
+            key=lambda record: (
+                1 if record.get("deleted_at") and not record.get("data") else 0,
+                -table_order.get(record.get("table_name"), -1)
+                if record.get("deleted_at") and not record.get("data")
+                else table_order.get(record.get("table_name"), len(SYNC_TABLES)),
+            ),
+        )
         with engine.begin() as conn:
-            conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
-            for record in records:
+            for record in ordered_records:
                 table_name = record.get("table_name")
                 if table_name not in SYNC_TABLES or not _has_table(conn, table_name):
                     continue
@@ -1679,25 +1693,30 @@ def import_sync_records(records):
                 if not filtered:
                     local_id = record.get("local_id")
                     if record.get("deleted_at") and local_id:
+                        pk_col = _sync_primary_key_column(table_name)
                         conn.exec_driver_sql(
-                            f"DELETE FROM {_quote_identifier(table_name)} WHERE id=?",
+                            f"DELETE FROM {_quote_identifier(table_name)} "
+                            f"WHERE {_quote_identifier(pk_col)}=?",
                             (local_id,),
                         )
                         imported += 1
-                    continue
-                if record.get("deleted_at") and not data and "id" in filtered:
-                    conn.exec_driver_sql(
-                        f"DELETE FROM {_quote_identifier(table_name)} WHERE id=?",
-                        (filtered["id"],),
-                    )
-                    imported += 1
                     continue
                 quoted_table = _quote_identifier(table_name)
                 quoted_columns = ", ".join(_quote_identifier(column) for column in filtered)
                 placeholders = ", ".join("?" for _ in filtered)
                 values = tuple(filtered.values())
+                pk_col = _sync_primary_key_column(table_name)
+                update_columns = [column for column in filtered if column != pk_col]
+                conflict_action = (
+                    "DO UPDATE SET " + ", ".join(
+                        f"{_quote_identifier(column)}=excluded.{_quote_identifier(column)}"
+                        for column in update_columns
+                    )
+                    if update_columns else "DO NOTHING"
+                )
                 conn.exec_driver_sql(
-                    f"INSERT OR REPLACE INTO {quoted_table} ({quoted_columns}) VALUES ({placeholders})",
+                    f"INSERT INTO {quoted_table} ({quoted_columns}) VALUES ({placeholders}) "
+                    f"ON CONFLICT({_quote_identifier(pk_col)}) {conflict_action}",
                     values,
                 )
                 if _has_table(conn, "sync_tombstones"):
@@ -1706,7 +1725,6 @@ def import_sync_records(records):
                         (table_name, str(record.get("local_id") or "")),
                     )
                 imported += 1
-            conn.exec_driver_sql("PRAGMA foreign_keys=ON")
             _sync_state_set(conn, "last_pull_at", _utc_now())
     finally:
         _SYNC_SUSPENDED = previous
@@ -2892,6 +2910,7 @@ def create_sale(customer_id, cashier_id, items, total, discount, paid, payment_m
             if result.rowcount != 1:
                 available = (product.stock or 0) - (product.process_quantity or 0)
                 raise AppError(f"Mahsulot qoldig'i yetarli emas: {product_names.get(product_id, '')} (Mavjud: {available})")
+            session.info.setdefault("sync_outbox_entries", set()).add(("products", str(product_id), "upsert"))
             sale_item = SaleItem(
                 sale_id=sale.id,
                 product_id=product_id,
@@ -3356,6 +3375,15 @@ def get_first_activity_date():
 
 def clear_sales_history():
     with session_scope() as session:
+        deleted_at = _utc_now()
+        for item_id in session.scalars(select(SaleItem.id)):
+            session.merge(SyncTombstone(
+                table_name="sale_items", local_id=str(item_id), deleted_at=deleted_at
+            ))
+        for sale_id in session.scalars(select(Sale.id)):
+            session.merge(SyncTombstone(
+                table_name="sales", local_id=str(sale_id), deleted_at=deleted_at
+            ))
         session.query(SaleItem).delete()
         session.query(Sale).delete()
 
@@ -4048,6 +4076,16 @@ def delete_supplier(supplier_id):
             s_name = row.name
             for product in session.scalars(select(Product).where(Product.supplier_id == supplier_id)):
                 product.supplier_id = None
+            deleted_at = _utc_now()
+            movement_ids = session.scalars(
+                select(SupplierDebtMovement.id).where(SupplierDebtMovement.supplier_id == supplier_id)
+            ).all()
+            for movement_id in movement_ids:
+                session.merge(SyncTombstone(
+                    table_name="supplier_debt_movements",
+                    local_id=str(movement_id),
+                    deleted_at=deleted_at,
+                ))
             session.query(SupplierDebtMovement).filter(SupplierDebtMovement.supplier_id == supplier_id).delete()
             session.delete(row)
     if s_name:
@@ -4200,6 +4238,16 @@ def delete_debtor(debtor_id):
         row = session.get(Debtor, debtor_id)
         if row:
             d_name = row.name
+            deleted_at = _utc_now()
+            movement_ids = session.scalars(
+                select(DebtorDebtMovement.id).where(DebtorDebtMovement.debtor_id == debtor_id)
+            ).all()
+            for movement_id in movement_ids:
+                session.merge(SyncTombstone(
+                    table_name="debtor_debt_movements",
+                    local_id=str(movement_id),
+                    deleted_at=deleted_at,
+                ))
             session.query(DebtorDebtMovement).filter(DebtorDebtMovement.debtor_id == debtor_id).delete()
             session.delete(row)
     if d_name:

@@ -10,7 +10,13 @@ if app_dir not in sys.path:
     sys.path.insert(0, app_dir)
 
 from version import APP_VERSION, APP_NAME
-from updater import parse_version_tuple, is_newer_version, get_client_platform
+from updater import (
+    _asset_sha256,
+    get_client_platform,
+    is_newer_version,
+    match_asset_for_platform,
+    parse_version_tuple,
+)
 from ui.updater_dialog import UpdaterDialog
 
 class TestUpdaterModule(unittest.TestCase):
@@ -39,6 +45,14 @@ class TestUpdaterModule(unittest.TestCase):
         platform_name = get_client_platform()
         self.assertIn(platform_name, ["windows", "linux", "macos"])
 
+    def test_update_asset_must_match_platform_and_digest_must_be_sha256(self):
+        assets = [{"name": "notes.txt"}, {"name": "MarketStore_Setup_1.2.3.exe"}]
+        self.assertEqual(match_asset_for_platform(assets, "windows")["name"], assets[1]["name"])
+        self.assertIsNone(match_asset_for_platform([assets[0]], "windows"))
+        checksum = "a" * 64
+        self.assertEqual(_asset_sha256({"digest": f"sha256:{checksum}"}), checksum)
+        self.assertEqual(_asset_sha256({"digest": "md5:bad"}), "")
+
     def test_updater_dialog_ui(self):
         test_update_data = {
             "has_update": True,
@@ -52,6 +66,14 @@ class TestUpdaterModule(unittest.TestCase):
         self.assertIn("1.0.1", dialog.status_badge.text())
         self.assertEqual(dialog.notes_edit.toPlainText(), "Test notes")
         self.assertTrue(dialog.primary_btn.isEnabled())
+
+        english_dialog = UpdaterDialog(
+            auto_start_check=False,
+            update_data=test_update_data,
+            language="en",
+        )
+        self.assertEqual(english_dialog.windowTitle(), "App update")
+        self.assertIn("Download and update", english_dialog.primary_btn.text())
 
 
 if __name__ == "__main__":

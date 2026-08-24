@@ -37,8 +37,8 @@ def match_asset_for_platform(assets: list[dict], platform_name: str) -> Optional
     platform_name = platform_name.lower().strip()
     patterns = {
         "windows": [r"\.exe$", r"\.msi$"],
-        "linux": [r"\.appimage$", r"\.deb$", r"\.tar\.gz$"],
-        "macos": [r"\.dmg$", r"\.pkg$", r"\.zip$"],
+        "linux": [r"\.appimage$", r"\.deb$"],
+        "macos": [r"\.dmg$", r"\.pkg$"],
     }
     target_patterns = patterns.get(platform_name, [r"\.exe$"])
 
@@ -56,8 +56,15 @@ def match_asset_for_platform(assets: list[dict], platform_name: str) -> Optional
             if re.search(p, name):
                 return asset
 
-    if assets:
-        return assets[0]
+    return None
+
+
+def asset_sha256(asset: dict | None) -> str | None:
+    digest = str((asset or {}).get("digest") or "").strip().lower()
+    if digest.startswith("sha256:") and len(digest) == 71:
+        checksum = digest.split(":", 1)[1]
+        if re.fullmatch(r"[0-9a-f]{64}", checksum):
+            return checksum
     return None
 
 
@@ -77,6 +84,7 @@ async def check_app_version(
     token = settings.github_token
 
     release_data = None
+    github_status = None
     now = time.time()
 
     # Use in-memory cache if fresh
@@ -95,15 +103,30 @@ async def check_app_version(
         try:
             async with httpx.AsyncClient(follow_redirects=True, timeout=10.0) as client:
                 resp = await client.get(github_url, headers=headers)
+                github_status = resp.status_code
                 if resp.status_code == 200:
                     release_data = resp.json()
+                    if not isinstance(release_data, dict):
+                        raise ValueError("Invalid GitHub release response")
                     _RELEASE_CACHE = {"data": release_data, "timestamp": now}
-                elif resp.status_code == 403 and _RELEASE_CACHE["data"] is not None:
-                    # Rate limit exceeded on GitHub API -> use cached data
+                elif resp.status_code in (403, 429) and _RELEASE_CACHE["data"] is not None:
                     release_data = _RELEASE_CACHE["data"]
-        except Exception:
+        except (httpx.RequestError, ValueError):
             if _RELEASE_CACHE["data"] is not None:
                 release_data = _RELEASE_CACHE["data"]
+
+    if github_status == 404:
+        return {
+            "has_update": False,
+            "latest_version": current_version,
+            "current_version": current_version,
+            "platform": platform,
+            "release_notes": "Hozircha yangi release chiqarilmagan.",
+            "download_url": "",
+            "file_name": "",
+            "file_size": 0,
+            "sha256": None,
+        }
 
     if not release_data:
         # Fallback to web redirect method (no rate limits)
@@ -126,65 +149,37 @@ async def check_app_version(
                     "download_url": f"https://github.com/{repo}/releases/download/{tag_name}/MarketStore_Setup_{latest_version}{ext}",
                     "file_name": f"MarketStore_Setup_{latest_version}{ext}",
                     "file_size": 0,
+                    "sha256": None,
                 }
-        except Exception as exc:
+        except (httpx.RequestError, ValueError) as exc:
             raise HTTPException(status_code=503, detail=f"Versiya ma'lumotlarini olib bo'lmadi: {str(exc)}")
 
-    if release_data:
-        tag_name = release_data.get("tag_name", "1.0.0")
-        latest_version = re.sub(r"^[^\d]*", "", tag_name)
-        assets = release_data.get("assets", [])
-        matching_asset = match_asset_for_platform(assets, platform)
-
-                has_update = is_newer_version(latest_version, current_version)
-                download_url = ""
-                file_name = ""
-                file_size = 0
-                asset_id = None
-
-                if matching_asset:
-                    asset_id = matching_asset.get("id")
-                    file_name = matching_asset.get("name", "")
-                    file_size = matching_asset.get("size", 0)
-                    download_url = f"{settings.api_prefix}/app/download?platform={platform}&asset_id={asset_id}"
-                elif release_data.get("zipball_url"):
-                    download_url = release_data.get("zipball_url")
-
-                return {
-                    "has_update": has_update,
-                    "latest_version": latest_version,
-                    "tag_name": tag_name,
-                    "current_version": current_version,
-                    "platform": platform,
-                    "release_name": release_data.get("name") or f"Release {tag_name}",
-                    "release_notes": release_data.get("body") or "Yangi versiya va yaxshilanishlar.",
-                    "published_at": release_data.get("published_at"),
-                    "download_url": download_url,
-                    "file_name": file_name,
-                    "file_size": file_size,
-                    "asset_id": asset_id,
-                }
-            elif resp.status_code == 404:
-                return {
-                    "has_update": False,
-                    "latest_version": current_version,
-                    "current_version": current_version,
-                    "platform": platform,
-                    "release_notes": "Hozircha yangi release chiqarilmagan.",
-                    "download_url": "",
-                    "file_name": "",
-                    "file_size": 0,
-                }
-            else:
-                raise HTTPException(
-                    status_code=resp.status_code,
-                    detail=f"GitHub API returned error: {resp.text}",
-                )
-    except httpx.RequestError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail=f"GitHub API bilan bog'lanishda xatolik: {str(exc)}",
-        )
+    tag_name = str(release_data.get("tag_name") or current_version)
+    latest_version = re.sub(r"^[^\d]*", "", tag_name)
+    matching_asset = match_asset_for_platform(release_data.get("assets", []), platform)
+    has_update = is_newer_version(latest_version, current_version)
+    asset_id = matching_asset.get("id") if matching_asset else None
+    file_name = matching_asset.get("name", "") if matching_asset else ""
+    file_size = int(matching_asset.get("size") or 0) if matching_asset else 0
+    download_url = (
+        f"{settings.api_prefix}/app/download?platform={platform}&asset_id={asset_id}"
+        if asset_id else ""
+    )
+    return {
+        "has_update": has_update,
+        "latest_version": latest_version,
+        "tag_name": tag_name,
+        "current_version": current_version,
+        "platform": platform,
+        "release_name": release_data.get("name") or f"Release {tag_name}",
+        "release_notes": release_data.get("body") or "Yangi versiya va yaxshilanishlar.",
+        "published_at": release_data.get("published_at"),
+        "download_url": download_url,
+        "file_name": file_name,
+        "file_size": file_size,
+        "sha256": asset_sha256(matching_asset),
+        "asset_id": asset_id,
+    }
 
 
 @router.get("/download")
@@ -254,9 +249,12 @@ async def download_app_release(
             media_type=content_type,
             headers=response_headers,
         )
-    except Exception as exc:
+    except HTTPException:
         await client.aclose()
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise
+    except (httpx.RequestError, OSError) as exc:
+        await client.aclose()
+        raise HTTPException(status_code=502, detail="Release faylini yuklab bo'lmadi.") from exc
 
 
 @router.get("/install.sh")
@@ -279,4 +277,3 @@ async def get_install_ps1():
             content = f.read()
         return StreamingResponse(iter([content.encode("utf-8")]), media_type="text/plain")
     return StreamingResponse(iter([b"Write-Host 'MarketStore POS installer script not found'\n"]), media_type="text/plain")
-

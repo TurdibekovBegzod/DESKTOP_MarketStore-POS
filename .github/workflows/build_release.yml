@@ -34,9 +34,6 @@ jobs:
             --icon "app/images/desktop_icon.ico" `
             --add-data "app/images;images" `
             --hidden-import "PyQt6" `
-            --hidden-import "openpyxl" `
-            --hidden-import "barcode" `
-            --hidden-import "psycopg" `
             --hidden-import "sqlalchemy" `
             --paths "app" `
             app/main.py
@@ -54,8 +51,9 @@ jobs:
           choco install nsis -y
           $nsisExe = "C:\Program Files (x86)\NSIS\makensis.exe"
           if (-not (Test-Path $nsisExe)) { $nsisExe = "makensis" }
+          $version = "${{ github.ref_name }}".TrimStart("v")
           Set-Location packaging
-          & $nsisExe installer.nsi
+          & $nsisExe "/DPRODUCT_VERSION=$version" installer.nsi
           Set-Location ..
 
       - name: Copy Installer Scripts to Dist
@@ -98,8 +96,6 @@ jobs:
             --name "MarketStore-POS" \
             --add-data "app/images:images" \
             --hidden-import "PyQt6" \
-            --hidden-import "openpyxl" \
-            --hidden-import "barcode" \
             --paths "app" \
             app/main.py
 
@@ -154,7 +150,7 @@ jobs:
             dist/*.tar.gz
 
   build-macos:
-    runs-on: macos-latest
+    runs-on: macos-15
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -168,7 +164,17 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller -r app/requirements.txt
+          pip install -r app/requirements.txt
+
+      - name: Resolve Release Version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            APP_VERSION="${GITHUB_REF_NAME#v}"
+          else
+            APP_VERSION="$(PYTHONPATH=app python -c 'from version import APP_VERSION; print(APP_VERSION)')"
+          fi
+          echo "APP_VERSION=${APP_VERSION}" >> "$GITHUB_ENV"
 
       - name: Build macOS App
         run: |
@@ -176,33 +182,78 @@ jobs:
             --name "MarketStore POS" \
             --add-data "app/images:images" \
             --hidden-import "PyQt6" \
-            --hidden-import "openpyxl" \
-            --hidden-import "barcode" \
+            --target-architecture "arm64" \
+            --osx-bundle-identifier "uz.marketstore.pos" \
             --paths "app" \
             app/main.py
 
-      - name: Create DMG & Zip
+      - name: Finalize and Verify App Bundle
+        shell: bash
         run: |
-          cd dist
-          zip -r "MarketStore_${{ github.ref_name }}_macos.zip" "MarketStore POS.app"
-          cd ..
-          npm install --global create-dmg || true
-          create-dmg \
-            --volname "MarketStore POS Installer" \
-            --window-pos 200 120 \
-            --window-size 600 400 \
-            --icon-size 100 \
-            --app-drop-link 420 185 \
-            "dist/MarketStore_${{ github.ref_name }}.dmg" \
-            "dist/MarketStore POS.app" || true
+          APP="dist/MarketStore POS.app"
+          PLIST="$APP/Contents/Info.plist"
+          set_plist_string() {
+            local key="$1"
+            local value="$2"
+            /usr/libexec/PlistBuddy -c "Set :${key} ${value}" "$PLIST" >/dev/null 2>&1 \
+              || /usr/libexec/PlistBuddy -c "Add :${key} string ${value}" "$PLIST"
+          }
+          set_plist_string "CFBundleIdentifier" "uz.marketstore.pos"
+          set_plist_string "CFBundleDisplayName" "MarketStore POS"
+          set_plist_string "CFBundleName" "MarketStore POS"
+          set_plist_string "CFBundleShortVersionString" "$APP_VERSION"
+          set_plist_string "CFBundleVersion" "${GITHUB_RUN_NUMBER}"
+          set_plist_string "LSMinimumSystemVersion" "11.0"
+
+          codesign --force --deep --sign - "$APP"
+          plutil -lint "$PLIST"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$PLIST")" = "uz.marketstore.pos"
+          file "$APP/Contents/MacOS/MarketStore POS" | grep -q "arm64"
+          MARKETSTORE_PACKAGING_SMOKE_TEST=1 "$APP/Contents/MacOS/MarketStore POS"
+
+      - name: Create and Test macOS Packages
+        shell: bash
+        run: |
+          APP="dist/MarketStore POS.app"
+          ZIP="dist/MarketStore_${APP_VERSION}_macos_arm64.zip"
+          DMG="dist/MarketStore_${APP_VERSION}_macos_arm64.dmg"
+
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
+
+          ZIP_TEST="$(mktemp -d)"
+          ditto -x -k "$ZIP" "$ZIP_TEST"
+          codesign --verify --deep --strict --verbose=2 "$ZIP_TEST/MarketStore POS.app"
+          MARKETSTORE_PACKAGING_SMOKE_TEST=1 \
+            "$ZIP_TEST/MarketStore POS.app/Contents/MacOS/MarketStore POS"
+
+          DMG_ROOT="$(mktemp -d)"
+          ditto "$APP" "$DMG_ROOT/MarketStore POS.app"
+          ln -s /Applications "$DMG_ROOT/Applications"
+          hdiutil create \
+            -volname "MarketStore POS" \
+            -srcfolder "$DMG_ROOT" \
+            -ov -format UDZO "$DMG"
+
+          DMG_MOUNT="$(mktemp -d)"
+          hdiutil attach "$DMG" -nobrowse -readonly -mountpoint "$DMG_MOUNT"
+          trap 'hdiutil detach "$DMG_MOUNT" >/dev/null 2>&1 || true' EXIT
+          codesign --verify --deep --strict --verbose=2 "$DMG_MOUNT/MarketStore POS.app"
+          MARKETSTORE_PACKAGING_SMOKE_TEST=1 \
+            "$DMG_MOUNT/MarketStore POS.app/Contents/MacOS/MarketStore POS"
+          hdiutil detach "$DMG_MOUNT"
+          trap - EXIT
+
+          shasum -a 256 "$ZIP" "$DMG" > "dist/MarketStore_${APP_VERSION}_macos_arm64.sha256"
 
       - name: Upload macOS Asset
         uses: actions/upload-artifact@v4
         with:
           name: macos-dmg
           path: |
-            dist/*.dmg
-            dist/*.zip
+            dist/*_macos_arm64.dmg
+            dist/*_macos_arm64.zip
+            dist/*_macos_arm64.sha256
 
   publish-release:
     needs: [build-windows, build-linux, build-macos]

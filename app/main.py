@@ -18,13 +18,22 @@ def resource_path(relative_path):
     return str(base_path / relative_path)
 
 
-APP_ICON_PATH = resource_path("images/desktop_icon.ico")
+APP_ICON_PATH = resource_path(
+    "images/desktop.png" if sys.platform == "darwin" else "images/desktop_icon.ico"
+)
 
 
 def main():
     app = QApplication(sys.argv)
-    app.setApplicationName("Market Store POS")
+    app.setApplicationName("MarketStore POS")
+    app.setOrganizationName("MarketStore")
+    app.setOrganizationDomain("marketstore.uz")
     app.setWindowIcon(QIcon(APP_ICON_PATH))
+
+    # Release CI uses this to verify that the packaged Qt runtime can start.
+    if os.environ.get("MARKETSTORE_PACKAGING_SMOKE_TEST") == "1":
+        print("MARKETSTORE_PACKAGING_SMOKE_OK")
+        return 0
 
     # Global font
     font = QFont("Segoe UI", 10)

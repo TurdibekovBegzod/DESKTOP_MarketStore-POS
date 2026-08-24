@@ -9,8 +9,14 @@ cp .env.example .env
 docker compose up --build
 ```
 
+`.env` maxfiy fayl hisoblanadi va Git'ga qo'shilmaydi. `SECRET_KEY` uchun kamida 32 baytli tasodifiy qiymat ishlating; Compose bu qiymat bo'lmasa API va workerni ishga tushirmaydi. `.env.example` faqat kalitlar va namuna qiymatlar uchun saqlanadi.
+
 API: `http://localhost:8000`
 Swagger: `http://localhost:8000/docs`
+
+`http://` faqat lokal yoki yopiq test tarmog'i uchun. Internetga ochilgan serverda email, parol va bearer tokenlar uzatilgani sababli Nginx/Caddy orqali ishonchli TLS sertifikatli `https://` endpoint majburiy.
+
+Repo ichidagi test proxy alohida profile sifatida mavjud: `docker compose --profile proxy up --build -d`. U self-signed sertifikat yaratadi va faqat ulanishni sinash uchun; real productionda `api/nginx` konfiguratsiyasiga domen uchun ishonchli sertifikat mount qilinishi kerak.
 
 Docker compose quyidagilarni ko'taradi:
 
@@ -58,6 +64,8 @@ Har lokal satr serverda quyidagicha saqlanadi:
 ```
 
 `user_uid + table_name + local_id` unique. Shuning uchun har user o'z lokal bazasini alohida muhit sifatida saqlaydi va boshqa user bilan aralashmaydi. `user_id` ichki numeric id sifatida qoladi, API izolatsiya va sync amallarida stable `user_uid` ishlatiladi.
+
+Desktop client `pull` ma'lumotlarini 1000 tadan sahifalab oladi. `push` bir so'rovda ko'pi bilan 1000 yozuv qabul qiladi va faqat ilovaning ruxsat etilgan lokal jadvallari saqlanadi.
 
 Bearer token kerak bo'ladigan endpointlarda header:
 

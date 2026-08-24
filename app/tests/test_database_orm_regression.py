@@ -848,6 +848,77 @@ class DatabaseOrmRegressionTest(unittest.TestCase):
         self.assertEqual(db.get_all_suppliers(), [])
         self.assertEqual(db.get_all_debtors(), [])
 
+    def test_sync_exports_currency_changes_and_imports_non_id_tombstones(self):
+        db.mark_sync_pushed()
+        db.save_currency("USD", "US Dollar", 12500)
+
+        incremental = db.export_sync_records(incremental=True)
+        currency_rows = [row for row in incremental if row["table_name"] == "currencies"]
+        self.assertEqual(len(currency_rows), 1)
+        self.assertEqual(currency_rows[0]["data"]["code"], "USD")
+        self.assertEqual(currency_rows[0]["local_id"], str(currency_rows[0]["data"]["id"]))
+
+        full_export = db.export_sync_records(incremental=False)
+        self.assertTrue(
+            any(row["table_name"] == "currencies" and row["data"].get("code") == "USD" for row in full_export)
+        )
+
+        db.save_app_settings({"app_name": "Temporary name"})
+        imported = db.import_sync_records([{
+            "table_name": "app_settings",
+            "local_id": "app_name",
+            "data": {},
+            "deleted_at": "2026-08-24 00:00:00",
+        }])
+        self.assertEqual(imported, 1)
+        self.assertEqual(db.get_app_settings()["app_name"], "Market POS")
+        with db._get_engine().connect() as conn:
+            self.assertEqual(conn.exec_driver_sql("PRAGMA foreign_keys").scalar(), 1)
+
+    def test_sale_stock_and_bulk_deletes_are_included_in_sync(self):
+        admin = db.authenticate("admin@gmail.com", "admin123")
+        product_id = db.add_product({
+            "barcode": "SYNC-SALE-1",
+            "name": "Sync sale product",
+            "price": 1000,
+            "cost": 500,
+            "stock": 3,
+            "unit": "dona",
+        })
+        db.mark_sync_pushed()
+        sale_id = db.create_sale(
+            None,
+            admin["id"],
+            [{"product_id": product_id, "quantity": 1, "price": 1000, "subtotal": 1000}],
+            1000,
+            0,
+            1000,
+            "naqd",
+        )
+
+        changed = db.export_sync_records(incremental=True)
+        changed_keys = {(row["table_name"], row["local_id"]) for row in changed}
+        self.assertIn(("products", str(product_id)), changed_keys)
+        self.assertIn(("sales", str(sale_id)), changed_keys)
+
+        snapshot = db.export_sync_records(incremental=False)
+        db.import_sync_records(snapshot)
+        self.assertEqual(len(db.get_product_sales_archive()), 1)
+        with db._get_engine().connect() as conn:
+            self.assertEqual(conn.exec_driver_sql("PRAGMA foreign_keys").scalar(), 1)
+
+        db.mark_sync_pushed()
+        sale_item_id = db.get_product_sales_archive()[0]["sale_item_id"]
+        db.clear_sales_history()
+        deleted = db.export_sync_records(incremental=True)
+        deleted_keys = {
+            (row["table_name"], row["local_id"])
+            for row in deleted
+            if row.get("deleted_at")
+        }
+        self.assertIn(("sale_items", str(sale_item_id)), deleted_keys)
+        self.assertIn(("sales", str(sale_id)), deleted_keys)
+
 
 if __name__ == "__main__":
     unittest.main()

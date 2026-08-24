@@ -11,6 +11,8 @@ import subprocess
 import urllib.request
 import urllib.error
 import json
+import hashlib
+from urllib.parse import urljoin, urlparse
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from version import APP_VERSION
@@ -65,8 +67,8 @@ def match_asset_for_platform(assets: list, platform_name: str):
     platform_name = platform_name.lower().strip()
     patterns = {
         "windows": [r"\.exe$", r"\.msi$"],
-        "linux": [r"\.appimage$", r"\.deb$", r"\.tar\.gz$"],
-        "macos": [r"\.dmg$", r"\.pkg$", r"\.zip$"],
+        "linux": [r"\.appimage$", r"\.deb$"],
+        "macos": [r"\.dmg$", r"\.pkg$"],
     }
     target_patterns = patterns.get(platform_name, [r"\.exe$"])
 
@@ -82,9 +84,16 @@ def match_asset_for_platform(assets: list, platform_name: str):
             if re.search(p, name):
                 return asset
 
-    if assets:
-        return assets[0]
     return None
+
+
+def _asset_sha256(asset: dict | None) -> str:
+    digest = str((asset or {}).get("digest") or "").strip().lower()
+    if digest.startswith("sha256:"):
+        checksum = digest.split(":", 1)[1]
+        if re.fullmatch(r"[0-9a-f]{64}", checksum):
+            return checksum
+    return ""
 
 
 class UpdateCheckerThread(QThread):
@@ -110,6 +119,10 @@ class UpdateCheckerThread(QThread):
             with urllib.request.urlopen(req, timeout=4) as response:
                 if response.status == 200:
                     data = json.loads(response.read().decode("utf-8"))
+                    api_url = urlparse(self.api_base_url)
+                    is_local_api = (api_url.hostname or "").lower() in {"127.0.0.1", "localhost", "::1"}
+                    if data.get("has_update") and api_url.scheme != "https" and not is_local_api:
+                        raise ValueError("Tasdiqlanmagan HTTP updater javobi")
                     if data.get("has_update"):
                         self.update_available.emit(data)
                     else:
@@ -164,6 +177,7 @@ class UpdateCheckerThread(QThread):
                         "download_url": download_url,
                         "file_name": file_name,
                         "file_size": file_size,
+                        "sha256": _asset_sha256(matching_asset),
                     }
                     if has_update:
                         self.update_available.emit(data)
@@ -235,11 +249,21 @@ class UpdateDownloaderThread(QThread):
     download_finished = pyqtSignal(str)          # local_file_path
     download_error = pyqtSignal(str)
 
-    def __init__(self, download_url: str, file_name: str = "", api_base_url: str = None, parent=None):
+    def __init__(
+        self,
+        download_url: str,
+        file_name: str = "",
+        api_base_url: str = None,
+        expected_size: int = 0,
+        expected_sha256: str = "",
+        parent=None,
+    ):
         super().__init__(parent)
         self.download_url = download_url
         self.file_name = file_name or "MarketStore_Update"
         self.api_base_url = (api_base_url or get_default_api_base()).rstrip("/")
+        self.expected_size = max(0, int(expected_size or 0))
+        self.expected_sha256 = str(expected_sha256 or "").strip().lower()
         self._is_cancelled = False
 
     def cancel(self):
@@ -248,7 +272,16 @@ class UpdateDownloaderThread(QThread):
     def run(self):
         url = self.download_url
         if url.startswith("/"):
-            url = f"{self.api_base_url}{url}"
+            url = urljoin(f"{self.api_base_url}/", url.lstrip("/"))
+
+        parsed_url = urlparse(url)
+        if parsed_url.scheme not in ("http", "https"):
+            self.download_error.emit("Yangilanish havolasi xavfsiz emas.")
+            return
+        is_local = (parsed_url.hostname or "").lower() in {"127.0.0.1", "localhost", "::1"}
+        if parsed_url.scheme != "https" and not is_local:
+            self.download_error.emit("Yangilanish faqat xavfsiz HTTPS orqali yuklanadi.")
+            return
 
         # Determine target file extension
         ext = ".exe" if sys.platform.startswith("win") else (".AppImage" if sys.platform.startswith("linux") else ".dmg")
@@ -266,6 +299,7 @@ class UpdateDownloaderThread(QThread):
             with urllib.request.urlopen(req, timeout=30) as response:
                 total_size = int(response.headers.get("Content-Length", 0))
                 downloaded = 0
+                digest = hashlib.sha256()
                 start_time = time.time()
                 last_time = start_time
                 last_downloaded = 0
@@ -277,6 +311,7 @@ class UpdateDownloaderThread(QThread):
                         if not chunk:
                             break
                         out_file.write(chunk)
+                        digest.update(chunk)
                         downloaded += len(chunk)
                         now = time.time()
                         if now - last_time >= 0.2:
@@ -295,12 +330,29 @@ class UpdateDownloaderThread(QThread):
                     pass
                 return
 
-            if os.path.exists(target_path) and os.path.getsize(target_path) > 0:
+            actual_size = os.path.getsize(target_path) if os.path.exists(target_path) else 0
+            if self.expected_size and actual_size != self.expected_size:
+                os.remove(target_path)
+                self.download_error.emit(
+                    f"Yuklangan fayl hajmi mos emas: {actual_size} / {self.expected_size} bayt."
+                )
+                return
+            if self.expected_sha256 and digest.hexdigest() != self.expected_sha256:
+                os.remove(target_path)
+                self.download_error.emit("Yangilanish faylining SHA-256 tekshiruvi mos kelmadi.")
+                return
+
+            if actual_size > 0:
                 self.progress.emit(downloaded, total_size, speed, 100)
                 self.download_finished.emit(target_path)
             else:
                 self.download_error.emit("Yuklangan fayl bo'sh.")
         except Exception as exc:
+            try:
+                if os.path.exists(target_path):
+                    os.remove(target_path)
+            except OSError:
+                pass
             self.download_error.emit(f"Yuklab olishda xatolik: {str(exc)}")
 
 
@@ -310,6 +362,15 @@ def apply_and_restart(file_path: str):
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"Update fayli topilmadi: {file_path}")
 
+    lower_path = file_path.lower()
+    allowed_extensions = {
+        "windows": (".exe", ".msi"),
+        "linux": (".appimage", ".deb"),
+        "macos": (".dmg", ".pkg"),
+    }
+    if not lower_path.endswith(allowed_extensions.get(platform_name, ())):
+        raise ValueError("Yangilanish fayli ushbu platforma uchun mos emas.")
+
     if platform_name == "windows":
         # Launch installer in separate process
         try:
@@ -317,9 +378,9 @@ def apply_and_restart(file_path: str):
             if hasattr(os, "startfile"):
                 os.startfile(file_path)
             else:
-                subprocess.Popen([file_path], shell=True)
-        except Exception as exc:
-            subprocess.Popen([file_path], shell=True)
+                subprocess.Popen([file_path])
+        except OSError:
+            subprocess.Popen([file_path])
     elif platform_name == "linux":
         try:
             os.chmod(file_path, 0o755)

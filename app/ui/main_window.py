@@ -45,6 +45,28 @@ if not Path(DOWN_ARROW_PATH).exists():
 SYNC_ICON_PATH = resource_path("images/sync.png")
 
 
+def get_custom_logo_path() -> str:
+    return str(Path(db.DATA_DIR) / "custom_logo.png")
+
+
+def save_custom_logo(pixmap: QPixmap) -> bool:
+    target = Path(get_custom_logo_path())
+    temporary = target.with_name(f".{target.name}.tmp")
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not pixmap.save(str(temporary), "PNG"):
+            return False
+        temporary.replace(target)
+        return True
+    except OSError:
+        return False
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 class NavGroupButton(QPushButton):
     def __init__(self, text="", parent=None):
         super().__init__(text, parent)
@@ -101,14 +123,14 @@ class NavGroupButton(QPushButton):
 
 
 class LogoLabel(QLabel):
-    doubleClicked = pyqtSignal()
+    clicked = pyqtSignal()
 
-    def mouseDoubleClickEvent(self, event):
+    def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            self.doubleClicked.emit()
+            self.clicked.emit()
             event.accept()
             return
-        super().mouseDoubleClickEvent(event)
+        super().mousePressEvent(event)
 
 
 THEMES = {
@@ -190,6 +212,14 @@ TEXTS = {
         "checking": "Tekshiruv",
         "users": "Kassirlar", "login_history": "Kirish tarixi",
         "notifications": "Bildirishnomalar", "check_updates": "Yangilanishlar",
+        "app_logo": "Dastur logotipi", "choose_logo": "Rasmni tanlash", "reset_logo": "Asliga qaytarish",
+        "choose_logo_title": "Logotip rasmini tanlash", "logo_change_tip": "Logotip rasmini o'zgartirish uchun bosing",
+        "invalid_logo_title": "Xatolik", "invalid_logo": "Tanlangan rasmni o'qib bo'lmadi.",
+        "logo_save_error_title": "Saqlanmadi", "logo_save_error": "Logotip rasmini saqlab bo'lmadi.",
+        "logo_saved_title": "Muvaffaqiyatli", "logo_saved": "Logotip rasmi muvaffaqiyatli o'zgartirildi.",
+        "logo_reset_title": "Tiklandi", "logo_reset": "Logotip asl holatiga qaytarildi.",
+        "logo_reset_error": "Logotip rasmini o'chirib bo'lmadi.",
+        "logo_admin_only_title": "Ruxsat", "logo_admin_only": "Faqat admin logotipni o'zgartirishi mumkin.",
     },
     "en": {
         "settings": "Settings", "theme": "Interface theme", "language": "Language",
@@ -213,6 +243,14 @@ TEXTS = {
         "checking": "Checking",
         "users": "Cashiers", "login_history": "Login history",
         "notifications": "Notifications", "check_updates": "Updates",
+        "app_logo": "App logo", "choose_logo": "Choose image", "reset_logo": "Restore default",
+        "choose_logo_title": "Choose a logo image", "logo_change_tip": "Click to change the logo image",
+        "invalid_logo_title": "Error", "invalid_logo": "The selected image could not be opened.",
+        "logo_save_error_title": "Not saved", "logo_save_error": "The logo image could not be saved.",
+        "logo_saved_title": "Success", "logo_saved": "The logo image was changed successfully.",
+        "logo_reset_title": "Restored", "logo_reset": "The default logo was restored.",
+        "logo_reset_error": "The logo image could not be removed.",
+        "logo_admin_only_title": "Permission", "logo_admin_only": "Only an admin can change the logo.",
     },
     "ru": {
         "checking": "Проверка",
@@ -226,6 +264,14 @@ TEXTS = {
         "reports": "Отчеты", "finance": "Финансы", "supplier_debts": "Долги", "expenses": "Расходы",
         "users": "Кассиры", "login_history": "История входа",
         "notifications": "Уведомления", "check_updates": "Обновления",
+        "app_logo": "Логотип приложения", "choose_logo": "Выбрать изображение", "reset_logo": "Восстановить",
+        "choose_logo_title": "Выберите изображение логотипа", "logo_change_tip": "Нажмите, чтобы изменить логотип",
+        "invalid_logo_title": "Ошибка", "invalid_logo": "Не удалось открыть выбранное изображение.",
+        "logo_save_error_title": "Не сохранено", "logo_save_error": "Не удалось сохранить логотип.",
+        "logo_saved_title": "Успешно", "logo_saved": "Логотип успешно изменен.",
+        "logo_reset_title": "Восстановлено", "logo_reset": "Логотип по умолчанию восстановлен.",
+        "logo_reset_error": "Не удалось удалить изображение логотипа.",
+        "logo_admin_only_title": "Доступ", "logo_admin_only": "Только администратор может изменить логотип.",
     },
 }
 
@@ -297,6 +343,29 @@ class SettingsDialog(QDialog):
         if self.user_role == "admin":
             self.app_name_edit = QLineEdit(self.settings.get("app_name", "Market POS"))
             form.addRow(labels["app_name"] + ":", self.app_name_edit)
+
+            logo_row = QHBoxLayout()
+            logo_row.setContentsMargins(0, 0, 0, 0)
+            logo_row.setSpacing(10)
+            self.settings_logo_preview = QLabel()
+            self.settings_logo_preview.setFixedSize(36, 36)
+            self.settings_logo_preview.setStyleSheet("border:1px solid #cbd5e1;border-radius:6px;background:#f8fafc;")
+            self.settings_logo_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._update_settings_logo_preview()
+
+            self.change_logo_btn = QPushButton(labels["choose_logo"])
+            self.change_logo_btn.setFixedHeight(32)
+            self.change_logo_btn.clicked.connect(self._choose_logo_image)
+
+            self.reset_logo_btn = QPushButton(labels["reset_logo"])
+            self.reset_logo_btn.setFixedHeight(32)
+            self.reset_logo_btn.clicked.connect(self._reset_logo_image)
+
+            logo_row.addWidget(self.settings_logo_preview)
+            logo_row.addWidget(self.change_logo_btn)
+            logo_row.addWidget(self.reset_logo_btn)
+            logo_row.addStretch()
+            form.addRow(labels["app_logo"] + ":", logo_row)
         layout.addLayout(form)
 
         btns = QHBoxLayout()
@@ -309,6 +378,49 @@ class SettingsDialog(QDialog):
         btns.addWidget(cancel_btn)
         btns.addWidget(save_btn)
         layout.addLayout(btns)
+
+    def _update_settings_logo_preview(self):
+        custom_logo = get_custom_logo_path()
+        pix = QPixmap(custom_logo) if Path(custom_logo).exists() else QPixmap(DESKTOP_ICON_PATH)
+        if not pix.isNull():
+            self.settings_logo_preview.setPixmap(
+                pix.scaled(32, 32, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            )
+
+    def _choose_logo_image(self):
+        labels = TEXTS.get(self.settings["language"], TEXTS["uz"])
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            labels["choose_logo_title"],
+            "",
+            "Images (*.png *.jpg *.jpeg *.bmp *.webp *.ico);;All Files (*.*)",
+        )
+        if not path:
+            return
+        pix = QPixmap(path)
+        if pix.isNull():
+            QMessageBox.warning(self, labels["invalid_logo_title"], labels["invalid_logo"])
+            return
+        if save_custom_logo(pix):
+            self._update_settings_logo_preview()
+            if self.parent() and hasattr(self.parent(), "_set_logo_icon"):
+                self.parent()._set_logo_icon()
+            QMessageBox.information(self, labels["logo_saved_title"], labels["logo_saved"])
+        else:
+            QMessageBox.warning(self, labels["logo_save_error_title"], labels["logo_save_error"])
+
+    def _reset_logo_image(self):
+        labels = TEXTS.get(self.settings["language"], TEXTS["uz"])
+        custom_logo = Path(get_custom_logo_path())
+        try:
+            custom_logo.unlink(missing_ok=True)
+        except OSError:
+            QMessageBox.warning(self, labels["logo_save_error_title"], labels["logo_reset_error"])
+            return
+        self._update_settings_logo_preview()
+        if self.parent() and hasattr(self.parent(), "_set_logo_icon"):
+            self.parent()._set_logo_icon()
+        QMessageBox.information(self, labels["logo_reset_title"], labels["logo_reset"])
 
     def get_data(self):
         data = {
@@ -774,8 +886,9 @@ class MainWindow(QMainWindow):
         self.logo_icon_lbl.setFixedSize(42, 42)
         self.logo_icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.logo_icon_lbl.setScaledContents(False)
-        self.logo_icon_lbl.setToolTip("Logotip rasmini o'zgartirish uchun ikki marta bosing" if self.user["role"] == "admin" else "")
-        self.logo_icon_lbl.doubleClicked.connect(self._change_logo_image)
+        self.logo_icon_lbl.setCursor(Qt.CursorShape.PointingHandCursor if self.user["role"] == "admin" else Qt.CursorShape.ArrowCursor)
+        self.logo_icon_lbl.setToolTip(self.labels["logo_change_tip"] if self.user["role"] == "admin" else "")
+        self.logo_icon_lbl.clicked.connect(self._change_logo_image)
         self._set_logo_icon()
         logo_lay.addWidget(self.logo_icon_lbl)
         self.logo_lbl = QLabel(self.settings["app_name"])
@@ -1360,38 +1473,40 @@ class MainWindow(QMainWindow):
             self._sync_worker = None
 
     def _set_logo_icon(self):
-        pixmap = QPixmap(DESKTOP_ICON_PATH)
+        custom_logo = get_custom_logo_path()
+        pixmap = QPixmap(custom_logo) if Path(custom_logo).exists() else QPixmap(DESKTOP_ICON_PATH)
         if not pixmap.isNull():
             self.logo_icon_lbl.setPixmap(
                 pixmap.scaled(
-                    34,
-                    34,
+                    36,
+                    36,
                     Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation,
                 )
             )
+            self.setWindowIcon(QIcon(pixmap))
 
     def _change_logo_image(self):
-        if self.user["role"] != "admin":
+        if self.user.get("role") != "admin":
+            QMessageBox.information(self, self.labels["logo_admin_only_title"], self.labels["logo_admin_only"])
             return
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "Logotip rasmini tanlash",
+            self.labels["choose_logo_title"],
             "",
-            "Images (*.png *.jpg *.jpeg *.bmp *.webp)",
+            "Images (*.png *.jpg *.jpeg *.bmp *.webp *.ico);;All Files (*.*)",
         )
         if not path:
             return
         pixmap = QPixmap(path)
         if pixmap.isNull():
-            QMessageBox.warning(self, "Rasm ochilmadi", "Tanlangan rasmni o'qib bo'lmadi.")
+            QMessageBox.warning(self, self.labels["invalid_logo_title"], self.labels["invalid_logo"])
             return
-        target = Path(DESKTOP_ICON_PATH)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if not pixmap.save(str(target), "PNG"):
-            QMessageBox.warning(self, "Saqlanmadi", "Logotip rasmini saqlab bo'lmadi.")
+        if not save_custom_logo(pixmap):
+            QMessageBox.warning(self, self.labels["logo_save_error_title"], self.labels["logo_save_error"])
             return
         self._set_logo_icon()
+        QMessageBox.information(self, self.labels["logo_saved_title"], self.labels["logo_saved"])
 
     def _user_display_name(self):
         name = (self.user.get("username") or self.user.get("email") or "User").strip()
@@ -1558,7 +1673,7 @@ class MainWindow(QMainWindow):
         self.logo_lbl.setText(self.settings["app_name"])
         self.uname.setText(self._user_display_name())
         self.user_avatar_lbl.setText(self._user_initials())
-        self.logo_icon_lbl.setToolTip("Logotip rasmini o'zgartirish uchun ikki marta bosing" if self.user["role"] == "admin" else "")
+        self.logo_icon_lbl.setToolTip(self.labels["logo_change_tip"] if self.user["role"] == "admin" else "")
         if hasattr(self, "sync_btn"):
             self._refresh_sync_status()
         for key, btn in self.nav_buttons.items():

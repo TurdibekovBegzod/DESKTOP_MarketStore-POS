@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import and_, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
@@ -8,7 +8,17 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.deps import get_current_user
 from app.models import Device, SyncBatch, User, UserRecord
-from app.schemas import DeviceIn, PullResponse, PushRequest, PushResponse, RecordIn, RecordOut, SummaryItem, SummaryResponse
+from app.schemas import (
+    ALLOWED_SYNC_TABLES,
+    DeviceIn,
+    PullResponse,
+    PushRequest,
+    PushResponse,
+    RecordIn,
+    RecordOut,
+    SummaryItem,
+    SummaryResponse,
+)
 
 
 router = APIRouter(prefix="/sync", tags=["sync"])
@@ -86,6 +96,10 @@ def upsert_table_rows(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    if table_name not in ALLOWED_SYNC_TABLES:
+        raise HTTPException(status_code=422, detail="Unsupported sync table")
+    if len(records) > 1000:
+        raise HTTPException(status_code=413, detail="Sync batch is too large")
     normalized = [record.model_copy(update={"table_name": table_name}) for record in records]
     for record in normalized:
         _upsert_record(db, current_user, record)
@@ -101,6 +115,8 @@ def pull(
     since: datetime | None = Query(default=None),
     table_name: str | None = Query(default=None),
     include_deleted: bool = True,
+    limit: int | None = Query(default=None, ge=1, le=5000),
+    offset: int = Query(default=0, ge=0),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -111,8 +127,19 @@ def pull(
         stmt = stmt.where(UserRecord.table_name == table_name)
     if not include_deleted:
         stmt = stmt.where(UserRecord.deleted_at.is_(None))
-    records = db.scalars(stmt.order_by(UserRecord.updated_at, UserRecord.id)).all()
-    return PullResponse(records=records, server_time=datetime.now(timezone.utc))
+    ordered = stmt.order_by(UserRecord.updated_at, UserRecord.id).offset(offset)
+    if limit is None:
+        records = db.scalars(ordered).all()
+        return PullResponse(records=records, server_time=datetime.now(timezone.utc))
+    records = db.scalars(ordered.limit(limit + 1)).all()
+    has_more = len(records) > limit
+    page = records[:limit]
+    return PullResponse(
+        records=page,
+        server_time=datetime.now(timezone.utc),
+        has_more=has_more,
+        next_offset=offset + len(page) if has_more else None,
+    )
 
 
 @router.delete("/tables/{table_name}/rows/{local_id}", response_model=RecordOut)

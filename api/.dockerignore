@@ -1,0 +1,14 @@
+.env
+.env.*
+.venv/
+venv/
+venv-*/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+tests/
+nginx/
+releases/
+*.log
+.git/

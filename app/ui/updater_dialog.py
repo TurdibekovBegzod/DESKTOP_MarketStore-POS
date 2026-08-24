@@ -12,12 +12,16 @@ from PyQt6.QtGui import QFont, QColor
 
 from version import APP_VERSION, APP_NAME
 from updater import UpdateCheckerThread, UpdateDownloaderThread, apply_and_restart
+from ui.i18n import t
 
 
 class UpdaterDialog(QDialog):
-    def __init__(self, parent=None, auto_start_check=True, update_data=None):
+    def __init__(self, parent=None, auto_start_check=True, update_data=None, language=None):
         super().__init__(parent)
-        self.setWindowTitle("Dastur yangilanishi")
+        parent_settings = getattr(parent, "settings", {}) if parent else {}
+        self.language = language or parent_settings.get("language") or (parent.property("app_language") if parent else None) or "uz"
+        self.setProperty("app_language", self.language)
+        self.setWindowTitle(self._tr("Dastur yangilanishi"))
         self.setFixedSize(480, 520)
         self.setModal(True)
 
@@ -33,6 +37,9 @@ class UpdaterDialog(QDialog):
             self._show_update_available(self.update_data)
         elif auto_start_check:
             self._start_check()
+
+    def _tr(self, text):
+        return t(text, self.language)
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -55,7 +62,7 @@ class UpdaterDialog(QDialog):
         title_col.setSpacing(4)
         self.app_title_lbl = QLabel(APP_NAME)
         self.app_title_lbl.setStyleSheet("font-size: 17px; font-weight: bold; color: #0f172a;")
-        self.version_info_lbl = QLabel(f"Joriy versiya: v{APP_VERSION}")
+        self.version_info_lbl = QLabel(f"{self._tr('Joriy versiya')}: v{APP_VERSION}")
         self.version_info_lbl.setStyleSheet("font-size: 13px; color: #64748b;")
         title_col.addWidget(self.app_title_lbl)
         title_col.addWidget(self.version_info_lbl)
@@ -64,13 +71,13 @@ class UpdaterDialog(QDialog):
         layout.addWidget(header)
 
         # Status & Message Badge
-        self.status_badge = QLabel("Yangilanishlar tekshirilmoqda...")
+        self.status_badge = QLabel(self._tr("Yangilanishlar tekshirilmoqda..."))
         self.status_badge.setObjectName("statusBadge")
         self.status_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.status_badge)
 
         # Release Notes Box
-        self.notes_label = QLabel("Yangi versiyadagi o'zgarishlar:")
+        self.notes_label = QLabel(self._tr("Yangi versiyadagi o'zgarishlar:"))
         self.notes_label.setStyleSheet("font-size: 13px; font-weight: bold; color: #334155;")
         layout.addWidget(self.notes_label)
 
@@ -100,13 +107,13 @@ class UpdaterDialog(QDialog):
         button_row = QHBoxLayout()
         button_row.setSpacing(10)
 
-        self.secondary_btn = QPushButton("Bekor qilish")
+        self.secondary_btn = QPushButton(self._tr("Bekor qilish"))
         self.secondary_btn.setObjectName("secondaryBtn")
         self.secondary_btn.setFixedHeight(38)
         self.secondary_btn.clicked.connect(self._on_secondary_clicked)
         button_row.addWidget(self.secondary_btn)
 
-        self.primary_btn = QPushButton("Qayta tekshirish")
+        self.primary_btn = QPushButton(self._tr("Qayta tekshirish"))
         self.primary_btn.setObjectName("primaryBtn")
         self.primary_btn.setFixedHeight(38)
         self.primary_btn.clicked.connect(self._on_primary_clicked)
@@ -182,11 +189,11 @@ class UpdaterDialog(QDialog):
         """)
 
     def _start_check(self):
-        self.status_badge.setText("⏳ Yangilanishlar tekshirilmoqda...")
+        self.status_badge.setText(f"⏳ {self._tr('Yangilanishlar tekshirilmoqda...')}")
         self.status_badge.setStyleSheet("background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;")
-        self.notes_edit.setText("Serverdan ma'lumot yuklanmoqda...")
+        self.notes_edit.setText(self._tr("Serverdan ma'lumot yuklanmoqda..."))
         self.primary_btn.setEnabled(False)
-        self.secondary_btn.setText("Yopish")
+        self.secondary_btn.setText(self._tr("Yopish"))
 
         self.checker_thread = UpdateCheckerThread(parent=self)
         self.checker_thread.update_available.connect(self._show_update_available)
@@ -197,7 +204,7 @@ class UpdaterDialog(QDialog):
     def _show_update_available(self, data):
         self.update_data = data
         latest = data.get("latest_version") or data.get("tag_name") or "Yangi"
-        self.status_badge.setText(f"🎉 Yangi versiya mavjud: v{latest}")
+        self.status_badge.setText(f"🎉 {self._tr('Yangi versiya mavjud')}: v{latest}")
         self.status_badge.setStyleSheet("background:#ecfdf5;color:#047857;border:1px solid #a7f3d0;")
 
         notes = data.get("release_notes") or "Yangi imkoniyatlar va yaxshilanishlar kiritildi."
@@ -206,7 +213,7 @@ class UpdaterDialog(QDialog):
         file_size = data.get("file_size", 0)
         size_str = f" ({file_size / (1024 * 1024):.1f} MB)" if file_size > 0 else ""
 
-        self.primary_btn.setText(f"⬇️ Yuklab olish va yangilash{size_str}")
+        self.primary_btn.setText(f"⬇️ {self._tr('Yuklab olish va yangilash')}{size_str}")
         self.primary_btn.setStyleSheet("""
             QPushButton#primaryBtn {
                 background: #10b981; color: white; border: none; border-radius: 6px;
@@ -215,39 +222,53 @@ class UpdaterDialog(QDialog):
             QPushButton#primaryBtn:hover { background: #059669; }
         """)
         self.primary_btn.setEnabled(True)
-        self.secondary_btn.setText("Keyinroq")
+        self.secondary_btn.setText(self._tr("Keyinroq"))
 
     def _show_up_to_date(self, data):
-        self.status_badge.setText("✅ Sizda eng so'nggi versiya o'rnatilgan")
+        self.status_badge.setText("✅ " + self._tr("Sizda eng so'nggi versiya o'rnatilgan"))
         self.status_badge.setStyleSheet("background:#f0fdf4;color:#15803d;border:1px solid #bbf7d0;")
-        self.notes_edit.setText(f"MarketStore POS v{APP_VERSION} eng yangi versiya hisoblanadi.\nHozirda yangilanishlar mavjud emas.")
-        self.primary_btn.setText("Qayta tekshirish")
+        latest_text = {
+            "uz": f"MarketStore POS v{APP_VERSION} eng yangi versiya hisoblanadi.",
+            "en": f"MarketStore POS v{APP_VERSION} is the latest version.",
+            "ru": f"MarketStore POS v{APP_VERSION} является последней версией.",
+        }.get(self.language, f"MarketStore POS v{APP_VERSION} eng yangi versiya hisoblanadi.")
+        self.notes_edit.setText(f"{latest_text}\n{self._tr('Hozirda yangilanishlar mavjud emas.')}")
+        self.primary_btn.setText(self._tr("Qayta tekshirish"))
         self.primary_btn.setEnabled(True)
-        self.secondary_btn.setText("Yopish")
+        self.secondary_btn.setText(self._tr("Yopish"))
 
     def _show_check_error(self, err_msg):
-        self.status_badge.setText("⚠️ Yangilanishni tekshirib bo'lmadi")
+        self.status_badge.setText("⚠️ " + self._tr("Yangilanishni tekshirib bo'lmadi"))
         self.status_badge.setStyleSheet("background:#fef2f2;color:#b91c1c;border:1px solid #fecaca;")
-        self.notes_edit.setText(f"Xatolik tafsiloti:\n{err_msg}\n\nIltimos internet aloqasini yoki server holatini tekshiring.")
-        self.primary_btn.setText("Qayta urinish")
+        self.notes_edit.setText(
+            f"{self._tr('Xatolik tafsiloti')}:\n{err_msg}\n\n"
+            f"{self._tr('Iltimos internet aloqasini yoki server holatini tekshiring.')}"
+        )
+        self.primary_btn.setText(self._tr("Qayta urinish"))
         self.primary_btn.setEnabled(True)
-        self.secondary_btn.setText("Yopish")
+        self.secondary_btn.setText(self._tr("Yopish"))
 
     def _start_download(self):
         download_url = self.update_data.get("download_url")
         if not download_url:
-            QMessageBox.warning(self, "Xatolik", "Yuklab olish havolasi topilmadi.")
+            QMessageBox.warning(self, self._tr("Xatolik"), self._tr("Yuklab olish havolasi topilmadi."))
             return
 
-        self.status_badge.setText("⬇️ Yangi versiya yuklab olinmoqda...")
+        self.status_badge.setText(f"⬇️ {self._tr('Yangi versiya yuklab olinmoqda...')}")
         self.status_badge.setStyleSheet("background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;")
         self.progress_bar.setVisible(True)
         self.progress_detail_lbl.setVisible(True)
         self.primary_btn.setEnabled(False)
-        self.secondary_btn.setText("Bekor qilish")
+        self.secondary_btn.setText(self._tr("Bekor qilish"))
 
         file_name = self.update_data.get("file_name", "")
-        self.downloader_thread = UpdateDownloaderThread(download_url, file_name, parent=self)
+        self.downloader_thread = UpdateDownloaderThread(
+            download_url,
+            file_name,
+            expected_size=self.update_data.get("file_size", 0),
+            expected_sha256=self.update_data.get("sha256", ""),
+            parent=self,
+        )
         self.downloader_thread.progress.connect(self._on_download_progress)
         self.downloader_thread.download_finished.connect(self._on_download_finished)
         self.downloader_thread.download_error.connect(self._on_download_error)
@@ -260,16 +281,16 @@ class UpdaterDialog(QDialog):
             tot_mb = total / (1024 * 1024)
             self.progress_detail_lbl.setText(f"{dl_mb:.1f} MB / {tot_mb:.1f} MB ({percent}%) — {speed:.1f} MB/s")
         else:
-            self.progress_detail_lbl.setText(f"{dl_mb:.1f} MB yuklandi — {speed:.1f} MB/s")
+            self.progress_detail_lbl.setText(f"{dl_mb:.1f} MB {self._tr('yuklandi')} — {speed:.1f} MB/s")
 
     def _on_download_finished(self, local_path):
         self.downloaded_file = local_path
-        self.status_badge.setText("✅ Yangilanish yuklab olindi!")
+        self.status_badge.setText(f"✅ {self._tr('Yangilanish yuklab olindi!')}")
         self.status_badge.setStyleSheet("background:#ecfdf5;color:#047857;border:1px solid #a7f3d0;")
         self.progress_bar.setValue(100)
-        self.progress_detail_lbl.setText("O'rnatish uchun tayyor.")
+        self.progress_detail_lbl.setText(self._tr("O'rnatish uchun tayyor."))
 
-        self.primary_btn.setText("🔄 Dasturni qayta ishga tushirish")
+        self.primary_btn.setText(f"🔄 {self._tr('Dasturni qayta ishga tushirish')}")
         self.primary_btn.setStyleSheet("""
             QPushButton#primaryBtn {
                 background: #059669; color: white; border: none; border-radius: 6px;
@@ -278,15 +299,15 @@ class UpdaterDialog(QDialog):
             QPushButton#primaryBtn:hover { background: #047857; }
         """)
         self.primary_btn.setEnabled(True)
-        self.secondary_btn.setText("Keyinroq o'rnatish")
+        self.secondary_btn.setText(self._tr("Keyinroq o'rnatish"))
 
     def _on_download_error(self, err_msg):
-        self.status_badge.setText("❌ Yuklab olishda xatolik yuz berdi")
+        self.status_badge.setText(f"❌ {self._tr('Yuklab olishda xatolik yuz berdi')}")
         self.status_badge.setStyleSheet("background:#fef2f2;color:#b91c1c;border:1px solid #fecaca;")
         self.progress_detail_lbl.setText(err_msg)
-        self.primary_btn.setText("Qayta yuklash")
+        self.primary_btn.setText(self._tr("Qayta yuklash"))
         self.primary_btn.setEnabled(True)
-        self.secondary_btn.setText("Yopish")
+        self.secondary_btn.setText(self._tr("Yopish"))
 
     def _on_primary_clicked(self):
         if self.downloaded_file and os.path.exists(self.downloaded_file):

@@ -2,6 +2,7 @@ import json
 import os
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from urllib.parse import urlencode
 
 
 DEFAULT_API_URL = "http://169.58.152.33:8000/api/v1"
@@ -65,7 +66,7 @@ def _request_json(path, payload=None, token=None, timeout=10):
         try:
             body = exc.read().decode("utf-8")
             detail = json.loads(body).get("detail") if body else None
-        except Exception:
+        except (UnicodeDecodeError, json.JSONDecodeError):
             detail = None
         detail_text = _format_api_detail(detail)
         if exc.code == 409:
@@ -73,7 +74,7 @@ def _request_json(path, payload=None, token=None, timeout=10):
         if exc.code in (400, 401, 403, 422, 429):
             raise ApiClientError(detail_text or "Email yoki parol noto'g'ri.") from exc
         raise ApiClientError(detail_text or f"Server xatosi: HTTP {exc.code}") from exc
-    except (URLError, TimeoutError, OSError, Exception) as exc:
+    except (URLError, TimeoutError, OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ApiClientError("Internet yoki server bilan aloqa yo'q. Iltimos, internet ulanishingizni tekshiring.") from exc
 
 
@@ -141,16 +142,28 @@ def push_sync_records(token, records, device_key=None, note=None, timeout=30):
 
 
 def pull_sync_records(token, since=None, table_name=None, include_deleted=True, timeout=30):
-    query = []
-    if since:
-        query.append(f"since={since}")
-    if table_name:
-        query.append(f"table_name={table_name}")
-    query.append(f"include_deleted={'true' if include_deleted else 'false'}")
-    path = "/sync/pull"
-    if query:
-        path += "?" + "&".join(query)
-    return _request_json(path, token=token, timeout=timeout)
+    offset = 0
+    records = []
+    server_time = None
+    while True:
+        query = {
+            "include_deleted": "true" if include_deleted else "false",
+            "limit": 1000,
+            "offset": offset,
+        }
+        if since:
+            query["since"] = since
+        if table_name:
+            query["table_name"] = table_name
+        result = _request_json(f"/sync/pull?{urlencode(query)}", token=token, timeout=timeout)
+        records.extend(result.get("records", []))
+        server_time = result.get("server_time") or server_time
+        if not result.get("has_more"):
+            return {"records": records, "server_time": server_time}
+        next_offset = result.get("next_offset")
+        if next_offset is None or int(next_offset) <= offset:
+            raise ApiClientError("Server sync sahifasini davom ettirib bo'lmadi.")
+        offset = int(next_offset)
 
 
 def get_sync_summary(token):

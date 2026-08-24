@@ -1486,15 +1486,15 @@ class SalesDetailsWidget(QWidget):
         layout.addLayout(summary)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(9)
+        self.table.setColumnCount(10)
         self.table.setHorizontalHeaderLabels([
-            "Sana", "Mahsulot", "Shtrix-kod", "Miqdor",
+            "Sana", "Mahsulot", "Shtrix-kod", "Miqdor", "Qaytdi",
             "Narx", "Jami", "Kassirga ajratildi", "To'lov", "Holati",
         ])
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         for column, width in [
-            (0, 105), (2, 130), (3, 80), (4, 130),
-            (5, 140), (6, 155), (7, 110), (8, 160),
+            (0, 105), (2, 130), (3, 72), (4, 72), (5, 125),
+            (6, 135), (7, 150), (8, 105), (9, 82),
         ]:
             self.table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
             self.table.setColumnWidth(column, width)
@@ -1554,8 +1554,12 @@ class SalesDetailsWidget(QWidget):
         ]
         
         rows = self._group_sales_rows(raw_rows)
-        # Filter out purely returned records, only keep sold items
-        rows = [r for r in rows if (r.get("net_quantity", 0) or 0) > 0 or ((r.get("sold_quantity", 0) or 0) > (r.get("returned_quantity", 0) or 0))]
+        # Keep fully returned rows visible so the current red return state is not lost.
+        rows = [
+            r for r in rows
+            if (r.get("net_quantity", 0) or 0) > 0
+            or (r.get("returned_quantity", 0) or 0) > 0
+        ]
         self.table.setRowCount(0)
         self.table.setUpdatesEnabled(False)
         language = self.property("app_language") or "uz"
@@ -1586,6 +1590,7 @@ class SalesDetailsWidget(QWidget):
 
         finalized_table_rows = [r for r in rows if bool(r.get("is_finalized")) and (r.get("net_quantity", 0) or 0) > 0]
         total_quantity = sum(row.get("net_quantity", 0) or 0 for row in finalized_table_rows)
+        total_returns = sum(row.get("returned_quantity", 0) or 0 for row in rows)
         total_value = sum(row.get("item_total_after_discount", 0) or 0 for row in finalized_table_rows)
         total_cashier_reward = sum(row.get("cashier_reward", 0) or 0 for row in finalized_table_rows)
         if rows:
@@ -1594,6 +1599,7 @@ class SalesDetailsWidget(QWidget):
                 "",
                 "",
                 f"{total_quantity:g}",
+                f"{total_returns:g}",
                 "",
                 self._format_money(total_value),
                 self._format_money(total_cashier_reward) if total_cashier_reward > 0 else "-",
@@ -1609,9 +1615,9 @@ class SalesDetailsWidget(QWidget):
                 font = item.font()
                 font.setBold(True)
                 item.setFont(font)
-                if column in (3, 4, 5, 6):
+                if column in (3, 4, 5, 6, 7):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                elif column in (0, 2, 7, 8):
+                elif column in (0, 2, 8, 9):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.table.setItem(0, column, item)
             self.table.setRowHeight(0, 48)
@@ -1653,6 +1659,7 @@ class SalesDetailsWidget(QWidget):
                 str(data.get("product_name") or "-"),
                 str(data.get("barcode") or "-"),
                 f"{net_quantity:g}",
+                f"{returned:g}",
                 self._format_money(data.get("price", 0)),
                 self._format_money(data.get("item_total_after_discount", 0)),
                 self._format_money(cashier_reward) if cashier_reward > 0 else "-",
@@ -1663,11 +1670,11 @@ class SalesDetailsWidget(QWidget):
                 item = QTableWidgetItem(value)
                 item.setBackground(QColor(row_hex))
                 item.setForeground(QColor("#1e293b"))
-                if column in (3, 4, 5, 6):
+                if column in (3, 4, 5, 6, 7):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                elif column in (0, 2, 7, 8):
+                elif column in (0, 2, 8, 9):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                if column == 8:
+                if column == 9:
                     item.setBackground(QColor(status_hex))
                     item.setForeground(QColor(status_text))
                     item.setToolTip(t(status_key, language))
@@ -1693,7 +1700,7 @@ class SalesDetailsWidget(QWidget):
         grouped = {}
         for data in rows:
             is_fin = bool(data.get("is_finalized"))
-            key = (self._sales_product_key(data), is_fin)
+            key = self._sales_product_key(data)
             item = grouped.setdefault(key, {
                 "product_id": data.get("product_id"),
                 "product_name": data.get("product_name") or "-",
@@ -1709,6 +1716,7 @@ class SalesDetailsWidget(QWidget):
                 "is_finalized": int(is_fin),
                 "created_at": data.get("created_at") or "",
             })
+            item["is_finalized"] = int(bool(item["is_finalized"]) and is_fin)
             item["sold_quantity"] += data.get("sold_quantity", 0) or 0
             item["net_quantity"] += data.get("net_quantity", 0) or 0
             item["item_total_after_discount"] += data.get("item_total_after_discount", 0) or 0
@@ -1743,8 +1751,7 @@ class SalesDetailsWidget(QWidget):
     def _sales_return_states(cls, rows):
         states = {}
         for data in rows:
-            is_fin = bool(data.get("is_finalized"))
-            key = (cls._sales_product_key(data), is_fin)
+            key = cls._sales_product_key(data)
             state = states.setdefault(key, {
                 "sold_quantity": 0,
                 "net_quantity": 0,
