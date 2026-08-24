@@ -1,4 +1,6 @@
 from functools import lru_cache
+from urllib.parse import urlparse
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -25,8 +27,19 @@ class Settings(BaseSettings):
     github_repo: str = "TurdibekovBegzod/DESKTOP_MarketStore-POS"
     github_token: str | None = None
     app_releases_dir: str = "releases"
+    ngrok_domain: str | None = None
+    trusted_hosts: str = "localhost,127.0.0.1,testserver,api"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    def resolved_trusted_hosts(self) -> list[str]:
+        hosts = [host.strip() for host in self.trusted_hosts.split(",") if host.strip()]
+        if self.ngrok_domain:
+            value = self.ngrok_domain.strip()
+            parsed = urlparse(value if "://" in value else f"https://{value}")
+            if parsed.hostname:
+                hosts.append(parsed.hostname)
+        return list(dict.fromkeys(hosts))
 
 
 @lru_cache

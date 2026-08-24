@@ -61,7 +61,8 @@ def get_default_api_base() -> str:
         url = re.sub(r"/api/v1/?$", "", str(url).strip())
         return url.rstrip("/")
     except Exception:
-        return "http://169.58.152.33:8000"
+        url = os.environ.get("MARKETSTORE_API_URL", "http://169.58.152.33:8000")
+        return re.sub(r"/api/v1/?$", "", url.strip()).rstrip("/")
 
 
 def match_asset_for_platform(assets: list, platform_name: str):

@@ -18,7 +18,11 @@ from PyQt6.QtGui import QColor, QFont, QIcon, QPixmap
 
 from ssl_support import create_ssl_context
 
-API_BASE = "http://169.58.152.33:8000"
+API_BASE = re.sub(
+    r"/api/v1/?$",
+    "",
+    os.environ.get("MARKETSTORE_API_URL", "http://169.58.152.33:8000").strip(),
+).rstrip("/")
 GITHUB_API = "https://api.github.com/repos/TurdibekovBegzod/DESKTOP_MarketStore-POS/releases/latest"
 APP_NAME = "MarketStore POS"
 

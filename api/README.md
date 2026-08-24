@@ -11,10 +11,46 @@ docker compose up --build
 
 `.env` maxfiy fayl hisoblanadi va Git'ga qo'shilmaydi. `SECRET_KEY` uchun kamida 32 baytli tasodifiy qiymat ishlating; Compose bu qiymat bo'lmasa API va workerni ishga tushirmaydi. `.env.example` faqat kalitlar va namuna qiymatlar uchun saqlanadi.
 
-API: `http://localhost:8000`
-Swagger: `http://localhost:8000/docs`
+Lokal API: `http://127.0.0.1:8000`
+Lokal Swagger: `http://127.0.0.1:8000/docs`
 
 `http://` faqat lokal yoki yopiq test tarmog'i uchun. Internetga ochilgan serverda email, parol va bearer tokenlar uzatilgani sababli Nginx/Caddy orqali ishonchli TLS sertifikatli `https://` endpoint majburiy.
+
+## Ngrok tunnel
+
+Production serverda API host porti faqat `127.0.0.1` ga bog'langan. Ngrok
+container esa API bilan Docker ichki tarmog'idagi `http://api:8000` manzili
+orqali gaplashadi. Ngrok inspeksiya porti (`4040`) hostga chiqarilmaydi.
+
+Ngrok Dashboard ichidan authtoken va accountga ajratilgan dev domainni oling,
+so'ng serverdagi `api/.env` fayliga yozing:
+
+```env
+NGROK_AUTHTOKEN=your-secret-authtoken
+NGROK_DOMAIN=https://your-domain.ngrok-free.app
+```
+
+Tunnel profilini ishga tushiring:
+
+```bash
+docker compose --profile tunnel up --build -d
+docker compose ps
+docker compose logs --tail=100 ngrok
+curl -i "${NGROK_DOMAIN}/health"
+```
+
+Server qayta ishga tushganda `restart: unless-stopped` tunnelni qayta ko'taradi.
+Oddiy `docker compose up -d` buyrug'ida ham tunnel avtomatik tanlanishi uchun
+serverdagi `.env` fayliga quyidagini qo'shish mumkin:
+
+```env
+COMPOSE_PROFILES=tunnel
+```
+
+Ngrok ishga tushganidan keyin Contabo firewall'dagi tashqi `8000/tcp` qoidasini
+yoping. `NGROK_AUTHTOKEN` maxfiy bo'lib, Git repositoryga qo'shilmasligi kerak.
+Desktop clientdagi `MARKETSTORE_API_URL` qiymati
+`https://your-domain.ngrok-free.app/api/v1` bo'lishi kerak.
 
 Repo ichidagi test proxy alohida profile sifatida mavjud: `docker compose --profile proxy up --build -d`. U self-signed sertifikat yaratadi va faqat ulanishni sinash uchun; real productionda `api/nginx` konfiguratsiyasiga domen uchun ishonchli sertifikat mount qilinishi kerak.
 
@@ -24,6 +60,7 @@ Docker compose quyidagilarni ko'taradi:
 - `redis` - Celery broker/result backend
 - `api` - FastAPI service
 - `worker` - email yuboradigan Celery worker
+- `ngrok` - `tunnel` profilidagi HTTPS tunnel
 
 ## Migration
 
