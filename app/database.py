@@ -5,6 +5,7 @@ import os
 import secrets
 import shutil
 import sqlite3
+import sys
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -29,9 +30,31 @@ from sqlalchemy.orm import Session, declarative_base, relationship, sessionmaker
 from sqlalchemy.sql import text
 
 
-LEGACY_DB_PATH = os.path.join("data", "market_pos.db")
-ACCOUNT_DB_ROOT = os.path.join("data", "accounts")
-ACCOUNT_SESSION_PATH = os.path.join("data", "account_session.json")
+def get_app_data_dir() -> str:
+    """Returns writable user data directory across Windows, Linux, macOS, or local dev."""
+    if getattr(sys, "frozen", False):
+        # Running as packaged .exe / AppImage / .app binary
+        if sys.platform.startswith("win"):
+            base = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+            app_dir = os.path.join(base, "MarketStore-POS", "data")
+        elif sys.platform.startswith("darwin"):
+            app_dir = os.path.expanduser("~/Library/Application Support/MarketStore-POS/data")
+        else:
+            base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+            app_dir = os.path.join(base, "marketstore-pos", "data")
+        os.makedirs(app_dir, exist_ok=True)
+        return app_dir
+    else:
+        # Development mode
+        local_data = os.path.abspath("data")
+        os.makedirs(local_data, exist_ok=True)
+        return local_data
+
+
+DATA_DIR = get_app_data_dir()
+LEGACY_DB_PATH = os.path.join(DATA_DIR, "market_pos.db")
+ACCOUNT_DB_ROOT = os.path.join(DATA_DIR, "accounts")
+ACCOUNT_SESSION_PATH = os.path.join(DATA_DIR, "account_session.json")
 DB_PATH = LEGACY_DB_PATH
 
 Base = declarative_base()
@@ -159,7 +182,8 @@ def _database_url():
     db_dir = os.path.dirname(DB_PATH)
     if db_dir:
         os.makedirs(db_dir, exist_ok=True)
-    return f"sqlite:///{DB_PATH}"
+    abs_path = os.path.abspath(DB_PATH).replace("\\", "/")
+    return f"sqlite:///{abs_path}"
 
 
 def _safe_account_uid(user_uid):
