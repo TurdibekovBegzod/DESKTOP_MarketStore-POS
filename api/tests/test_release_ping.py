@@ -75,6 +75,35 @@ class StoredReleaseResponseTest(unittest.TestCase):
             result = _stored_release_response(object(), "windows", "1.1.0")
         self.assertFalse(result["has_update"])
 
+    def test_an_update_without_a_usable_asset_falls_through_to_github(self):
+        """A tokenless server may store a tag it could not enrich.
+
+        Returning it anyway would show "update available" with an empty
+        download URL, so the GitHub path has to get a chance instead.
+        """
+        row = self._row()
+        row.assets = []
+        with patch.object(updates_router, "get_release", return_value=row):
+            self.assertIsNone(_stored_release_response(object(), "windows", "1.0.4"))
+
+    def test_no_asset_for_this_platform_falls_through_too(self):
+        row = self._row()
+        row.assets = [{"id": 7, "name": "MarketStore-1.0.5.AppImage", "size": 1}]
+        with patch.object(updates_router, "get_release", return_value=row):
+            self.assertIsNone(_stored_release_response(object(), "windows", "1.0.4"))
+        # ...but Linux, which that asset is for, is answered without GitHub.
+        with patch.object(updates_router, "get_release", return_value=row):
+            self.assertTrue(_stored_release_response(object(), "linux", "1.0.4")["has_update"])
+
+    def test_up_to_date_needs_no_asset_at_all(self):
+        """The common case: no update, so nothing to download, so no GitHub."""
+        row = self._row("1.0.4")
+        row.assets = []
+        with patch.object(updates_router, "get_release", return_value=row):
+            result = _stored_release_response(object(), "windows", "1.0.4")
+        self.assertIsNotNone(result)
+        self.assertFalse(result["has_update"])
+
     def test_no_stored_release_falls_through_to_the_github_path(self):
         with patch.object(updates_router, "get_release", return_value=None):
             self.assertIsNone(_stored_release_response(object(), "windows", "1.0.4"))

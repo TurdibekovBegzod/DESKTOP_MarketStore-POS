@@ -90,9 +90,16 @@ def _stored_release_response(db: Session, platform: str, current_version: str) -
         return None
     settings = get_settings()
     asset = match_asset_for_platform(list(row.assets or []), platform)
+    has_update = is_newer_version(row.version, current_version)
+    if has_update and asset is None:
+        # We know a newer build exists but not which file to fetch: the ping's
+        # enrichment call failed, or it raced ahead of GitHub publishing the
+        # assets. Fall through to the GitHub path rather than telling the client
+        # about an update it has no way to download.
+        return None
     asset_id = asset.get("id") if asset else None
     return {
-        "has_update": is_newer_version(row.version, current_version),
+        "has_update": has_update,
         "latest_version": row.version,
         "tag_name": row.tag,
         "current_version": current_version,

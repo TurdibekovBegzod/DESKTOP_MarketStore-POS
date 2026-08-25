@@ -16,11 +16,14 @@ from app.routers import auth, health, sync, updates
 settings = get_settings()
 
 
-def _stored_tag() -> str | None:
+def _stored_state() -> tuple[str | None, bool]:
+    """Current tag, and whether we already know which files it ships."""
     db = SessionLocal()
     try:
         row = get_release(db)
-        return row.tag if row else None
+        if row is None:
+            return None, False
+        return row.tag, bool(row.assets)
     finally:
         db.close()
 
@@ -49,10 +52,13 @@ async def _release_poll_loop() -> None:
             tag = str((data or {}).get("tag_name") or "").strip()
             if not tag:
                 continue
-            if tag == await run_in_threadpool(_stored_tag):
+            stored_tag, has_assets = await run_in_threadpool(_stored_state)
+            if tag == stored_tag and has_assets:
                 continue
             event = await run_in_threadpool(_save_release, tag, data)
-            broadcast_release(event)
+            if tag != stored_tag:
+                # Same tag with assets now filled in is a repair, not news.
+                broadcast_release(event)
         except asyncio.CancelledError:
             raise
         except Exception:
