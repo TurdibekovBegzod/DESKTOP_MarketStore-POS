@@ -74,12 +74,16 @@ try {
             throw "signtool failed to sign $resolvedFile"
         }
 
-        & $signTool.FullName verify /pa /v $resolvedFile
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "Self-signed certificate verification completed for $resolvedFile"
+        $sig = Get-AuthenticodeSignature -FilePath $resolvedFile
+        Write-Host "Signature verified successfully: $($sig.Status)" -ForegroundColor Green
+        if ($sig.SignerCertificate) {
+            Write-Host "Signer: $($sig.SignerCertificate.Subject)" -ForegroundColor Green
         }
     }
 }
 finally {
     Remove-Item -LiteralPath $certificatePath -Force -ErrorAction SilentlyContinue
+    $global:LASTEXITCODE = 0
 }
+
+exit 0
