@@ -21,7 +21,10 @@ from ssl_support import create_ssl_context
 API_BASE = re.sub(
     r"/api/v1/?$",
     "",
-    os.environ.get("MARKETSTORE_API_URL", "http://169.58.152.33:8000").strip(),
+    os.environ.get(
+        "MARKETSTORE_API_URL",
+        "https://drinking-relight-trailside.ngrok-free.dev/api/v1",
+    ).strip(),
 ).rstrip("/")
 GITHUB_API = "https://api.github.com/repos/TurdibekovBegzod/DESKTOP_MarketStore-POS/releases/latest"
 APP_NAME = "MarketStore POS"
@@ -74,7 +77,13 @@ class InstallWorker(QThread):
         # 1. Try Backend API
         api_url = f"{API_BASE}/api/v1/app/version?platform={self.platform}&current_version=0.0.0"
         try:
-            req = urllib.request.Request(api_url, headers={"User-Agent": "MarketStore-Installer"})
+            req = urllib.request.Request(
+                api_url,
+                headers={
+                    "User-Agent": "MarketStore-Installer",
+                    "ngrok-skip-browser-warning": "true",
+                },
+            )
             with urllib.request.urlopen(req, timeout=5, context=create_ssl_context()) as resp:
                 if resp.status == 200:
                     data = json.loads(resp.read().decode("utf-8"))
@@ -134,7 +143,13 @@ class InstallWorker(QThread):
 
         target_file = os.path.join(temp_dir, f"marketstore_install_{int(time.time())}{ext}")
 
-        req = urllib.request.Request(url, headers={"User-Agent": "MarketStore-Installer"})
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "MarketStore-Installer",
+                "ngrok-skip-browser-warning": "true",
+            },
+        )
         start_time = time.time()
 
         with urllib.request.urlopen(req, timeout=30, context=create_ssl_context()) as resp, open(target_file, "wb") as out:

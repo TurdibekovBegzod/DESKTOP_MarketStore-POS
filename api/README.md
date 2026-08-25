@@ -27,7 +27,7 @@ so'ng serverdagi `api/.env` fayliga yozing:
 
 ```env
 NGROK_AUTHTOKEN=your-secret-authtoken
-NGROK_DOMAIN=https://your-domain.ngrok-free.app
+NGROK_DOMAIN=https://drinking-relight-trailside.ngrok-free.dev
 ```
 
 Tunnel profilini ishga tushiring:
@@ -50,7 +50,7 @@ COMPOSE_PROFILES=tunnel
 Ngrok ishga tushganidan keyin Contabo firewall'dagi tashqi `8000/tcp` qoidasini
 yoping. `NGROK_AUTHTOKEN` maxfiy bo'lib, Git repositoryga qo'shilmasligi kerak.
 Desktop clientdagi `MARKETSTORE_API_URL` qiymati
-`https://your-domain.ngrok-free.app/api/v1` bo'lishi kerak.
+`https://drinking-relight-trailside.ngrok-free.dev/api/v1` bo'lishi kerak.
 
 Repo ichidagi test proxy alohida profile sifatida mavjud: `docker compose --profile proxy up --build -d`. U self-signed sertifikat yaratadi va faqat ulanishni sinash uchun; real productionda `api/nginx` konfiguratsiyasiga domen uchun ishonchli sertifikat mount qilinishi kerak.
 

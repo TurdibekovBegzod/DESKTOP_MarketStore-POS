@@ -260,20 +260,46 @@ async def download_app_release(
 @router.get("/install.sh")
 async def get_install_sh():
     """Serve universal Linux & macOS bash installer script."""
-    installer_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "installer", "install.sh")
-    if os.path.exists(installer_path):
-        with open(installer_path, "r", encoding="utf-8") as f:
-            content = f.read()
-        return StreamingResponse(iter([content.encode("utf-8")]), media_type="text/plain")
+    candidates = [
+        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "installer", "install.sh"),
+        os.path.join("/app", "installer", "install.sh"),
+        os.path.join(os.path.dirname(__file__), "install.sh"),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return StreamingResponse(iter([f.read().encode("utf-8")]), media_type="text/plain")
+
+    try:
+        settings = get_settings()
+        async with httpx.AsyncClient(follow_redirects=True, timeout=5.0) as client:
+            resp = await client.get(f"https://raw.githubusercontent.com/{settings.github_repo}/main/installer/install.sh")
+            if resp.status_code == 200:
+                return StreamingResponse(iter([resp.content]), media_type="text/plain")
+    except Exception:
+        pass
     return StreamingResponse(iter([b"echo 'MarketStore POS installer script not found'; exit 1\n"]), media_type="text/plain")
 
 
 @router.get("/install.ps1")
 async def get_install_ps1():
     """Serve Windows PowerShell installer script."""
-    installer_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "installer", "install.ps1")
-    if os.path.exists(installer_path):
-        with open(installer_path, "r", encoding="utf-8") as f:
-            content = f.read()
-        return StreamingResponse(iter([content.encode("utf-8")]), media_type="text/plain")
+    candidates = [
+        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "installer", "install.ps1"),
+        os.path.join("/app", "installer", "install.ps1"),
+        os.path.join(os.path.dirname(__file__), "install.ps1"),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return StreamingResponse(iter([f.read().encode("utf-8")]), media_type="text/plain")
+
+    try:
+        settings = get_settings()
+        async with httpx.AsyncClient(follow_redirects=True, timeout=5.0) as client:
+            resp = await client.get(f"https://raw.githubusercontent.com/{settings.github_repo}/main/installer/install.ps1")
+            if resp.status_code == 200:
+                return StreamingResponse(iter([resp.content]), media_type="text/plain")
+    except Exception:
+        pass
     return StreamingResponse(iter([b"Write-Host 'MarketStore POS installer script not found'\n"]), media_type="text/plain")

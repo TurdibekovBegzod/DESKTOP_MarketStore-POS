@@ -19,6 +19,20 @@ from ssl_support import create_ssl_context
 from version import APP_VERSION
 
 
+PRODUCTION_API_ROOT = "https://drinking-relight-trailside.ngrok-free.dev"
+LEGACY_API_ROOTS = {
+    "http://169.58.152.33:8000",
+    "http://169.58.152.33:8000/api/v1",
+}
+
+
+def normalize_api_root(url: str) -> str:
+    value = str(url or "").strip().rstrip("/")
+    if value in LEGACY_API_ROOTS:
+        return PRODUCTION_API_ROOT
+    return re.sub(r"/api/v1/?$", "", value).rstrip("/") or PRODUCTION_API_ROOT
+
+
 def get_client_platform() -> str:
     """Returns 'windows', 'linux', or 'macos'."""
     if sys.platform.startswith("win"):
@@ -57,12 +71,9 @@ def get_default_api_base() -> str:
         from database import get_app_settings
         settings = get_app_settings()
         url = settings.get("sync_server_url") or os.environ.get("MARKETSTORE_API_URL") or DEFAULT_API_URL
-        # Strip /api/v1 if present to get root base URL
-        url = re.sub(r"/api/v1/?$", "", str(url).strip())
-        return url.rstrip("/")
+        return normalize_api_root(url)
     except Exception:
-        url = os.environ.get("MARKETSTORE_API_URL", "http://169.58.152.33:8000")
-        return re.sub(r"/api/v1/?$", "", url.strip()).rstrip("/")
+        return normalize_api_root(os.environ.get("MARKETSTORE_API_URL", PRODUCTION_API_ROOT))
 
 
 def match_asset_for_platform(assets: list, platform_name: str):
@@ -116,7 +127,10 @@ class UpdateCheckerThread(QThread):
         try:
             req = urllib.request.Request(
                 url,
-                headers={"User-Agent": f"MarketStore-POS/{self.current_version}"},
+                headers={
+                    "User-Agent": f"MarketStore-POS/{self.current_version}",
+                    "ngrok-skip-browser-warning": "true",
+                },
             )
             with urllib.request.urlopen(req, timeout=4, context=create_ssl_context()) as response:
                 if response.status == 200:
@@ -299,7 +313,10 @@ class UpdateDownloaderThread(QThread):
         try:
             req = urllib.request.Request(
                 url,
-                headers={"User-Agent": f"MarketStore-POS/{APP_VERSION}"},
+                headers={
+                    "User-Agent": f"MarketStore-POS/{APP_VERSION}",
+                    "ngrok-skip-browser-warning": "true",
+                },
             )
             with urllib.request.urlopen(req, timeout=30, context=create_ssl_context()) as response:
                 total_size = int(response.headers.get("Content-Length", 0))

@@ -6,7 +6,7 @@ from urllib.parse import urlencode
 
 from ssl_support import create_ssl_context
 
-DEFAULT_API_URL = "http://169.58.152.33:8000/api/v1"
+DEFAULT_API_URL = "https://drinking-relight-trailside.ngrok-free.dev/api/v1"
 
 
 class ApiClientError(Exception):
@@ -51,7 +51,11 @@ def _api_base_url():
 
 def _request_json(path, payload=None, token=None, timeout=10):
     data = None
-    headers = {"Accept": "application/json"}
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "MarketStore-POS/1.0",
+        "ngrok-skip-browser-warning": "true",
+    }
     if payload is not None:
         data = json.dumps(payload).encode("utf-8")
         headers["Content-Type"] = "application/json"

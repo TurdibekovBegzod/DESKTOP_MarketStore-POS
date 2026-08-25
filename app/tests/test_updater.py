@@ -17,6 +17,7 @@ from updater import (
     get_client_platform,
     is_newer_version,
     match_asset_for_platform,
+    normalize_api_root,
     parse_version_tuple,
 )
 from ui.updater_dialog import UpdaterDialog
@@ -46,6 +47,11 @@ class TestUpdaterModule(unittest.TestCase):
     def test_platform_detection(self):
         platform_name = get_client_platform()
         self.assertIn(platform_name, ["windows", "linux", "macos"])
+
+    def test_legacy_server_url_moves_to_production_ngrok_endpoint(self):
+        expected = "https://drinking-relight-trailside.ngrok-free.dev"
+        self.assertEqual(normalize_api_root("http://169.58.152.33:8000"), expected)
+        self.assertEqual(normalize_api_root(f"{expected}/api/v1"), expected)
 
     def test_verified_https_context_has_trusted_certificates(self):
         context = create_ssl_context()

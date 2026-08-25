@@ -6,6 +6,12 @@ import api_client
 
 
 class ApiClientPaginationTest(unittest.TestCase):
+    def test_default_api_uses_production_ngrok_https_endpoint(self):
+        self.assertEqual(
+            api_client.DEFAULT_API_URL,
+            "https://drinking-relight-trailside.ngrok-free.dev/api/v1",
+        )
+
     def test_requests_use_verified_ssl_context(self):
         with patch("api_client.urlopen") as urlopen:
             response = urlopen.return_value.__enter__.return_value

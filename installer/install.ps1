@@ -3,7 +3,7 @@
 # ==============================================================================
 $ErrorActionPreference = "Stop"
 
-$ApiBase = "http://169.58.152.33:8000"
+$ApiBase = "https://drinking-relight-trailside.ngrok-free.dev"
 $GithubApi = "https://api.github.com/repos/TurdibekovBegzod/DESKTOP_MarketStore-POS/releases/latest"
 
 Write-Host "======================================================" -ForegroundColor Cyan
@@ -15,7 +15,7 @@ Write-Host "[1/3] Eng so'nggi versiya aniqlanmoqda..." -ForegroundColor Yellow
 $DownloadUrl = $null
 
 try {
-    $verResp = Invoke-RestMethod -Uri "$ApiBase/api/v1/app/version?platform=windows&current_version=0.0.0" -TimeoutSec 5 -Headers @{"User-Agent"="MarketStore-Installer"}
+    $verResp = Invoke-RestMethod -Uri "$ApiBase/api/v1/app/version?platform=windows&current_version=0.0.0" -TimeoutSec 5 -Headers @{"User-Agent"="MarketStore-Installer"; "ngrok-skip-browser-warning"="true"}
     if ($verResp.download_url) {
         $DownloadUrl = $verResp.download_url
         if ($DownloadUrl.StartsWith("/")) {
@@ -52,6 +52,7 @@ $TempFile = Join-Path $env:TEMP ("MarketStore_Setup_" + [int](Get-Date -UFormat 
 Write-Host "[2/3] Dastur yuklab olinmoqda: $DownloadUrl ..." -ForegroundColor Green
 $webClient = New-Object System.Net.WebClient
 $webClient.Headers.Add("User-Agent", "MarketStore-Installer")
+$webClient.Headers.Add("ngrok-skip-browser-warning", "true")
 $webClient.DownloadFile($DownloadUrl, $TempFile)
 
 Write-Host "[3/3] O'rnatilmoqda..." -ForegroundColor Yellow

@@ -4,7 +4,7 @@
 # ==============================================================================
 set -e
 
-API_BASE="http://169.58.152.33:8000"
+API_BASE="https://drinking-relight-trailside.ngrok-free.dev"
 GITHUB_API="https://api.github.com/repos/TurdibekovBegzod/DESKTOP_MarketStore-POS/releases/latest"
 
 echo "======================================================"
@@ -22,7 +22,7 @@ esac
 echo "[1/3] $PLATFORM tizimi uchun eng yangi versiya aniqlanmoqda..."
 
 DOWNLOAD_URL=""
-if curl -s -f "$API_BASE/api/v1/app/version?platform=$PLATFORM&current_version=0.0.0" > /tmp/ms_ver.json 2>/dev/null; then
+if curl -s -f -H "ngrok-skip-browser-warning: true" "$API_BASE/api/v1/app/version?platform=$PLATFORM&current_version=0.0.0" > /tmp/ms_ver.json 2>/dev/null; then
     DOWNLOAD_URL=$(grep -o '"download_url":"[^"]*' /tmp/ms_ver.json | cut -d'"' -f4)
     if [[ "$DOWNLOAD_URL" == /* ]]; then
         DOWNLOAD_URL="${API_BASE}${DOWNLOAD_URL}"
@@ -45,7 +45,7 @@ fi
 
 echo "[2/3] Yuklab olinmoqda: $DOWNLOAD_URL ..."
 TMP_FILE="/tmp/marketstore_download"
-curl -# -L "$DOWNLOAD_URL" -o "$TMP_FILE"
+curl -# -L -H "ngrok-skip-browser-warning: true" "$DOWNLOAD_URL" -o "$TMP_FILE"
 
 echo "[3/3] Tizimga o'rnatilmoqda..."
 if [ "$PLATFORM" = "linux" ]; then
