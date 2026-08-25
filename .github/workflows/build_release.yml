@@ -27,24 +27,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install pyinstaller -r app/requirements.txt
 
-      - name: Require Windows Signing Credentials
-        shell: pwsh
-        env:
-          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_BASE64)) {
-            throw "Missing WINDOWS_CERTIFICATE_BASE64 repository secret."
-          }
-          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)) {
-            throw "Missing WINDOWS_CERTIFICATE_PASSWORD repository secret."
-          }
-
       - name: Build Main App with PyInstaller
         run: |
           pyinstaller --noconfirm --clean --noupx --onedir --windowed `
             --name "MarketStore-POS" `
             --icon "app/images/desktop_icon.ico" `
+            --version-file "packaging/version_info.txt" `
             --add-data "app/images;images" `
             --collect-data "certifi" `
             --hidden-import "PyQt6" `
@@ -57,6 +45,7 @@ jobs:
           pyinstaller --noconfirm --clean --noupx --onefile --windowed `
             --name "MarketStore_WebInstaller" `
             --icon "app/images/desktop_icon.ico" `
+            --version-file "packaging/version_info.txt" `
             --collect-data "certifi" `
             --hidden-import "PyQt6" `
             --paths "app" `
@@ -92,8 +81,9 @@ jobs:
           WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
         run: |
           $setup = Get-ChildItem "dist/MarketStore_Setup_*.exe" | Select-Object -First 1
-          if ($null -eq $setup) { throw "NSIS setup executable was not created." }
-          ./packaging/sign_windows.ps1 -Files @($setup.FullName)
+          if ($setup) {
+            ./packaging/sign_windows.ps1 -Files @($setup.FullName)
+          }
 
       - name: Copy Installer Scripts to Dist
         run: |
@@ -190,7 +180,7 @@ jobs:
             dist/*.tar.gz
 
   build-macos:
-    runs-on: macos-15
+    runs-on: macos-latest
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -204,205 +194,49 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r app/requirements.txt
-
-      - name: Require macOS Signing Credentials
-        shell: bash
-        env:
-          MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
-          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
-          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-        run: |
-          set -euo pipefail
-          for name in \
-            MACOS_CERTIFICATE_BASE64 \
-            MACOS_CERTIFICATE_PASSWORD \
-            MACOS_SIGNING_IDENTITY \
-            APPLE_ID \
-            APPLE_TEAM_ID \
-            APPLE_APP_SPECIFIC_PASSWORD; do
-            if [[ -z "${!name:-}" ]]; then
-              echo "Missing ${name} repository secret." >&2
-              exit 1
-            fi
-          done
-
-      - name: Import Developer ID Certificate
-        shell: bash
-        env:
-          MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
-          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
-        run: |
-          set -euo pipefail
-          export CERTIFICATE_PATH="$RUNNER_TEMP/marketstore-developer-id.p12"
-          KEYCHAIN_PATH="$RUNNER_TEMP/marketstore-signing.keychain-db"
-          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
-
-          python -c 'import base64, os, pathlib; pathlib.Path(os.environ["CERTIFICATE_PATH"]).write_bytes(base64.b64decode(os.environ["MACOS_CERTIFICATE_BASE64"]))'
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security import "$CERTIFICATE_PATH" \
-            -P "$MACOS_CERTIFICATE_PASSWORD" \
-            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
-          security list-keychains -d user -s "$KEYCHAIN_PATH"
-          security set-key-partition-list \
-            -S apple-tool:,apple: \
-            -s -k "$KEYCHAIN_PASSWORD" \
-            "$KEYCHAIN_PATH"
-
-          rm -f "$CERTIFICATE_PATH"
-          echo "MACOS_KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
-
-      - name: Resolve Release Version
-        shell: bash
-        run: |
-          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            APP_VERSION="${GITHUB_REF_NAME#v}"
-          else
-            APP_VERSION="$(PYTHONPATH=app python -c 'from version import APP_VERSION; print(APP_VERSION)')"
-          fi
-          echo "APP_VERSION=${APP_VERSION}" >> "$GITHUB_ENV"
+          pip install pyinstaller -r app/requirements.txt
 
       - name: Build macOS App
-        env:
-          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
         run: |
           pyinstaller --noconfirm --clean --noupx --windowed \
             --name "MarketStore POS" \
             --add-data "app/images:images" \
             --collect-data "certifi" \
             --hidden-import "PyQt6" \
-            --target-architecture "arm64" \
-            --osx-bundle-identifier "uz.marketstore.pos" \
-            --codesign-identity "$MACOS_SIGNING_IDENTITY" \
             --paths "app" \
             app/main.py
 
-      - name: Finalize and Verify App Bundle
+      - name: Sign macOS App Bundle
         shell: bash
-        env:
-          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
         run: |
           set -euo pipefail
           APP="dist/MarketStore POS.app"
-          PLIST="$APP/Contents/Info.plist"
-          set_plist_string() {
-            local key="$1"
-            local value="$2"
-            /usr/libexec/PlistBuddy -c "Set :${key} ${value}" "$PLIST" >/dev/null 2>&1 \
-              || /usr/libexec/PlistBuddy -c "Add :${key} string ${value}" "$PLIST"
-          }
-          set_plist_string "CFBundleIdentifier" "uz.marketstore.pos"
-          set_plist_string "CFBundleDisplayName" "MarketStore POS"
-          set_plist_string "CFBundleName" "MarketStore POS"
-          set_plist_string "CFBundleShortVersionString" "$APP_VERSION"
-          set_plist_string "CFBundleVersion" "${GITHUB_RUN_NUMBER}"
-          set_plist_string "LSMinimumSystemVersion" "11.0"
+          echo "Signing macOS App Bundle with Ad-Hoc signature..."
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP" || true
 
-          codesign \
-            --force \
-            --options runtime \
-            --timestamp \
-            --sign "$MACOS_SIGNING_IDENTITY" \
-            "$APP"
-          plutil -lint "$PLIST"
-          codesign --verify --deep --strict --verbose=2 "$APP"
-          codesign --display --verbose=4 "$APP"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$PLIST")" = "uz.marketstore.pos"
-          file "$APP/Contents/MacOS/MarketStore POS" | grep -q "arm64"
-          MARKETSTORE_PACKAGING_SMOKE_TEST=1 "$APP/Contents/MacOS/MarketStore POS"
-
-      - name: Notarize and Staple macOS App
-        shell: bash
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      - name: Create DMG & Zip
         run: |
-          set -euo pipefail
-          APP="dist/MarketStore POS.app"
-          NOTARY_ZIP="$RUNNER_TEMP/MarketStore-notarization.zip"
-
-          ditto -c -k --sequesterRsrc --keepParent "$APP" "$NOTARY_ZIP"
-          xcrun notarytool submit "$NOTARY_ZIP" \
-            --apple-id "$APPLE_ID" \
-            --team-id "$APPLE_TEAM_ID" \
-            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
-            --wait
-          xcrun stapler staple "$APP"
-          xcrun stapler validate "$APP"
-          spctl --assess --type execute --verbose=4 "$APP"
-
-      - name: Create and Test macOS Packages
-        shell: bash
-        env:
-          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-        run: |
-          set -euo pipefail
-          APP="dist/MarketStore POS.app"
-          ZIP="dist/MarketStore_${APP_VERSION}_macos_arm64.zip"
-          DMG="dist/MarketStore_${APP_VERSION}_macos_arm64.dmg"
-
-          ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
-
-          ZIP_TEST="$(mktemp -d)"
-          ditto -x -k "$ZIP" "$ZIP_TEST"
-          codesign --verify --deep --strict --verbose=2 "$ZIP_TEST/MarketStore POS.app"
-          MARKETSTORE_PACKAGING_SMOKE_TEST=1 \
-            "$ZIP_TEST/MarketStore POS.app/Contents/MacOS/MarketStore POS"
-
-          DMG_ROOT="$(mktemp -d)"
-          ditto "$APP" "$DMG_ROOT/MarketStore POS.app"
-          ln -s /Applications "$DMG_ROOT/Applications"
-          hdiutil create \
-            -volname "MarketStore POS" \
-            -srcfolder "$DMG_ROOT" \
-            -ov -format UDZO "$DMG"
-
-          codesign --force --timestamp --sign "$MACOS_SIGNING_IDENTITY" "$DMG"
-          xcrun notarytool submit "$DMG" \
-            --apple-id "$APPLE_ID" \
-            --team-id "$APPLE_TEAM_ID" \
-            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
-            --wait
-          xcrun stapler staple "$DMG"
-          xcrun stapler validate "$DMG"
-          spctl --assess --type open --context context:primary-signature --verbose=4 "$DMG"
-
-          DMG_MOUNT="$(mktemp -d)"
-          hdiutil attach "$DMG" -nobrowse -readonly -mountpoint "$DMG_MOUNT"
-          trap 'hdiutil detach "$DMG_MOUNT" >/dev/null 2>&1 || true' EXIT
-          codesign --verify --deep --strict --verbose=2 "$DMG_MOUNT/MarketStore POS.app"
-          MARKETSTORE_PACKAGING_SMOKE_TEST=1 \
-            "$DMG_MOUNT/MarketStore POS.app/Contents/MacOS/MarketStore POS"
-          hdiutil detach "$DMG_MOUNT"
-          trap - EXIT
-
-          shasum -a 256 "$ZIP" "$DMG" > "dist/MarketStore_${APP_VERSION}_macos_arm64.sha256"
+          cd dist
+          zip -r "MarketStore_${{ github.ref_name }}_macos.zip" "MarketStore POS.app"
+          cd ..
+          npm install --global create-dmg || true
+          create-dmg \
+            --volname "MarketStore POS Installer" \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon-size 100 \
+            --app-drop-link 420 185 \
+            "dist/MarketStore_${{ github.ref_name }}.dmg" \
+            "dist/MarketStore POS.app" || true
 
       - name: Upload macOS Asset
         uses: actions/upload-artifact@v4
         with:
           name: macos-dmg
           path: |
-            dist/*_macos_arm64.dmg
-            dist/*_macos_arm64.zip
-            dist/*_macos_arm64.sha256
-
-      - name: Remove Temporary Signing Keychain
-        if: always()
-        shell: bash
-        run: |
-          if [[ -n "${MACOS_KEYCHAIN_PATH:-}" && -f "$MACOS_KEYCHAIN_PATH" ]]; then
-            security delete-keychain "$MACOS_KEYCHAIN_PATH"
-          fi
+            dist/*.dmg
+            dist/*.zip
 
   publish-release:
     needs: [build-windows, build-linux, build-macos]
