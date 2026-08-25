@@ -213,7 +213,7 @@ class UpdaterDialog(QDialog):
         file_size = data.get("file_size", 0)
         size_str = f" ({file_size / (1024 * 1024):.1f} MB)" if file_size > 0 else ""
 
-        self.primary_btn.setText(f"⬇️ {self._tr('Yuklab olish va yangilash')}{size_str}")
+        self.primary_btn.setText(f"{self._tr('Yuklab olish va yangilash')}{size_str}")
         self.primary_btn.setStyleSheet("""
             QPushButton#primaryBtn {
                 background: #10b981; color: white; border: none; border-radius: 6px;
@@ -290,7 +290,7 @@ class UpdaterDialog(QDialog):
         self.progress_bar.setValue(100)
         self.progress_detail_lbl.setText(self._tr("O'rnatish uchun tayyor."))
 
-        self.primary_btn.setText(f"🔄 {self._tr('Dasturni qayta ishga tushirish')}")
+        self.primary_btn.setText(self._tr("Dasturni qayta ishga tushirish"))
         self.primary_btn.setStyleSheet("""
             QPushButton#primaryBtn {
                 background: #059669; color: white; border: none; border-radius: 6px;

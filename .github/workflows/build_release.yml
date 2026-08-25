@@ -257,3 +257,31 @@ jobs:
             macos-dmg/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Tells the API a new build is out. Every running desktop client is
+      # already holding a sync event stream open, so they all light up their
+      # update badge within a second or two - without a single one of them
+      # having to poll GitHub and burn through the API rate limit.
+      # Needs repo secrets: MARKETSTORE_API_URL and RELEASE_PING_SECRET.
+      - name: Notify MarketStore API
+        continue-on-error: true
+        env:
+          # Passed as env rather than inlined into the script: keeps the secret
+          # out of the rendered command line and blocks script injection.
+          API_URL: ${{ secrets.MARKETSTORE_API_URL }}
+          PING_SECRET: ${{ secrets.RELEASE_PING_SECRET }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if [ -z "$API_URL" ] || [ -z "$PING_SECRET" ]; then
+            echo "Release ping is not configured; skipping."
+            exit 0
+          fi
+          payload=$(printf '{"tag": "%s"}' "$RELEASE_TAG")
+          curl --fail --silent --show-error --location \
+            --max-time 20 --retry 3 --retry-delay 5 \
+            -X POST "${API_URL%/}/api/v1/app/release-published" \
+            -H "Content-Type: application/json" \
+            -H "X-Release-Secret: $PING_SECRET" \
+            -H "ngrok-skip-browser-warning: true" \
+            -d "$payload"
+          echo "Notified API about $RELEASE_TAG"

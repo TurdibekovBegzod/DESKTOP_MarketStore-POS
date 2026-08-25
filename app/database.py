@@ -1,4 +1,5 @@
 import base64
+import gzip
 import hashlib
 import json
 import os
@@ -1880,6 +1881,207 @@ def has_pending_sync_for_table(table_name):
 def has_seen_server_account_assets():
     with _get_engine().begin() as conn:
         return _sync_state_get(conn, "account_assets_server_seen") == "1"
+
+
+# --------------------------------------------------------------------------
+# Realtime sync state: server generation, remote-change flag, safety backups
+# --------------------------------------------------------------------------
+
+BACKUP_DIR = os.path.join(DATA_DIR, "backups")
+
+
+def get_sync_generation():
+    """Server change counter as of our last successful push/pull."""
+    with _get_engine().begin() as conn:
+        return _sync_state_int(conn, "server_generation", 0)
+
+
+def set_sync_generation(value):
+    try:
+        generation = int(value)
+    except (TypeError, ValueError):
+        return
+    with _get_engine().begin() as conn:
+        _sync_state_set(conn, "server_generation", str(generation))
+
+
+def mark_remote_change(generation, tables=None, device_key=None, changed_at=None):
+    """Remember that the server moved ahead of us, so the badge survives restart."""
+    try:
+        generation = int(generation)
+    except (TypeError, ValueError):
+        return
+    with _get_engine().begin() as conn:
+        if generation <= _sync_state_int(conn, "server_generation", 0):
+            return
+        _sync_state_set(conn, "remote_generation", str(generation))
+        _sync_state_set(conn, "remote_tables", ",".join(sorted({t for t in (tables or []) if t})))
+        _sync_state_set(conn, "remote_device_key", str(device_key or ""))
+        _sync_state_set(conn, "remote_changed_at", str(changed_at or _utc_now()))
+
+
+def clear_remote_change():
+    with _get_engine().begin() as conn:
+        _sync_state_set(conn, "remote_generation", "0")
+        _sync_state_set(conn, "remote_tables", "")
+        _sync_state_set(conn, "remote_device_key", "")
+        _sync_state_set(conn, "remote_changed_at", "")
+
+
+def get_remote_change():
+    with _get_engine().begin() as conn:
+        known = _sync_state_int(conn, "server_generation", 0)
+        remote = _sync_state_int(conn, "remote_generation", 0)
+        tables = (_sync_state_get(conn, "remote_tables") or "").split(",")
+        return Row(
+            pending=bool(remote > known),
+            generation=remote,
+            known_generation=known,
+            tables=[table for table in tables if table],
+            device_key=_sync_state_get(conn, "remote_device_key") or "",
+            changed_at=_sync_state_get(conn, "remote_changed_at") or "",
+        )
+
+
+def count_sync_records():
+    """Number of rows across every synced table in the local database."""
+    total = 0
+    with _get_engine().begin() as conn:
+        for table_name in SYNC_TABLES:
+            if not _has_table(conn, table_name):
+                continue
+            total += conn.exec_driver_sql(
+                f"SELECT COUNT(*) FROM {_quote_identifier(table_name)}"
+            ).scalar() or 0
+    return int(total)
+
+
+def create_local_backup(tag="presync"):
+    """Snapshot the active account database before a destructive sync choice."""
+    if not DB_PATH or DB_PATH == ":memory:" or not os.path.exists(DB_PATH):
+        return None
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    account = os.path.basename(os.path.dirname(DB_PATH)) or "account"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    target = os.path.join(BACKUP_DIR, f"{account}.{tag}_{timestamp}.db")
+    try:
+        with _get_engine().begin() as conn:
+            conn.exec_driver_sql("PRAGMA wal_checkpoint(FULL)")
+    except Exception:
+        pass
+    try:
+        _copy_sqlite_database(DB_PATH, target)
+    except Exception:
+        return None
+    return target
+
+
+def save_server_snapshot_backup(records, tag="server_snapshot"):
+    """Persist the server copy to disk before we overwrite it with ours."""
+    if not records:
+        return None
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    account = os.path.basename(os.path.dirname(DB_PATH)) or "account"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    target = os.path.join(BACKUP_DIR, f"{account}.{tag}_{timestamp}.json.gz")
+    try:
+        payload = json.dumps(
+            {"saved_at": _utc_now(), "records": records},
+            ensure_ascii=False,
+            default=str,
+        ).encode("utf-8")
+        with gzip.open(target, "wb") as handle:
+            handle.write(payload)
+    except Exception:
+        return None
+    return target
+
+
+def set_known_release(version, tag=None, published_at=None):
+    """Remember the newest published build we have been told about."""
+    version = str(version or "").strip()
+    if not version:
+        return
+    with _get_engine().begin() as conn:
+        _sync_state_set(conn, "latest_release_version", version)
+        _sync_state_set(conn, "latest_release_tag", str(tag or ""))
+        _sync_state_set(conn, "latest_release_at", str(published_at or ""))
+
+
+def get_known_release():
+    with _get_engine().begin() as conn:
+        return Row(
+            version=_sync_state_get(conn, "latest_release_version") or "",
+            tag=_sync_state_get(conn, "latest_release_tag") or "",
+            published_at=_sync_state_get(conn, "latest_release_at") or "",
+        )
+
+
+def _protected_user_ids(conn):
+    """Local user rows that must survive a wipe: the signed-in online account."""
+    if not _ACTIVE_ACCOUNT_UID or not _has_table(conn, "user_settings"):
+        return []
+    rows = conn.exec_driver_sql(
+        "SELECT user_id FROM user_settings WHERE key='api_user_uid' AND value=?",
+        (_ACTIVE_ACCOUNT_UID,),
+    ).fetchall()
+    return [row[0] for row in rows if row[0] is not None]
+
+
+def clear_sync_outbox():
+    """Drop queued local changes (used when the user chooses the server copy)."""
+    with _get_engine().begin() as conn:
+        _ensure_sync_outbox_table(conn)
+        conn.exec_driver_sql("DELETE FROM sync_outbox")
+        if _has_table(conn, "sync_tombstones"):
+            conn.exec_driver_sql("DELETE FROM sync_tombstones")
+        _sync_state_set(conn, "last_dirty_at", "")
+        _sync_state_set(conn, "pending_change_count", "0")
+
+
+def wipe_sync_tables():
+    """Empty every synced table, keeping the signed-in account's own user row.
+
+    Deleting that row would take its ``user_settings`` (including the API token)
+    with it via the cascade and lock the user out of their own account.
+    """
+    global _SYNC_SUSPENDED
+    previous = _SYNC_SUSPENDED
+    _SYNC_SUSPENDED = True
+    try:
+        with _get_engine().begin() as conn:
+            protected = _protected_user_ids(conn)
+            # Children first: SYNC_TABLES is ordered parents-first for import.
+            for table_name in reversed(SYNC_TABLES):
+                if not _has_table(conn, table_name):
+                    continue
+                quoted = _quote_identifier(table_name)
+                if table_name == "users" and protected:
+                    placeholders = ", ".join("?" for _ in protected)
+                    conn.exec_driver_sql(
+                        f"DELETE FROM {quoted} WHERE id NOT IN ({placeholders})",
+                        tuple(protected),
+                    )
+                else:
+                    conn.exec_driver_sql(f"DELETE FROM {quoted}")
+            if _has_table(conn, "sync_tombstones"):
+                conn.exec_driver_sql("DELETE FROM sync_tombstones")
+            _ensure_sync_outbox_table(conn)
+            conn.exec_driver_sql("DELETE FROM sync_outbox")
+    finally:
+        _SYNC_SUSPENDED = previous
+
+
+def replace_local_from_records(records):
+    """Anki-style "download from server": local content is replaced wholesale."""
+    wipe_sync_tables()
+    imported = import_sync_records(records)
+    with _get_engine().begin() as conn:
+        _sync_state_set(conn, "last_dirty_at", "")
+        _sync_state_set(conn, "pending_change_count", "0")
+        _sync_state_set(conn, "server_bootstrap_required", "0")
+        _sync_state_set(conn, "server_reseed_required", "0")
+    return imported
 
 
 def _product_row(product, category_name=None, template_name=None, supplier_name=None, creator_name=None, creator_role=None):

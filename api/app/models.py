@@ -112,3 +112,38 @@ class UserRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
     user: Mapped[User] = relationship(back_populates="records", foreign_keys=[user_id])
+
+
+class SyncMeta(Base):
+    __tablename__ = "sync_meta"
+
+    user_uid: Mapped[str] = mapped_column(
+        ForeignKey("users.uid", ondelete="CASCADE"), primary_key=True
+    )
+    generation: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_change_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_device_key: Mapped[str | None] = mapped_column(String(120))
+    last_tables: Mapped[list | None] = mapped_column(JSONB)
+
+
+class AppRelease(Base):
+    """The newest published desktop build, as told to us by the release workflow.
+
+    A single row (id=1). Keeping it in the database rather than process memory
+    means it survives restarts, is shared across uvicorn workers, and can be
+    served to clients without touching the GitHub API at all.
+    """
+
+    __tablename__ = "app_releases"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    tag: Mapped[str] = mapped_column(String(80), nullable=False)
+    version: Mapped[str] = mapped_column(String(40), nullable=False)
+    name: Mapped[str | None] = mapped_column(String(200))
+    notes: Mapped[str | None] = mapped_column(Text)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    assets: Mapped[list | None] = mapped_column(JSONB)
+    source: Mapped[str] = mapped_column(String(20), default="ping", nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )

@@ -202,18 +202,37 @@ class PushRequest(BaseModel):
     device: DeviceIn | None = None
     records: list[RecordIn] = Field(default_factory=list, max_length=1000)
     note: str | None = Field(default=None, max_length=500)
+    # When set, the server refuses the push with 409 if another device has
+    # written since the caller last synced. Omit it to force the write through.
+    expected_generation: int | None = Field(default=None, ge=0)
 
 
 class PushResponse(BaseModel):
     saved: int
     batch_id: int
+    generation: int = 0
 
 
 class PullResponse(BaseModel):
     records: list[RecordOut]
     server_time: datetime
+    generation: int = 0
     has_more: bool = False
     next_offset: int | None = None
+
+
+class ResetResponse(BaseModel):
+    removed: int
+    generation: int
+
+
+class SyncStateOut(BaseModel):
+    generation: int
+    last_change_at: datetime | None = None
+    last_device_key: str | None = None
+    last_tables: list[str] = Field(default_factory=list)
+    records_count: int = 0
+    server_time: datetime
 
 
 class SummaryItem(BaseModel):

@@ -14,6 +14,9 @@ import sys
 import api_client
 import database as db
 import sync_service
+from realtime import SyncEventListener
+from updater import is_newer_version
+from version import APP_VERSION
 
 from ui.sales_widget import CurrencyDialog, SalesWidget
 from ui.products_widget import ProductsWidget
@@ -269,6 +272,31 @@ TEXTS = {
         "sync_push": "Yuborish", "sync_pull": "Olish",
         "sync_done": "Sync tugadi", "sync_error": "Sync xatosi",
         "sync_pending_count": "Yuborilmagan o'zgarishlar",
+        "sync_remote": "Serverda yangi o'zgarish bor",
+        "sync_remote_toast": "Boshqa qurilmada o'zgarish qilindi. Yuklab oling.",
+        "sync_remote_title": "Yangi o'zgarish",
+        "sync_checking": "Tekshirilmoqda...",
+        "sync_offline_stream": "Realtime aloqa uzildi",
+        "sync_online_stream": "Realtime aloqa tiklandi",
+        "sync_logo_updated": "Logo boshqa qurilmadan yangilandi.",
+        "release_available": "Yangi versiya chiqdi",
+        "release_available_toast": "Yangi versiya {v} chiqdi. Account bo'limidan yangilang.",
+        "release_badge_tooltip": "Yangi versiya mavjud: {v}",
+        "sync_server_new_count": "Serverdagi yozuvlar",
+        "conflict_title": "Sinxronizatsiya to'qnashuvi",
+        "conflict_head": "Lokal baza ham, serverdagi baza ham o'zgargan.",
+        "conflict_explain": "Faqat bitta tomonni tanlashingiz kerak. Tanlanmagan tomon avtomatik zaxiraga (backup) saqlanadi.",
+        "conflict_local_line": "Bu qurilmada yuborilmagan o'zgarishlar",
+        "conflict_server_line": "Serverda saqlangan yozuvlar",
+        "conflict_server_device": "Oxirgi o'zgartirgan qurilma",
+        "conflict_server_at": "Oxirgi o'zgarish vaqti",
+        "conflict_download": "Serverdan yuklab olish",
+        "conflict_download_hint": "Bu qurilmadagi {n} ta yuborilmagan o'zgarish o'chadi (backup saqlanadi).",
+        "conflict_upload": "O'zimnikini yuborish",
+        "conflict_upload_hint": "Serverdagi {n} ta yozuv o'chadi (backup saqlanadi).",
+        "conflict_cancel": "Hozir emas",
+        "conflict_working": "Bajarilmoqda, kutib turing...",
+        "conflict_backup_saved": "Zaxira nusxa saqlandi:",
         "Admin": "Admin", "Kassir": "Kassir", "sales": "Sotuv",
         "products": "Mahsulotlar", "stock": "Ombor", "finalize_sales": "Sotishni yakunlash",
         "sales_details": "Sotuv tafsilotlari",
@@ -300,6 +328,31 @@ TEXTS = {
         "sync_push": "Upload", "sync_pull": "Download",
         "sync_done": "Sync completed", "sync_error": "Sync error",
         "sync_pending_count": "Unsynced changes",
+        "sync_remote": "New changes on the server",
+        "sync_remote_toast": "Another device made changes. Download them.",
+        "sync_remote_title": "New changes",
+        "sync_checking": "Checking...",
+        "sync_offline_stream": "Realtime link lost",
+        "sync_online_stream": "Realtime link restored",
+        "sync_logo_updated": "Logo updated from another device.",
+        "release_available": "New version available",
+        "release_available_toast": "Version {v} is out. Update it from the account menu.",
+        "release_badge_tooltip": "New version available: {v}",
+        "sync_server_new_count": "Records on server",
+        "conflict_title": "Sync conflict",
+        "conflict_head": "Your local database and the server have both changed.",
+        "conflict_explain": "You must pick one side. The other side is backed up automatically.",
+        "conflict_local_line": "Unsynced changes on this device",
+        "conflict_server_line": "Records stored on the server",
+        "conflict_server_device": "Last changed by device",
+        "conflict_server_at": "Last change time",
+        "conflict_download": "Download from server",
+        "conflict_download_hint": "Discards {n} unsynced local change(s) (a backup is kept).",
+        "conflict_upload": "Upload mine",
+        "conflict_upload_hint": "Discards {n} record(s) on the server (a backup is kept).",
+        "conflict_cancel": "Not now",
+        "conflict_working": "Working, please wait...",
+        "conflict_backup_saved": "Backup saved:",
         "Admin": "Admin", "Kassir": "Cashier", "sales": "Sales",
         "products": "Products", "stock": "Stock", "finalize_sales": "Finalize sales",
         "sales_details": "Sales details",
@@ -358,6 +411,31 @@ TEXTS["ru"].update({
 
 TEXTS["ru"].update({
     "sync_pending_count": "Неотправленные изменения",
+    "sync_remote": "На сервере есть новые изменения",
+    "sync_remote_toast": "Другое устройство внесло изменения. Загрузите их.",
+    "sync_remote_title": "Новые изменения",
+    "sync_checking": "Проверка...",
+    "sync_offline_stream": "Связь в реальном времени потеряна",
+    "sync_online_stream": "Связь в реальном времени восстановлена",
+    "sync_logo_updated": "Логотип обновлён с другого устройства.",
+    "release_available": "Вышла новая версия",
+    "release_available_toast": "Вышла версия {v}. Обновите через раздел аккаунта.",
+    "release_badge_tooltip": "Доступна новая версия: {v}",
+    "sync_server_new_count": "Записей на сервере",
+    "conflict_title": "Конфликт синхронизации",
+    "conflict_head": "Локальная база и база на сервере обе изменились.",
+    "conflict_explain": "Нужно выбрать одну сторону. Другая будет автоматически сохранена в резервную копию.",
+    "conflict_local_line": "Неотправленные изменения на этом устройстве",
+    "conflict_server_line": "Записей сохранено на сервере",
+    "conflict_server_device": "Последнее устройство",
+    "conflict_server_at": "Время последнего изменения",
+    "conflict_download": "Загрузить с сервера",
+    "conflict_download_hint": "Будет удалено {n} локальных изменений (резервная копия сохраняется).",
+    "conflict_upload": "Отправить свои",
+    "conflict_upload_hint": "Будет удалено {n} записей на сервере (резервная копия сохраняется).",
+    "conflict_cancel": "Не сейчас",
+    "conflict_working": "Выполняется, подождите...",
+    "conflict_backup_saved": "Резервная копия сохранена:",
 })
 
 
@@ -616,6 +694,7 @@ class AdminPasswordDialog(QDialog):
 class SyncWorker(QObject):
     finished = pyqtSignal(dict)
     failed = pyqtSignal(str)
+    conflict = pyqtSignal(dict)
 
     def __init__(self, action, user):
         super().__init__()
@@ -625,14 +704,168 @@ class SyncWorker(QObject):
     def run(self):
         try:
             if self.action == "push":
+                info = sync_service.describe_sync(self.user)
+                if info["conflict"]:
+                    self.conflict.emit(info)
+                    return
                 res = sync_service.push_local_changes(self.user)
             elif self.action == "pull":
+                info = sync_service.describe_sync(self.user)
+                if info["conflict"]:
+                    self.conflict.emit(info)
+                    return
                 res = sync_service.pull_server_changes(self.user)
+            elif self.action == "assets":
+                res = sync_service.refresh_account_assets(self.user)
+            elif self.action == "force_download":
+                res = sync_service.force_download(self.user)
+            elif self.action == "force_upload":
+                res = sync_service.force_upload(self.user)
+            elif self.action == "state":
+                res = sync_service.describe_sync(self.user)
             else:
                 res = sync_service.synchronize_account_storage(self.user)
-            self.finished.emit(res)
+            payload = dict(res or {})
+            payload.setdefault("action", self.action)
+            self.finished.emit(payload)
+        except sync_service.SyncConflict as exc:
+            self.conflict.emit(exc.info)
         except Exception as exc:
             self.failed.emit(str(exc))
+
+
+class ConflictDialog(QDialog):
+    """Anki-style "pick one side" prompt, with the losing side backed up.
+
+    Anki asks the same question but simply throws the other copy away. A POS
+    database holds real sales, so both branches snapshot what they are about to
+    overwrite before anything is destroyed.
+    """
+
+    DOWNLOAD = "download"
+    UPLOAD = "upload"
+
+    def __init__(self, info, parent=None):
+        super().__init__(parent)
+        self.info = dict(info or {})
+        self.choice = None
+        self.labels = getattr(parent, "labels", TEXTS["uz"])
+        self.theme = THEMES.get(getattr(parent, "settings", {}).get("theme"), THEMES["dark_blue"])
+        self.setWindowTitle(self.labels.get("conflict_title", "Sinxronizatsiya to'qnashuvi"))
+        self.setModal(True)
+        self.setFixedWidth(460)
+        self._build_ui()
+
+    def _build_ui(self):
+        theme = self.theme
+        local_pending = int(self.info.get("local_pending") or 0)
+        server_records = int(self.info.get("server_records") or 0)
+
+        self.setStyleSheet(f"""
+            QDialog {{ background: {theme['topbar']}; }}
+            QLabel {{ color: {theme['title']}; font-size: 13px; }}
+            QLabel#conflictHead {{ font-size: 15px; font-weight: bold; }}
+            QLabel#conflictWarn {{
+                background: #fef3c7; color: #92400e;
+                border-radius: 8px; padding: 10px 12px;
+            }}
+            QLabel#conflictHint {{ color: #64748b; font-size: 11px; }}
+            QFrame#conflictCard {{
+                background: rgba(148, 163, 184, 0.12);
+                border: 1px solid #cbd5e1; border-radius: 8px;
+            }}
+            QPushButton {{
+                border: 1px solid #cbd5e1; border-radius: 7px;
+                padding: 9px 14px; font-size: 13px;
+                background: {theme['topbar']}; color: {theme['title']};
+            }}
+            QPushButton#downloadChoice {{
+                background: #3b82f6; color: white; border: none; font-weight: bold;
+            }}
+            QPushButton#uploadChoice {{
+                background: #f97316; color: white; border: none; font-weight: bold;
+            }}
+            QPushButton:disabled {{ background: #e2e8f0; color: #94a3b8; }}
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        head = QLabel(self.labels.get("conflict_head", ""))
+        head.setObjectName("conflictHead")
+        head.setWordWrap(True)
+        layout.addWidget(head)
+
+        warn = QLabel(self.labels.get("conflict_explain", ""))
+        warn.setObjectName("conflictWarn")
+        warn.setWordWrap(True)
+        layout.addWidget(warn)
+
+        card = QFrame()
+        card.setObjectName("conflictCard")
+        card_lay = QVBoxLayout(card)
+        card_lay.setContentsMargins(14, 12, 14, 12)
+        card_lay.setSpacing(6)
+        rows = [
+            (self.labels.get("conflict_local_line", ""), str(local_pending)),
+            (self.labels.get("conflict_server_line", ""), str(server_records)),
+        ]
+        device_key = self.info.get("server_device_key")
+        if device_key:
+            rows.append((self.labels.get("conflict_server_device", ""), str(device_key)))
+        changed_at = self.info.get("server_changed_at")
+        if changed_at:
+            rows.append((self.labels.get("conflict_server_at", ""), str(changed_at)[:19].replace("T", " ")))
+        for title, value in rows:
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            left = QLabel(f"{title}:")
+            right = QLabel(f"<b>{value}</b>")
+            right.setTextFormat(Qt.TextFormat.RichText)
+            row.addWidget(left)
+            row.addStretch()
+            row.addWidget(right)
+            card_lay.addLayout(row)
+        layout.addWidget(card)
+
+        self.download_btn = QPushButton(self.labels.get("conflict_download", "Serverdan yuklab olish"))
+        self.download_btn.setObjectName("downloadChoice")
+        self.download_btn.setFixedHeight(38)
+        self.download_btn.clicked.connect(lambda: self._choose(self.DOWNLOAD))
+        layout.addWidget(self.download_btn)
+        download_hint = QLabel(
+            self.labels.get("conflict_download_hint", "").replace("{n}", str(local_pending))
+        )
+        download_hint.setObjectName("conflictHint")
+        download_hint.setWordWrap(True)
+        layout.addWidget(download_hint)
+
+        self.upload_btn = QPushButton(self.labels.get("conflict_upload", "O'zimnikini yuborish"))
+        self.upload_btn.setObjectName("uploadChoice")
+        self.upload_btn.setFixedHeight(38)
+        self.upload_btn.clicked.connect(lambda: self._choose(self.UPLOAD))
+        layout.addWidget(self.upload_btn)
+        upload_hint = QLabel(
+            self.labels.get("conflict_upload_hint", "").replace("{n}", str(server_records))
+        )
+        upload_hint.setObjectName("conflictHint")
+        upload_hint.setWordWrap(True)
+        layout.addWidget(upload_hint)
+
+        btns = QHBoxLayout()
+        btns.addStretch()
+        self.cancel_btn = QPushButton(self.labels.get("conflict_cancel", "Hozir emas"))
+        self.cancel_btn.clicked.connect(self.reject)
+        btns.addWidget(self.cancel_btn)
+        layout.addLayout(btns)
+
+    def _choose(self, choice):
+        self.choice = choice
+        self.download_btn.setEnabled(False)
+        self.upload_btn.setEnabled(False)
+        self.cancel_btn.setEnabled(False)
+        self.accept()
 
 
 class SyncDialog(QDialog):
@@ -707,13 +940,25 @@ class SyncDialog(QDialog):
             return
         pending = status["pending"]
         pending_count = int(status.get("pending_change_count") or 0)
-        text = self.labels.get("sync_dirty", "Yuborilmagan o'zgarish bor") if pending else self.labels.get("sync_clean", "Sinxron")
+        remote = db.get_remote_change()
+        if remote.get("pending"):
+            text = self.labels.get("sync_remote", "Serverda yangi o'zgarish bor")
+            style = "background:#dbeafe;color:#1e40af;"
+        elif pending:
+            text = self.labels.get("sync_dirty", "Yuborilmagan o'zgarish bor")
+            style = "background:#fef3c7;color:#92400e;"
+        else:
+            text = self.labels.get("sync_clean", "Sinxron")
+            style = "background:#dcfce7;color:#166534;"
         self.status_lbl.setText(text)
         pending_label = self.labels.get("sync_pending_count", "Yuborilmagan o'zgarishlar")
-        self.info_lbl.setText(f"{pending_label}: {pending_count}")
-        self.status_lbl.setStyleSheet(
-            "background:#fef3c7;color:#92400e;" if pending else "background:#dcfce7;color:#166534;"
-        )
+        lines = [f"{pending_label}: {pending_count}"]
+        if remote.get("pending"):
+            tables = ", ".join(remote.get("tables") or []) or "-"
+            remote_title = self.labels.get("sync_remote_title", "Yangi o'zgarish")
+            lines.append(f"{remote_title}: {tables}")
+        self.info_lbl.setText("\n".join(lines))
+        self.status_lbl.setStyleSheet(style)
         self.pull_btn.setEnabled(True)
         self.push_btn.setEnabled(True)
 
@@ -883,9 +1128,20 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1280, 780)
         self.activity_signal.connect(self._handle_activity_toast)
         db.register_activity_listener(self._on_database_activity)
+        self._realtime_thread = None
+        self._realtime_worker = None
+        # None = not attempted yet, so the tooltip does not accuse the link of
+        # being down during the first second of startup.
+        self._realtime_online = None
+        self._conflict_dialog_open = False
+        self._pending_asset_generation = None
+        self._assets_checked_generation = None
+        self._pending_asset_check = None
+        self._release_toast_shown_for = None
         self._build_ui()
         self._start_clock()
         self._save_user_activity(force=True)
+        self._start_realtime_listener()
         app = QApplication.instance()
         if app:
             app.installEventFilter(self)
@@ -901,6 +1157,7 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         if hasattr(self, "toast_manager"):
             self.toast_manager.reposition()
+        self._position_release_dot()
 
     def show_toast(self, message, title=None, level="success", duration_ms=4000):
         if hasattr(self, "toast_manager"):
@@ -914,6 +1171,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         if not self._logging_out:
             self._save_user_activity(force=True)
+        self._stop_realtime_listener()
         db.unregister_activity_listener(self._on_database_activity)
         app = QApplication.instance()
         if app:
@@ -1082,6 +1340,16 @@ class MainWindow(QMainWindow):
         user_top_row.addStretch()
         user_top_row.addWidget(self.user_help_lbl)
 
+        # Update badge: same idea as the sync button's counter in the top bar,
+        # but a plain red dot - there is nothing to count, a release either is
+        # newer than what is installed or it is not.
+        self.release_dot_lbl = QLabel(self.user_menu_btn)
+        self.release_dot_lbl.setFixedSize(10, 10)
+        self.release_dot_lbl.setStyleSheet(
+            "background:#ef4444;border:1px solid #ffffff;border-radius:5px;"
+        )
+        self.release_dot_lbl.hide()
+
         user_lay.addWidget(self.user_menu_btn)
         sb_layout.addWidget(self.user_frame)
 
@@ -1164,6 +1432,7 @@ class MainWindow(QMainWindow):
         self._switch_page("sales")
         self._refresh_sync_status()
         self._refresh_notif_badge()
+        self._refresh_release_badge()
         self.sync_status_timer = QTimer(self)
         self.sync_status_timer.timeout.connect(self._refresh_sync_status)
         self.sync_status_timer.timeout.connect(self._refresh_notif_badge)
@@ -1360,32 +1629,54 @@ class MainWindow(QMainWindow):
             self.sync_btn.setToolTip("Offline")
             self.sync_btn.setEnabled(False)
             self._apply_sync_card_state("offline")
-            self._update_sync_badge(0)
+            self._update_sync_badge(0, remote_pending=False)
             return
-        state = "dirty" if status["pending"] else "clean"
-        text = self.labels.get("sync_dirty", "Yuborilmagan o'zgarish bor") if status["pending"] else self.labels.get("sync_clean", "Sinxron")
+        remote = db.get_remote_change()
+        remote_pending = bool(remote.get("pending"))
+        pending_count = int(status.get("pending_change_count") or 0)
+        if remote_pending:
+            state = "remote"
+            text = self.labels.get("sync_remote", "Serverda yangi o'zgarish bor")
+        elif status["pending"]:
+            state = "dirty"
+            text = self.labels.get("sync_dirty", "Yuborilmagan o'zgarish bor")
+        else:
+            state = "clean"
+            text = self.labels.get("sync_clean", "Sinxron")
+        if remote_pending and pending_count:
+            text = f"{text} ({pending_count})"
+        if self._realtime_online is False:
+            offline_note = self.labels.get("sync_offline_stream", "Realtime aloqa uzildi")
+            text = f"{text} - {offline_note}"
         self.sync_btn.setToolTip(text)
         self.sync_btn.setEnabled(True)
         self._apply_sync_card_state(state)
-        self._update_sync_badge(status.get("pending_change_count") or 0)
+        self._update_sync_badge(pending_count, remote_pending=remote_pending)
 
-    def _update_sync_badge(self, count):
+    def _update_sync_badge(self, count, remote_pending=False):
         if not hasattr(self, "sync_badge_lbl"):
             return
         try:
             count = int(count)
         except (TypeError, ValueError):
             count = 0
-        if count <= 0:
+        if count <= 0 and not remote_pending:
             self.sync_badge_lbl.hide()
             return
-        text = "99+" if count > 99 else str(count)
-        width = 22 if count > 99 else 16
+        if count > 0:
+            # Local work waiting to go out keeps priority on the badge.
+            text = "99+" if count > 99 else str(count)
+            width = 22 if count > 99 else 16
+            background = "#ef4444"
+        else:
+            text = "\u2193"
+            width = 16
+            background = "#3b82f6"
         self.sync_badge_lbl.setFixedSize(width, 16)
         self.sync_badge_lbl.move(40 - width, 0)
         self.sync_badge_lbl.setText(text)
-        self.sync_badge_lbl.setStyleSheet("""
-            background: #ef4444;
+        self.sync_badge_lbl.setStyleSheet(f"""
+            background: {background};
             color: white;
             border: 1px solid white;
             border-radius: 8px;
@@ -1399,6 +1690,7 @@ class MainWindow(QMainWindow):
         palette = {
             "dirty": {"bg": "#fef3c7", "border": "#f59e0b", "text": "#92400e"},
             "clean": {"bg": "#dcfce7", "border": "#22c55e", "text": "#166534"},
+            "remote": {"bg": "#dbeafe", "border": "#3b82f6", "text": "#1e40af"},
             "offline": {"bg": "#f1f5f9", "border": "#cbd5e1", "text": "#64748b"},
         }.get(state, {"bg": "#f8fafc", "border": "#cbd5e1", "text": "#334155"})
         self.sync_btn.setStyleSheet(f"""
@@ -1481,24 +1773,42 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-    def _pull_from_server(self, show_message=False):
+    def _sync_busy(self):
+        return bool(
+            getattr(self, "_sync_thread", None) is not None
+            and self._sync_thread.isRunning()
+        )
+
+    def _start_sync_worker(self, action, on_success, show_message=False, handle_conflict=True):
+        """Run one sync action on a worker thread; only one may be in flight."""
         if not self._sync_available():
             self._refresh_sync_status()
-            return
-        if hasattr(self, "_sync_thread") and self._sync_thread and self._sync_thread.isRunning():
+            return False
+        if self._sync_busy():
             if show_message:
                 self.show_toast("Sinxronizatsiya allaqachon bajarilmoqda...", title="Sync", level="info")
-            return
-        if show_message:
-            self.show_toast("Serverdan ma'lumotlar olinmoqda...", title="Qabul qilinmoqda", level="info", duration_ms=2500)
-
+            return False
         self._sync_thread = QThread(self)
-        self._sync_worker = SyncWorker("pull", self.user)
+        self._sync_worker = SyncWorker(action, self.user)
         self._sync_worker.moveToThread(self._sync_thread)
         self._sync_thread.started.connect(self._sync_worker.run)
-        self._sync_worker.finished.connect(lambda res: self._on_pull_success(res, show_message))
+        self._sync_worker.finished.connect(on_success)
         self._sync_worker.failed.connect(self._on_sync_failed)
+        if handle_conflict:
+            self._sync_worker.conflict.connect(self._on_sync_conflict)
+        else:
+            self._sync_worker.conflict.connect(lambda _info: self._cleanup_sync_thread())
         self._sync_thread.start()
+        return True
+
+    def _pull_from_server(self, show_message=False):
+        if show_message:
+            self.show_toast("Serverdan ma'lumotlar olinmoqda...", title="Qabul qilinmoqda", level="info", duration_ms=2500)
+        self._start_sync_worker(
+            "pull",
+            lambda res: self._on_pull_success(res, show_message),
+            show_message=show_message,
+        )
 
     def _on_pull_success(self, result, show_message):
         self._cleanup_sync_thread()
@@ -1510,23 +1820,13 @@ class MainWindow(QMainWindow):
             self.show_toast(f"Ma'lumotlar serverdan muvaffaqiyatli qabul qilindi ({imported} ta yangilandi)", title="Sync tugadi", level="success")
 
     def _push_to_server(self, show_message=False):
-        if not self._sync_available():
-            self._refresh_sync_status()
-            return
-        if hasattr(self, "_sync_thread") and self._sync_thread and self._sync_thread.isRunning():
-            if show_message:
-                self.show_toast("Sinxronizatsiya allaqachon bajarilmoqda...", title="Sync", level="info")
-            return
         if show_message:
             self.show_toast("Ma'lumotlar serverga yuborilmoqda...", title="Yuborilmoqda", level="info", duration_ms=2500)
-
-        self._sync_thread = QThread(self)
-        self._sync_worker = SyncWorker("push", self.user)
-        self._sync_worker.moveToThread(self._sync_thread)
-        self._sync_thread.started.connect(self._sync_worker.run)
-        self._sync_worker.finished.connect(lambda res: self._on_push_success(res, show_message))
-        self._sync_worker.failed.connect(self._on_sync_failed)
-        self._sync_thread.start()
+        self._start_sync_worker(
+            "push",
+            lambda res: self._on_push_success(res, show_message),
+            show_message=show_message,
+        )
 
     def _on_push_success(self, result, show_message):
         self._cleanup_sync_thread()
@@ -1534,6 +1834,56 @@ class MainWindow(QMainWindow):
         if show_message:
             saved = result.get("saved", 0)
             self.show_toast(f"Ma'lumotlar serverga muvaffaqiyatli yuborildi ({saved} ta saqlandi)", title="Sync tugadi", level="success")
+
+    # ------------------------------------------------------------------
+    # Conflict resolution (Anki-style, with a backup of the discarded side)
+    # ------------------------------------------------------------------
+
+    def _on_sync_conflict(self, info):
+        self._cleanup_sync_thread()
+        self._refresh_sync_status()
+        if self._conflict_dialog_open:
+            return
+        self._conflict_dialog_open = True
+        try:
+            dialog = ConflictDialog(info, self)
+            accepted = dialog.exec()
+            choice = dialog.choice if accepted else None
+        finally:
+            self._conflict_dialog_open = False
+        if choice == ConflictDialog.DOWNLOAD:
+            self._resolve_conflict("force_download")
+        elif choice == ConflictDialog.UPLOAD:
+            self._resolve_conflict("force_upload")
+
+    def _resolve_conflict(self, action):
+        self.show_toast(
+            self.labels.get("conflict_working", "Bajarilmoqda, kutib turing..."),
+            title=self.labels.get("conflict_title", "Sinxronizatsiya"),
+            level="info",
+            duration_ms=3000,
+        )
+        self._start_sync_worker(
+            action,
+            self._on_conflict_resolved,
+            show_message=True,
+            handle_conflict=False,
+        )
+
+    def _on_conflict_resolved(self, result):
+        self._cleanup_sync_thread()
+        self._set_logo_icon()
+        self._reload_current_page()
+        self._refresh_sync_status()
+        if result.get("direction") == "download":
+            message = f"Serverdagi nusxa qabul qilindi ({result.get('imported', 0)} ta yozuv)."
+        else:
+            message = f"Sizning nusxangiz serverga yuborildi ({result.get('saved', 0)} ta yozuv)."
+        backup_path = result.get("backup_path") or result.get("server_backup_path")
+        if backup_path:
+            label = self.labels.get("conflict_backup_saved", "Zaxira nusxa saqlandi:")
+            message = f"{message}\n{label} {Path(str(backup_path)).name}"
+        self.show_toast(message, title=self.labels.get("sync_done", "Sync tugadi"), level="success", duration_ms=7000)
 
     def _on_sync_failed(self, error_message):
         self._cleanup_sync_thread()
@@ -1546,6 +1896,191 @@ class MainWindow(QMainWindow):
             self._sync_thread.wait(3000)
             self._sync_thread = None
             self._sync_worker = None
+
+    # ------------------------------------------------------------------
+    # Realtime change stream
+    # ------------------------------------------------------------------
+
+    def _realtime_token(self):
+        return self.user.get("api_access_token") or db.get_user_api_token(self.user.get("id"))
+
+    def _start_realtime_listener(self):
+        if self._realtime_thread is not None:
+            return
+        if not self._sync_available():
+            return
+        self._realtime_thread = QThread(self)
+        self._realtime_worker = SyncEventListener(self._realtime_token, db.get_sync_generation)
+        self._realtime_worker.moveToThread(self._realtime_thread)
+        self._realtime_thread.started.connect(self._realtime_worker.run)
+        self._realtime_worker.remote_change.connect(self._on_remote_change)
+        self._realtime_worker.server_hello.connect(self._on_server_hello)
+        self._realtime_worker.release_available.connect(self._on_release_available)
+        self._realtime_worker.connection_changed.connect(self._on_realtime_connection)
+        self._realtime_thread.start()
+
+    def _stop_realtime_listener(self):
+        worker = self._realtime_worker
+        thread = self._realtime_thread
+        self._realtime_worker = None
+        self._realtime_thread = None
+        if worker is not None:
+            worker.stop()
+        if thread is not None:
+            thread.quit()
+            thread.wait(4000)
+
+    @pyqtSlot(bool, str)
+    def _on_realtime_connection(self, online, _reason):
+        # Drops and reconnects are routine on shop wifi, so they are reported
+        # through the sync button's tooltip rather than as toasts.
+        self._realtime_online = bool(online)
+        self._refresh_sync_status()
+
+    @pyqtSlot(dict)
+    def _on_server_hello(self, payload):
+        # Sent once per (re)connection. It reports where the server is now, not
+        # what changed, so treat it as a catch-up rather than a live event.
+        enriched = dict(payload or {})
+        enriched["catch_up"] = True
+        self._on_remote_change(enriched)
+
+    @pyqtSlot(dict)
+    def _on_remote_change(self, payload):
+        generation = payload.get("generation")
+        try:
+            generation = int(generation)
+        except (TypeError, ValueError):
+            return
+        tables = [str(name) for name in (payload.get("tables") or [])]
+        device_key = str(payload.get("device_key") or "")
+
+        if device_key and device_key == db.get_sync_device_key():
+            # Our own write echoed back through the stream - just move our marker
+            # forward so the badge does not light up for our own change.
+            db.set_sync_generation(generation)
+            db.clear_remote_change()
+            self._refresh_sync_status()
+            return
+
+        if generation <= db.get_sync_generation():
+            return
+
+        # "hello" on every reconnect and the resumed "change" that follows both
+        # report the same generation; announce it once, not once per reconnect.
+        already = db.get_remote_change()
+        repeated = bool(already.get("pending")) and int(already.get("generation") or 0) >= generation
+
+        db.mark_remote_change(generation, tables=tables, device_key=device_key, changed_at=payload.get("server_time"))
+        self._refresh_sync_status()
+
+        assets_only = bool(tables) and set(tables) <= {"account_assets"}
+        # A catch-up only names the tables of the *latest* push. If the logo was
+        # changed a few pushes ago, "account_assets" is not in that list, so on
+        # every catch-up we check the asset table directly - otherwise a device
+        # that was offline at the wrong moment would keep the old logo until
+        # someone pressed Download.
+        catch_up = bool(payload.get("catch_up") or payload.get("resumed"))
+        wants_assets = "account_assets" in tables or catch_up
+        if wants_assets and self._assets_checked_generation != generation:
+            # Shared branding is not business data: apply it immediately and
+            # silently rather than asking the cashier to press a button. The
+            # marker is only set once the refresh actually succeeds, so a failed
+            # attempt is retried on the next reconnect.
+            self._apply_remote_assets(generation if assets_only else None, checked_generation=generation)
+        if assets_only or repeated:
+            return
+
+        self.show_toast(
+            self.labels.get("sync_remote_toast", "Boshqa qurilmada o'zgarish qilindi. Yuklab oling."),
+            title=self.labels.get("sync_remote_title", "Yangi o'zgarish"),
+            level="info",
+            duration_ms=8000,
+        )
+
+    # ------------------------------------------------------------------
+    # New-release badge on the account button
+    # ------------------------------------------------------------------
+
+    @pyqtSlot(dict)
+    def _on_release_available(self, payload):
+        version = str(payload.get("latest_version") or "").strip()
+        if not version:
+            return
+        db.set_known_release(version, tag=payload.get("tag"), published_at=payload.get("published_at"))
+        self._refresh_release_badge()
+        if not is_newer_version(version, APP_VERSION):
+            return
+        if self._release_toast_shown_for == version:
+            # The greeting repeats this on every reconnect; announce it once.
+            return
+        self._release_toast_shown_for = version
+        template = self.labels.get("release_available_toast", "Yangi versiya {v} chiqdi.")
+        self.show_toast(
+            template.replace("{v}", version),
+            title=self.labels.get("release_available", "Yangi versiya chiqdi"),
+            level="info",
+            duration_ms=8000,
+        )
+
+    def _refresh_release_badge(self):
+        if not hasattr(self, "release_dot_lbl"):
+            return
+        version = (db.get_known_release() or {}).get("version") or ""
+        # The dot tracks what is actually installed, so it clears itself after an
+        # update instead of waiting for the user to open the dialog.
+        pending = bool(version) and is_newer_version(version, APP_VERSION)
+        if not pending:
+            self.release_dot_lbl.hide()
+            self.user_menu_btn.setToolTip("")
+            return
+        tooltip = self.labels.get("release_badge_tooltip", "Yangi versiya mavjud: {v}")
+        self.user_menu_btn.setToolTip(tooltip.replace("{v}", version))
+        self._position_release_dot()
+        self.release_dot_lbl.show()
+        self.release_dot_lbl.raise_()
+
+    def _position_release_dot(self):
+        if not hasattr(self, "release_dot_lbl"):
+            return
+        width = self.user_menu_btn.width() or self.sidebar.width() - 24
+        self.release_dot_lbl.move(max(width - 16, 0), 6)
+
+    def _apply_remote_assets(self, generation=None, checked_generation=None):
+        if self._sync_busy():
+            QTimer.singleShot(1500, lambda: self._apply_remote_assets(generation, checked_generation))
+            return
+        self._pending_asset_generation = generation
+        self._pending_asset_check = checked_generation
+        self._start_sync_worker(
+            "assets",
+            self._on_remote_assets_applied,
+            show_message=False,
+            handle_conflict=False,
+        )
+
+    def _on_remote_assets_applied(self, result):
+        self._cleanup_sync_thread()
+        generation = self._pending_asset_generation
+        checked = getattr(self, "_pending_asset_check", None)
+        self._pending_asset_generation = None
+        self._pending_asset_check = None
+        if checked is not None and not result.get("skipped"):
+            self._assets_checked_generation = checked
+        if result.get("imported"):
+            self._set_logo_icon()
+            self.show_toast(
+                self.labels.get("sync_logo_updated", "Logo boshqa qurilmadan yangilandi."),
+                title=self.labels.get("sync_remote_title", "Yangi o'zgarish"),
+                level="info",
+                duration_ms=4000,
+            )
+        if generation is not None and not result.get("skipped"):
+            # The only thing that changed was the asset table, and we just took
+            # it, so we are fully caught up with the server again.
+            db.set_sync_generation(generation)
+            db.clear_remote_change()
+        self._refresh_sync_status()
 
     def _schedule_logo_sync(self):
         if not self._sync_available():
@@ -1667,7 +2202,7 @@ class MainWindow(QMainWindow):
             mode_callback = self._unlock_main_area
         menu.addAction(self._menu_button_action(menu, mode_text, mode_callback, theme, width=action_width))
         menu.addAction(self._menu_button_action(menu, self.labels["settings"], self._open_settings, theme, width=action_width))
-        menu.addAction(self._menu_button_action(menu, "🔄 " + self.labels.get("check_updates", "Yangilanishlar"), self._open_updater, theme, width=action_width))
+        menu.addAction(self._menu_button_action(menu, self.labels.get("check_updates", "Yangilanishlar"), self._open_updater, theme, width=action_width))
         menu.addAction(self._menu_button_action(menu, self.labels["logout"], self._logout, theme, danger=True, width=action_width))
         size = menu.sizeHint()
         pos = self.user_menu_btn.mapToGlobal(self.user_menu_btn.rect().topLeft())
@@ -1676,6 +2211,18 @@ class MainWindow(QMainWindow):
     def _open_updater(self):
         dlg = UpdaterDialog(self)
         dlg.exec()
+        # The dialog does its own check and may have found a newer build than
+        # the stream told us about, so re-evaluate the dot on the way out.
+        self._sync_release_from_dialog(dlg)
+        self._refresh_release_badge()
+
+    def _sync_release_from_dialog(self, dlg):
+        data = getattr(dlg, "update_data", None)
+        if not isinstance(data, dict):
+            return
+        version = str(data.get("latest_version") or "").strip()
+        if version:
+            db.set_known_release(version, tag=data.get("tag_name"), published_at=data.get("published_at"))
 
     def _menu_button_action(self, menu, text, callback, theme, danger=False, width=None):
         action = QWidgetAction(menu)

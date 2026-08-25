@@ -84,6 +84,81 @@ alembic revision --autogenerate -m "next change"
 - `PUT /api/v1/sync/tables/{table_name}/rows` - bitta jadval satrlarini saqlash
 - `DELETE /api/v1/sync/tables/{table_name}/rows/{local_id}` - satrni serverda deleted deb belgilash
 - `GET /api/v1/sync/summary` - user bo'yicha table statistikasi
+- `GET /api/v1/sync/state` - accountning `generation` hisoblagichi va oxirgi o'zgarish ma'lumoti
+- `GET /api/v1/sync/events` - Server-Sent Events oqimi (realtime o'zgarish xabari)
+- `POST /api/v1/sync/reset` - accountning barcha server yozuvlarini o'chirish (to'liq qayta yuklash uchun)
+
+## Realtime o'zgarish xabari
+
+Har bir account uchun `sync_meta.generation` hisoblagichi saqlanadi. Istalgan qurilma
+yozuv yuborsa hisoblagich 1 ga oshadi va o'sha accountning barcha ochiq
+`GET /api/v1/sync/events` oqimlariga `change` eventi yuboriladi:
+
+```
+event: change
+data: {"generation": 42, "tables": ["products"], "device_key": "desktop-ab12", "server_time": "..."}
+```
+
+Oqim ulanganda bir marta `hello` yuboradi, har 20 soniyada `ping` yuboradi (proxy tunnelni
+yopib qo'ymasligi uchun). Qurilma uzilib qayta ulansa `?since_generation=N` bilan keladi va
+o'tkazib yuborilgan o'zgarish `resumed: true` bilan qaytariladi.
+
+Xabar tarqatish process ichidagi broker orqali darhol boradi; bir nechta uvicorn worker
+ishlatilganda esa oqim `sync_meta` ni 2 soniyada bir tekshirib turadi, shuning uchun
+hech qanday qo'shimcha infratuzilma (Redis va h.k.) talab qilinmaydi.
+
+Nginx orqali ishlatilganda `/api/v1/sync/events` uchun `proxy_buffering off` kerak -
+u `nginx/default.conf` da sozlangan.
+
+## Conflict (Anki modeli)
+
+`POST /api/v1/sync/push` ixtiyoriy `expected_generation` maydonini qabul qiladi. Agar
+serverdagi qiymat boshqacha bo'lsa (ya'ni boshqa qurilma oraliqda yozgan bo'lsa) so'rov
+`409` bilan rad etiladi:
+
+```json
+{"detail": {"code": "sync_conflict", "server_generation": 43, "expected_generation": 41}}
+```
+
+Desktop app bunda foydalanuvchiga "Serverdan yuklab olish" / "O'zimnikini yuborish"
+oynasini ko'rsatadi. Ikkinchi variant `POST /api/v1/sync/reset` dan keyin to'liq snapshot
+yuboradi. Har ikki holatda ham yo'qoladigan tomon avval `data/backups/` ga saqlanadi.
+
+## Yangi release xabari (realtime)
+
+Release chiqqanini server ikki yo'l bilan biladi:
+
+1. **Actions ping (asosiy).** `build_release.yml` dagi `publish-release` job'i release
+   yaratilgandan keyin `POST /api/v1/app/release-published` ga xabar yuboradi
+   (`X-Release-Secret` sarlavhasi bilan). GitHub API'ga so'rov yo'q, kechikish ~0.
+2. **Fon tekshiruvi (zaxira).** Server har `RELEASE_POLL_SECONDS` (default 600) da
+   bir marta GitHub'dan so'raydi. Bu qo'lda yaratilgan release'ni yoki server
+   o'chgan paytda kelgan ping'ni ushlab qoladi. Butun parkka soatiga 6 ta so'rov.
+
+Ma'lumot `app_releases` jadvalida saqlanadi va barcha ochiq
+`GET /api/v1/sync/events` oqimlariga `release` eventi sifatida tarqatiladi:
+
+```
+event: release
+data: {"tag": "v1.0.5", "latest_version": "1.0.5", "name": "...", "published_at": "..."}
+```
+
+Oqim ochilganda `hello` ichida ham joriy release qaytadi, shuning uchun yopiq turgan
+qurilma ulangan zahoti biladi. Har bir qurilma versiyani **o'zida** solishtiradi,
+shuning uchun qurilmalar soni GitHub rate limitiga umuman ta'sir qilmaydi.
+
+`GET /api/v1/app/version` endi avval `app_releases` jadvalidan javob beradi -
+GitHub'ga so'rov ketmaydi. Jadval bo'sh bo'lsagina eski yo'l (cache -> GitHub API ->
+redirect) ishlaydi.
+
+### Kerakli sozlamalar
+
+| Joy | Nomi | Izoh |
+|---|---|---|
+| `api/.env` | `RELEASE_PING_SECRET` | Maxfiy kalit. Bo'sh bo'lsa endpoint 503 qaytaradi. |
+| `api/.env` | `GITHUB_TOKEN` | REST limitni 60/soatdan 5000/soatga ko'taradi. |
+| Repo Secrets | `RELEASE_PING_SECRET` | `.env` dagi bilan bir xil qiymat. |
+| Repo Secrets | `MARKETSTORE_API_URL` | Masalan `https://drinking-relight-trailside.ngrok-free.dev` (TLS sertifikati haqiqiy bo'lishi kerak). |
 
 ## Saqlash formati
 

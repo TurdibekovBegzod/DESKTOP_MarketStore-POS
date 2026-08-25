@@ -1,11 +1,22 @@
 import re
 import os
+import secrets as secrets_module
 from typing import Optional
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 import httpx
 
 from app.config import get_settings
+from app.database import get_db
+from app.releases import (
+    broadcast_release,
+    fetch_latest_from_github,
+    get_release,
+    store_release,
+)
 
 router = APIRouter(prefix="/app", tags=["App Updates"])
 
@@ -72,16 +83,91 @@ _RELEASE_CACHE = {"data": None, "timestamp": 0}
 CACHE_TTL_SECONDS = 300  # 5 minutes
 
 
+def _stored_release_response(db: Session, platform: str, current_version: str) -> dict | None:
+    """Answer from the row the release workflow pinged us, without calling GitHub."""
+    row = get_release(db)
+    if row is None:
+        return None
+    settings = get_settings()
+    asset = match_asset_for_platform(list(row.assets or []), platform)
+    asset_id = asset.get("id") if asset else None
+    return {
+        "has_update": is_newer_version(row.version, current_version),
+        "latest_version": row.version,
+        "tag_name": row.tag,
+        "current_version": current_version,
+        "platform": platform,
+        "release_name": row.name or f"Release {row.tag}",
+        "release_notes": row.notes or "Yangi versiya va yaxshilanishlar.",
+        "published_at": row.published_at.isoformat() if row.published_at else None,
+        "download_url": (
+            f"{settings.api_prefix}/app/download?platform={platform}&asset_id={asset_id}"
+            if asset_id else ""
+        ),
+        # Public repo: this points straight at GitHub's CDN, so a client may use
+        # it to skip our bandwidth entirely. Kept alongside the proxy URL so the
+        # existing updater keeps working unchanged.
+        "direct_download_url": (asset or {}).get("browser_download_url") or "",
+        "file_name": (asset or {}).get("name", "") if asset else "",
+        "file_size": int((asset or {}).get("size") or 0) if asset else 0,
+        "sha256": asset_sha256(asset),
+        "asset_id": asset_id,
+        "source": row.source,
+    }
+
+
+class ReleasePing(BaseModel):
+    tag: str = Field(min_length=1, max_length=80)
+
+
+@router.post("/release-published")
+async def release_published(
+    payload: ReleasePing,
+    x_release_secret: str | None = Header(default=None, alias="X-Release-Secret"),
+    db: Session = Depends(get_db),
+):
+    """Called by the release workflow the moment a new build goes out.
+
+    This is what makes the update badge realtime: no device and no scheduled job
+    has to ask GitHub whether something changed.
+    """
+    settings = get_settings()
+    expected = settings.release_ping_secret
+    if not expected:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Release ping is not configured",
+        )
+    if not x_release_secret or not secrets_module.compare_digest(x_release_secret, expected):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid release secret")
+
+    tag = payload.tag.strip()
+    # One optional GitHub call, purely to pick up the notes and asset list. If it
+    # fails or describes a different tag, the ping itself is still authoritative.
+    data = await fetch_latest_from_github()
+    if data and str(data.get("tag_name") or "").strip() != tag:
+        data = None
+
+    event = await run_in_threadpool(store_release, db, tag, data, "ping")
+    broadcast_release(event)
+    return {"ok": True, "tag": event["tag"], "latest_version": event["latest_version"]}
+
+
 @router.get("/version")
 async def check_app_version(
     platform: str = Query("windows", description="Client OS: windows, linux, macos"),
     current_version: str = Query("1.0.0", description="Current installed client version"),
+    db: Session = Depends(get_db),
 ):
     import time
     global _RELEASE_CACHE
     settings = get_settings()
     repo = settings.github_repo
     token = settings.github_token
+
+    stored = await run_in_threadpool(_stored_release_response, db, platform, current_version)
+    if stored is not None:
+        return stored
 
     release_data = None
     github_status = None

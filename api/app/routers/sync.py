@@ -1,13 +1,19 @@
+import asyncio
+import json
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import and_, func, select
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
+from fastapi.responses import StreamingResponse
+from sqlalchemy import and_, delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
-from app.database import get_db
+from app.database import SessionLocal, get_db
 from app.deps import get_current_user
-from app.models import Device, SyncBatch, User, UserRecord
+from app.events import broker
+from app.models import Device, SyncBatch, SyncMeta, User, UserRecord
+from app.releases import release_payload
 from app.schemas import (
     ALLOWED_SYNC_TABLES,
     DeviceIn,
@@ -16,12 +22,22 @@ from app.schemas import (
     PushResponse,
     RecordIn,
     RecordOut,
+    ResetResponse,
     SummaryItem,
     SummaryResponse,
+    SyncStateOut,
 )
+from app.security import decode_access_token
 
 
 router = APIRouter(prefix="/sync", tags=["sync"])
+
+# How often a streaming client falls back to reading sync_meta directly. The
+# in-process broker delivers instantly; this only covers multi-worker setups.
+GENERATION_POLL_SECONDS = 2.0
+# Keepalive comment interval. ngrok and nginx both drop idle tunnels well before
+# this, so the stream must never go quiet for longer.
+KEEPALIVE_SECONDS = 20.0
 
 
 def _touch_device(db: Session, user: User, payload: DeviceIn | None) -> Device | None:
@@ -40,6 +56,66 @@ def _touch_device(db: Session, user: User, payload: DeviceIn | None) -> Device |
     device.last_seen_at = datetime.now(timezone.utc)
     db.flush()
     return device
+
+
+def _current_generation(db: Session, user_uid: str) -> int:
+    value = db.scalar(select(SyncMeta.generation).where(SyncMeta.user_uid == user_uid))
+    return int(value or 0)
+
+
+def _bump_generation(db: Session, user: User, device_key: str | None, tables) -> dict:
+    """Advance the account's change counter and describe the change.
+
+    Returns the payload that should be published once the transaction commits.
+    """
+    table_list = sorted({name for name in (tables or []) if name})
+    now = datetime.now(timezone.utc)
+    stmt = insert(SyncMeta).values(
+        user_uid=user.uid,
+        generation=1,
+        last_change_at=now,
+        last_device_key=device_key,
+        last_tables=table_list,
+    )
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[SyncMeta.user_uid],
+        set_={
+            "generation": SyncMeta.generation + 1,
+            "last_change_at": now,
+            "last_device_key": device_key,
+            "last_tables": table_list,
+        },
+    ).returning(SyncMeta.generation)
+    generation = int(db.execute(stmt).scalar_one())
+    return {
+        "type": "change",
+        "generation": generation,
+        "tables": table_list,
+        "device_key": device_key,
+        "server_time": now.isoformat(),
+    }
+
+
+def _publish(user_uid: str, payload: dict | None) -> None:
+    if payload:
+        broker.publish(user_uid, payload)
+
+
+def _assert_generation(db: Session, user: User, expected: int | None) -> None:
+    """Reject a push that was prepared against stale server state (Anki-style)."""
+    if expected is None:
+        return
+    current = _current_generation(db, user.uid)
+    if current != expected:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "sync_conflict",
+                "message": "Server data changed on another device",
+                "server_generation": current,
+                "expected_generation": expected,
+            },
+        )
 
 
 def _upsert_record(db: Session, user: User, record: RecordIn):
@@ -72,6 +148,7 @@ def _upsert_record(db: Session, user: User, record: RecordIn):
 
 @router.post("/push", response_model=PushResponse)
 def push(payload: PushRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    _assert_generation(db, current_user, payload.expected_generation)
     device = _touch_device(db, current_user, payload.device)
     for record in payload.records:
         _upsert_record(db, current_user, record)
@@ -84,9 +161,17 @@ def push(payload: PushRequest, current_user: User = Depends(get_current_user), d
         note=payload.note,
     )
     db.add(batch)
+    device_key = payload.device.device_key if payload.device else None
+    event = _bump_generation(
+        db,
+        current_user,
+        device_key,
+        {record.table_name for record in payload.records},
+    )
     db.commit()
     db.refresh(batch)
-    return PushResponse(saved=len(payload.records), batch_id=batch.id)
+    _publish(current_user.uid, event)
+    return PushResponse(saved=len(payload.records), batch_id=batch.id, generation=event["generation"])
 
 
 @router.put("/tables/{table_name}/rows", response_model=PushResponse)
@@ -95,6 +180,7 @@ def upsert_table_rows(
     records: list[RecordIn],
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    x_device_key: str | None = Header(default=None, alias="X-Device-Key"),
 ):
     if table_name not in ALLOWED_SYNC_TABLES:
         raise HTTPException(status_code=422, detail="Unsupported sync table")
@@ -105,9 +191,11 @@ def upsert_table_rows(
         _upsert_record(db, current_user, record)
     batch = SyncBatch(user_id=current_user.id, user_uid=current_user.uid, direction="push", records_count=len(normalized), note=f"table:{table_name}")
     db.add(batch)
+    event = _bump_generation(db, current_user, x_device_key, {table_name})
     db.commit()
     db.refresh(batch)
-    return PushResponse(saved=len(normalized), batch_id=batch.id)
+    _publish(current_user.uid, event)
+    return PushResponse(saved=len(normalized), batch_id=batch.id, generation=event["generation"])
 
 
 @router.get("/pull", response_model=PullResponse)
@@ -120,6 +208,7 @@ def pull(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    generation = _current_generation(db, current_user.uid)
     stmt = select(UserRecord).where(UserRecord.user_uid == current_user.uid)
     if since is not None:
         stmt = stmt.where(UserRecord.updated_at > since)
@@ -130,13 +219,14 @@ def pull(
     ordered = stmt.order_by(UserRecord.updated_at, UserRecord.id).offset(offset)
     if limit is None:
         records = db.scalars(ordered).all()
-        return PullResponse(records=records, server_time=datetime.now(timezone.utc))
+        return PullResponse(records=records, server_time=datetime.now(timezone.utc), generation=generation)
     records = db.scalars(ordered.limit(limit + 1)).all()
     has_more = len(records) > limit
     page = records[:limit]
     return PullResponse(
         records=page,
         server_time=datetime.now(timezone.utc),
+        generation=generation,
         has_more=has_more,
         next_offset=offset + len(page) if has_more else None,
     )
@@ -148,6 +238,7 @@ def mark_deleted(
     local_id: str,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    x_device_key: str | None = Header(default=None, alias="X-Device-Key"),
 ):
     now_text = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     record = db.scalar(
@@ -165,9 +256,205 @@ def mark_deleted(
     else:
         record.deleted_at = now_text
         record.sync_version += 1
+    event = _bump_generation(db, current_user, x_device_key, {table_name})
     db.commit()
     db.refresh(record)
+    _publish(current_user.uid, event)
     return record
+
+
+@router.post("/reset", response_model=ResetResponse)
+def reset(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    x_device_key: str | None = Header(default=None, alias="X-Device-Key"),
+):
+    """Drop every stored record for the account.
+
+    Used by the desktop client's "upload mine, discard the server copy" branch of
+    the conflict dialog, right before it streams a full snapshot back up.
+    """
+    removed = db.execute(
+        delete(UserRecord).where(UserRecord.user_uid == current_user.uid)
+    ).rowcount or 0
+    event = _bump_generation(db, current_user, x_device_key, ALLOWED_SYNC_TABLES)
+    db.commit()
+    _publish(current_user.uid, event)
+    return ResetResponse(removed=int(removed), generation=event["generation"])
+
+
+@router.get("/state", response_model=SyncStateOut)
+def state(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    meta = db.scalar(select(SyncMeta).where(SyncMeta.user_uid == current_user.uid))
+    total = db.scalar(
+        select(func.count(UserRecord.id)).where(UserRecord.user_uid == current_user.uid)
+    ) or 0
+    return SyncStateOut(
+        generation=int(meta.generation) if meta else 0,
+        last_change_at=meta.last_change_at if meta else None,
+        last_device_key=meta.last_device_key if meta else None,
+        last_tables=list(meta.last_tables or []) if meta else [],
+        records_count=int(total),
+        server_time=datetime.now(timezone.utc),
+    )
+
+
+def _resolve_stream_user(token: str | None) -> User:
+    """Authenticate a streaming client without holding a session for the stream."""
+    if not token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token")
+    subject = decode_access_token(token)
+    if not subject:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+    db = SessionLocal()
+    try:
+        if subject.isdigit():
+            user = db.scalar(select(User).where(User.id == int(subject), User.is_active == True))  # noqa: E712
+        else:
+            user = db.scalar(select(User).where(User.uid == subject, User.is_active == True))  # noqa: E712
+        if not user:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+        db.expunge(user)
+        return user
+    finally:
+        db.close()
+
+
+def _read_meta(user_uid: str) -> dict:
+    db = SessionLocal()
+    try:
+        meta = db.scalar(select(SyncMeta).where(SyncMeta.user_uid == user_uid))
+        if meta is None:
+            return {"generation": 0, "tables": [], "device_key": None, "last_change_at": None}
+        return {
+            "generation": int(meta.generation or 0),
+            "tables": list(meta.last_tables or []),
+            "device_key": meta.last_device_key,
+            "last_change_at": meta.last_change_at.isoformat() if meta.last_change_at else None,
+        }
+    finally:
+        db.close()
+
+
+def _read_release() -> dict | None:
+    """Newest desktop build, so a device learns about it the moment it connects."""
+    db = SessionLocal()
+    try:
+        return release_payload(db)
+    finally:
+        db.close()
+
+
+def _sse(event_name: str, data: dict) -> bytes:
+    return f"event: {event_name}\ndata: {json.dumps(data, default=str)}\n\n".encode("utf-8")
+
+
+@router.get("/events")
+async def events(
+    request: Request,
+    token: str | None = Query(default=None),
+    authorization: str | None = Header(default=None),
+    since_generation: int | None = Query(default=None, ge=0),
+):
+    """Server-Sent Events stream of sync changes for the caller's account.
+
+    Emits ``hello`` once on connect, then a ``change`` event every time any device
+    of this account writes data, plus a ``ping`` comment on an interval so proxies
+    keep the tunnel open.
+    """
+    bearer = token
+    if not bearer and authorization and authorization.lower().startswith("bearer "):
+        bearer = authorization.split(" ", 1)[1].strip()
+    user = await run_in_threadpool(_resolve_stream_user, bearer)
+    user_uid = user.uid
+
+    broker.bind_loop(asyncio.get_running_loop())
+    initial = await run_in_threadpool(_read_meta, user_uid)
+    release = await run_in_threadpool(_read_release)
+    last_generation = int(initial["generation"])
+
+    async def stream():
+        nonlocal last_generation
+        queue = broker.subscribe(user_uid)
+        loop = asyncio.get_running_loop()
+        last_keepalive = loop.time()
+        try:
+            yield _sse("hello", {
+                "generation": last_generation,
+                "tables": initial["tables"],
+                "device_key": initial["device_key"],
+                "server_time": datetime.now(timezone.utc).isoformat(),
+                "release": release,
+            })
+            # A client that reconnects after a dropped tunnel tells us where it
+            # left off, so no change is silently lost across a reconnect.
+            if since_generation is not None and last_generation > since_generation:
+                yield _sse("change", {
+                    "generation": last_generation,
+                    "tables": initial["tables"],
+                    "device_key": initial["device_key"],
+                    "server_time": datetime.now(timezone.utc).isoformat(),
+                    "resumed": True,
+                })
+
+            while True:
+                if await request.is_disconnected():
+                    break
+                payload = None
+                try:
+                    payload = await asyncio.wait_for(queue.get(), timeout=GENERATION_POLL_SECONDS)
+                except asyncio.TimeoutError:
+                    fresh = await run_in_threadpool(_read_meta, user_uid)
+                    if int(fresh["generation"]) > last_generation:
+                        payload = {
+                            "type": "change",
+                            "generation": int(fresh["generation"]),
+                            "tables": fresh["tables"],
+                            "device_key": fresh["device_key"],
+                            "server_time": datetime.now(timezone.utc).isoformat(),
+                        }
+
+                if payload and payload.get("type") == "release":
+                    # Fleet-wide news rather than account data: pass it straight
+                    # through, it has nothing to do with the sync counter.
+                    yield _sse("release", {
+                        "tag": payload.get("tag"),
+                        "latest_version": payload.get("latest_version"),
+                        "name": payload.get("name"),
+                        "published_at": payload.get("published_at"),
+                    })
+                    last_keepalive = loop.time()
+                    continue
+
+                if payload and int(payload.get("generation", 0)) > last_generation:
+                    last_generation = int(payload["generation"])
+                    yield _sse("change", {
+                        "generation": last_generation,
+                        "tables": payload.get("tables") or [],
+                        "device_key": payload.get("device_key"),
+                        "server_time": payload.get("server_time"),
+                    })
+                    last_keepalive = loop.time()
+                    continue
+
+                if loop.time() - last_keepalive >= KEEPALIVE_SECONDS:
+                    last_keepalive = loop.time()
+                    yield _sse("ping", {"generation": last_generation})
+        except asyncio.CancelledError:
+            raise
+        finally:
+            broker.unsubscribe(user_uid, queue)
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            # Stops nginx from buffering the stream into uselessness.
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/summary", response_model=SummaryResponse)

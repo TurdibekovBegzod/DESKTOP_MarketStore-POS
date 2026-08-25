@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     celery_result_backend: str = "redis://localhost:6379/1"
     github_repo: str = "TurdibekovBegzod/DESKTOP_MarketStore-POS"
     github_token: str | None = None
+    # Shared secret the release workflow presents when it tells us a new build
+    # was published. Unset means the ping endpoint is disabled.
+    release_ping_secret: str | None = None
+    release_poll_seconds: int = 600
     app_releases_dir: str = "releases"
     ngrok_domain: str | None = None
     trusted_hosts: str = "localhost,127.0.0.1,testserver,api"
