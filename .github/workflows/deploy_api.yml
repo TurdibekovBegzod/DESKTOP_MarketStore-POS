@@ -111,8 +111,22 @@ jobs:
           ssh -i ~/.ssh/deploy_key -p "${PORT:-22}" \
               -o BatchMode=yes -o ConnectTimeout=15 \
               "$USER_NAME@$HOST" \
-              "cd '${REPO_PATH:-/opt/marketstore/DESKTOP_MarketStore-POS}' && \
-               DEPLOY_BRANCH=main DEPLOY_FORCE='${FORCE}' bash api/deploy/deploy.sh"
+              "REPO_PATH='${REPO_PATH:-/root/DESKTOP_MarketStore-POS}' DEPLOY_FORCE='${FORCE}' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$REPO_PATH"
+
+          # First run: the server's checkout predates this workflow, so the
+          # script it is supposed to call does not exist there yet. Pull once
+          # here, then force the build - the commit will already be current.
+          if [ ! -f api/deploy/deploy.sh ]; then
+            echo "Birinchi deploy: deploy.sh serverda yo'q, kod tortib olinmoqda."
+            git fetch --quiet origin main
+            git reset --hard --quiet origin/main
+            DEPLOY_FORCE=1
+          fi
+
+          DEPLOY_BRANCH=main DEPLOY_FORCE="${DEPLOY_FORCE:-0}" bash api/deploy/deploy.sh
+          REMOTE
 
       - name: Verify the public endpoint
         if: steps.guard.outputs.ready == 'true'

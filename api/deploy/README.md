@@ -32,7 +32,7 @@ ko'taradi va CI qizil bo'ladi — do'konlar ishlayveradi.
 
 ```bash
 ssh <user>@<server>
-cd /opt/marketstore/DESKTOP_MarketStore-POS   # yoki repo qayerda bo'lsa
+cd /root/DESKTOP_MarketStore-POS   # yoki repo qayerda bo'lsa
 git remote -v && git branch --show-current    # origin GitHub, branch main bo'lsin
 pwd                                            # bu yo'lni DEPLOY_PATH ga yozasiz
 ```
@@ -99,7 +99,7 @@ Repo → **Settings → Secrets and variables → Actions → New repository sec
 | `DEPLOY_HOST` | server IP yoki domen | ha |
 | `DEPLOY_USER` | SSH useri (`root`, `ubuntu`, ...) | ha |
 | `DEPLOY_SSH_KEY` | `~/.ssh/marketstore_deploy` ning **to'liq** tarkibi (`-----BEGIN` dan `-----END` gacha) | ha |
-| `DEPLOY_PATH` | serverdagi repo yo'li | yo'q (default `/opt/marketstore/DESKTOP_MarketStore-POS`) |
+| `DEPLOY_PATH` | serverdagi repo yo'li | yo'q (default `/root/DESKTOP_MarketStore-POS`) |
 | `DEPLOY_PORT` | SSH porti | yo'q (default `22`) |
 | `DEPLOY_KNOWN_HOSTS` | `ssh-keyscan -H <server>` natijasi | yo'q, lekin tavsiya etiladi |
 | `MARKETSTORE_API_URL` | ngrok manzili — deploydan keyin tashqaridan tekshiriladi | yo'q |
@@ -117,7 +117,7 @@ shu commitda bo'lsa ham qursin).
 CI ishlamay qolsa, serverda o'sha skriptning o'zi:
 
 ```bash
-cd /opt/marketstore/DESKTOP_MarketStore-POS
+cd /root/DESKTOP_MarketStore-POS
 bash api/deploy/deploy.sh
 ```
 

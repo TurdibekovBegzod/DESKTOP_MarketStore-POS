@@ -49,9 +49,22 @@ fi
 
 cd "${COMPOSE_DIR}"
 
+# Put the previous commit back and rebuild from it, so what the server runs and
+# what its checkout says are never out of step.
+rollback() {
+  local reason="$1"
+  log "${reason} - ${PREVIOUS_SHA:0:7} ga qaytarilmoqda"
+  compose logs --tail=80 api 2>/dev/null || true
+  ( cd "${REPO_DIR}" && git reset --hard --quiet "${PREVIOUS_SHA}" )
+  compose up -d --build --remove-orphans || true
+  fail "Deploy muvaffaqiyatsiz, ${PREVIOUS_SHA:0:7} ga qaytarildi"
+}
+
 log "Konteynerlar qurilmoqda va yangilanmoqda"
 # Alembic migratsiyasi api konteynerining CMD'ida ishlaydi.
-compose up -d --build --remove-orphans
+# A failed build leaves the running containers untouched, so the shops are still
+# served by the previous image while we put the checkout back to match.
+compose up -d --build --remove-orphans || rollback "Qurish muvaffaqiyatsiz"
 
 log "Sog'liq tekshiruvi"
 for attempt in $(seq 1 "${HEALTH_RETRIES}"); do
@@ -66,12 +79,4 @@ for attempt in $(seq 1 "${HEALTH_RETRIES}"); do
   sleep 2
 done
 
-# The new build never became healthy: put the previous commit back so the shops
-# keep working, and let CI report the failure.
-log "API ${HEALTH_RETRIES} urinishdan keyin ham javob bermadi - orqaga qaytarilmoqda"
-compose logs --tail=80 api || true
-cd "${REPO_DIR}"
-git reset --hard --quiet "${PREVIOUS_SHA}"
-cd "${COMPOSE_DIR}"
-compose up -d --build --remove-orphans || true
-fail "Deploy muvaffaqiyatsiz, ${PREVIOUS_SHA:0:7} ga qaytarildi"
+rollback "API ${HEALTH_RETRIES} urinishdan keyin ham javob bermadi"
