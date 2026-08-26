@@ -1,0 +1,133 @@
+name: Deploy API
+
+# Every push to main that touches the server is tested and then rolled out.
+# Nothing is torn down: `docker compose up -d --build` replaces only the
+# containers that changed, so postgres and redis - and their data - stay up.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'api/**'
+      - '.github/workflows/deploy_api.yml'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Deploy even when the server is already on this commit'
+        type: boolean
+        default: false
+
+# One deploy at a time. A second push waits for the first to finish instead of
+# both rebuilding the same containers at once.
+concurrency:
+  group: deploy-api
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install API dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r api/requirements.txt
+          pip install pytest
+
+      - name: Run API tests
+        working-directory: api
+        run: python -m pytest tests -q
+
+      - name: Install desktop dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libegl1 libgl1 libxkbcommon0 libdbus-1-3 libfontconfig1
+          # pyinstaller is only needed to package the .exe, not to run tests.
+          grep -v '^pyinstaller' app/requirements.txt > /tmp/app-test-requirements.txt
+          pip install -r /tmp/app-test-requirements.txt
+
+      - name: Run desktop tests
+        working-directory: app
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest tests -q
+
+  deploy:
+    name: Deploy to server
+    needs: test
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Check deploy secrets
+        id: guard
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER_NAME: ${{ secrets.DEPLOY_USER }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          if [ -z "$HOST" ] || [ -z "$USER_NAME" ] || [ -z "$KEY" ]; then
+            echo "DEPLOY_HOST / DEPLOY_USER / DEPLOY_SSH_KEY sozlanmagan - deploy o'tkazib yuborildi."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up SSH
+        if: steps.guard.outputs.ready == 'true'
+        env:
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          PORT: ${{ secrets.DEPLOY_PORT }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          if [ -n "$KNOWN_HOSTS" ]; then
+            # Pinned host key: the connection is refused if the server identity
+            # ever changes, which is what makes this safe over the open internet.
+            printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          else
+            ssh-keyscan -p "${PORT:-22}" -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          fi
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Deploy
+        if: steps.guard.outputs.ready == 'true'
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER_NAME: ${{ secrets.DEPLOY_USER }}
+          PORT: ${{ secrets.DEPLOY_PORT }}
+          REPO_PATH: ${{ secrets.DEPLOY_PATH }}
+          FORCE: ${{ inputs.force && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/deploy_key -p "${PORT:-22}" \
+              -o BatchMode=yes -o ConnectTimeout=15 \
+              "$USER_NAME@$HOST" \
+              "cd '${REPO_PATH:-/opt/marketstore/DESKTOP_MarketStore-POS}' && \
+               DEPLOY_BRANCH=main DEPLOY_FORCE='${FORCE}' bash api/deploy/deploy.sh"
+
+      - name: Verify the public endpoint
+        if: steps.guard.outputs.ready == 'true'
+        env:
+          PUBLIC_URL: ${{ secrets.MARKETSTORE_API_URL }}
+        run: |
+          if [ -z "${PUBLIC_URL:-}" ]; then
+            echo "MARKETSTORE_API_URL sozlanmagan - tashqi tekshiruv o'tkazib yuborildi."
+            exit 0
+          fi
+          curl --fail --silent --show-error --max-time 20 --retry 3 --retry-delay 5 \
+            -H "ngrok-skip-browser-warning: true" \
+            "${PUBLIC_URL%/}/health"
+          echo "Public endpoint javob bermoqda."
+
+      - name: Clean up the key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
