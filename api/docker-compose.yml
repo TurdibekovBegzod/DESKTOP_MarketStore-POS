@@ -69,6 +69,7 @@ services:
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       RELEASE_PING_SECRET: ${RELEASE_PING_SECRET:-}
       RELEASE_POLL_SECONDS: ${RELEASE_POLL_SECONDS:-600}
+      METRICS_TOKEN: ${METRICS_TOKEN:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -126,6 +127,41 @@ services:
       api:
         condition: service_started
 
+  alloy:
+    image: docker.io/grafana/alloy:latest
+    container_name: marketstore-alloy
+    restart: unless-stopped
+    logging: *default-logging
+    profiles: ["monitoring"]
+    command:
+      - "run"
+      - "--server.http.listen-addr=0.0.0.0:12345"
+      - "--storage.path=/var/lib/alloy/data"
+      - "/etc/alloy/config.alloy"
+    environment:
+      # Which server the dashboards are showing, when there is more than one.
+      MONITOR_INSTANCE: ${MONITOR_INSTANCE:-marketstore-prod}
+      METRICS_TOKEN: ${METRICS_TOKEN:-}
+      GRAFANA_PROM_URL: ${GRAFANA_PROM_URL:-}
+      GRAFANA_PROM_USER: ${GRAFANA_PROM_USER:-}
+      GRAFANA_LOKI_URL: ${GRAFANA_LOKI_URL:-}
+      GRAFANA_LOKI_USER: ${GRAFANA_LOKI_USER:-}
+      GRAFANA_CLOUD_TOKEN: ${GRAFANA_CLOUD_TOKEN:-}
+    volumes:
+      - ./monitoring/alloy-config.alloy:/etc/alloy/config.alloy:ro
+      - alloy_data:/var/lib/alloy/data
+      # Read-only view of the docker socket: container list, stats and logs.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Host metrics. Read-only, and nothing here is ever written back.
+      - /:/rootfs:ro
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      api:
+        condition: service_started
+
   nginx:
     build:
       context: ./nginx
@@ -145,3 +181,4 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  alloy_data:

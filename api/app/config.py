@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     app_releases_dir: str = "releases"
     ngrok_domain: str | None = None
     trusted_hosts: str = "localhost,127.0.0.1,testserver,api"
+    # Bearer token the metrics scraper must present. The tunnel exposes every
+    # path, so an unauthenticated /metrics would publish our traffic shape to
+    # anyone who guesses the URL. Unset means the endpoint does not exist.
+    metrics_token: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

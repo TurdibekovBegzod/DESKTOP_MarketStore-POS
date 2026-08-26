@@ -6,11 +6,13 @@ from fastapi import FastAPI
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from starlette.concurrency import run_in_threadpool
 
+from prometheus_fastapi_instrumentator import Instrumentator
+
 from app.config import get_settings
 from app.database import SessionLocal
 from app.events import broker
 from app.releases import broadcast_release, fetch_latest_from_github, get_release, store_release
-from app.routers import auth, health, sync, updates
+from app.routers import auth, health, metrics, sync, updates
 
 
 settings = get_settings()
@@ -82,6 +84,17 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.resolved_trusted_hosts())
+
+if settings.metrics_token:
+    # Records request count, duration and status per endpoint. The template
+    # path is used as the label, so /sync/pull is one series rather than one
+    # per query string. The long-lived SSE stream is excluded: it would sit in
+    # the "in progress" gauge for hours and say nothing useful.
+    Instrumentator(
+        excluded_handlers=[f"{settings.api_prefix}/sync/events", "/metrics", "/health"],
+        should_group_status_codes=False,
+    ).instrument(app)
+    app.include_router(metrics.router)
 
 app.include_router(health.router)
 app.include_router(auth.router, prefix=settings.api_prefix)

@@ -1,0 +1,146 @@
+// Grafana Alloy - MarketStore POS
+//
+// One container collects everything and ships it to Grafana Cloud:
+//   * container metrics, including restarts     (built-in cAdvisor)
+//   * host metrics: disk, RAM, CPU, load        (built-in node exporter)
+//   * API request rate, latency and errors      (the API's own /metrics)
+//   * every container's logs                    (Docker log driver -> Loki)
+//
+// Nothing is scraped from outside the Docker network; the only outbound
+// traffic is the push to Grafana Cloud.
+
+logging {
+  level  = "warn"
+  format = "logfmt"
+}
+
+// ---------------------------------------------------------------- metrics --
+
+// Container CPU, memory, network and disk, plus restart counts.
+prometheus.exporter.cadvisor "containers" {
+  docker_host = "unix:///var/run/docker.sock"
+  storage_duration = "5m"
+}
+
+// The host itself: filesystem fill level is the one that quietly kills a
+// Postgres box at 3am.
+prometheus.exporter.unix "host" {
+  rootfs_path = "/rootfs"
+  procfs_path = "/host/proc"
+  sysfs_path  = "/host/sys"
+
+  filesystem {
+    mount_points_exclude = "^/(dev|proc|sys|var/lib/docker/.+|snap)($|/)"
+    fs_types_exclude     = "^(autofs|binfmt_misc|cgroup.*|configfs|debugfs|devpts|devtmpfs|fusectl|hugetlbfs|mqueue|nsfs|overlay|proc|procfs|pstore|rpc_pipefs|securityfs|selinuxfs|squashfs|sysfs|tracefs)$"
+  }
+}
+
+discovery.relabel "cadvisor" {
+  targets = prometheus.exporter.cadvisor.containers.targets
+
+  rule {
+    target_label = "instance"
+    replacement  = sys.env("MONITOR_INSTANCE")
+  }
+}
+
+discovery.relabel "host" {
+  targets = prometheus.exporter.unix.host.targets
+
+  rule {
+    target_label = "instance"
+    replacement  = sys.env("MONITOR_INSTANCE")
+  }
+}
+
+prometheus.scrape "containers" {
+  targets         = discovery.relabel.cadvisor.output
+  forward_to      = [prometheus.remote_write.grafana_cloud.receiver]
+  scrape_interval = "30s"
+  job_name        = "integrations/docker"
+}
+
+prometheus.scrape "host" {
+  targets         = discovery.relabel.host.output
+  forward_to      = [prometheus.remote_write.grafana_cloud.receiver]
+  scrape_interval = "30s"
+  job_name        = "integrations/node_exporter"
+}
+
+// The API's own counters. The token keeps /metrics closed to the internet;
+// Alloy reaches the API over the Docker network, never through the tunnel.
+prometheus.scrape "api" {
+  targets = [
+    {
+      __address__ = "api:8000",
+      instance    = sys.env("MONITOR_INSTANCE"),
+      service     = "marketstore-api",
+    },
+  ]
+  metrics_path    = "/metrics"
+  forward_to      = [prometheus.remote_write.grafana_cloud.receiver]
+  scrape_interval = "15s"
+  job_name        = "marketstore/api"
+
+  bearer_token = sys.env("METRICS_TOKEN")
+}
+
+prometheus.remote_write "grafana_cloud" {
+  endpoint {
+    url = sys.env("GRAFANA_PROM_URL")
+
+    basic_auth {
+      username = sys.env("GRAFANA_PROM_USER")
+      password = sys.env("GRAFANA_CLOUD_TOKEN")
+    }
+  }
+}
+
+// ------------------------------------------------------------------- logs --
+
+discovery.docker "containers" {
+  host             = "unix:///var/run/docker.sock"
+  refresh_interval = "15s"
+}
+
+discovery.relabel "container_logs" {
+  targets = discovery.docker.containers.targets
+
+  // Container name comes through with a leading slash; drop it so the label
+  // reads "marketstore-api" rather than "/marketstore-api".
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_log_stream"]
+    target_label  = "stream"
+  }
+  rule {
+    target_label = "instance"
+    replacement  = sys.env("MONITOR_INSTANCE")
+  }
+  rule {
+    target_label = "job"
+    replacement  = "marketstore/containers"
+  }
+}
+
+loki.source.docker "containers" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.container_logs.output
+  labels     = { platform = "docker" }
+  forward_to = [loki.write.grafana_cloud.receiver]
+}
+
+loki.write "grafana_cloud" {
+  endpoint {
+    url = sys.env("GRAFANA_LOKI_URL")
+
+    basic_auth {
+      username = sys.env("GRAFANA_LOKI_USER")
+      password = sys.env("GRAFANA_CLOUD_TOKEN")
+    }
+  }
+}
