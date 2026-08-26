@@ -4,10 +4,10 @@ from PyQt6.QtWidgets import (
     QDialog, QFormLayout, QComboBox, QLineEdit, QApplication,
     QAbstractButton, QTableWidget, QHeaderView, QSpinBox, QDoubleSpinBox,
     QTextEdit, QDateEdit, QTabWidget, QScrollArea, QCalendarWidget,
-    QFileDialog, QMenu, QWidgetAction
+    QFileDialog, QMenu, QWidgetAction, QLayout
 )
 from PyQt6.QtCore import QByteArray, QBuffer, QIODevice, QPoint, QTimer, Qt, pyqtSignal, pyqtSlot, QEvent, QThread, QObject
-from PyQt6.QtGui import QAction, QPixmap, QPainter, QIcon, QColor, QImage
+from PyQt6.QtGui import QAction, QPixmap, QPainter, QIcon, QColor, QImage, QFont, QFontMetrics
 from datetime import datetime, timedelta
 from pathlib import Path
 import sys
@@ -21,7 +21,6 @@ from version import APP_VERSION
 from ui.sales_widget import CurrencyDialog, SalesWidget
 from ui.products_widget import ProductsWidget
 from ui.finalize_sales_widget import FinalizeSalesWidget
-from ui.stock_widget import StockWidget
 from ui.reports_widget import ReportsWidget, SalesDetailsWidget
 from ui.users_widget import UsersWidget
 from ui.login_history_widget import LoginHistoryWidget
@@ -974,27 +973,35 @@ class SyncDialog(QDialog):
 
 
 class ToastItem(QFrame):
+    """A single notification card that grows to fit the text it is given."""
+
+    WIDTH = 420
+    # Horizontal room the icon, the close button, the margins and the two
+    # layout gaps take away from the text column.
+    _SIDE_CHROME = 14 + 26 + 10 + 20 + 10 + 14
+    MAX_MESSAGE_LINES = 10
+
     def __init__(self, message, title=None, level="success", duration_ms=4000, on_dismiss=None, parent=None):
         super().__init__(parent)
         self.on_dismiss = on_dismiss
         self.setObjectName("toastItem")
-        self.setFixedWidth(340)
+        self.setFixedWidth(self.WIDTH)
 
         if level == "success":
             border_color = "#10b981"
-            icon_text = "✅"
+            icon_text = "\u2705"
             default_title = "Muvaffaqiyatli"
         elif level == "error":
             border_color = "#ef4444"
-            icon_text = "⚠️"
+            icon_text = "\u26a0\ufe0f"
             default_title = "Xatolik"
         elif level == "warning":
             border_color = "#f59e0b"
-            icon_text = "⚠️"
+            icon_text = "\u26a0\ufe0f"
             default_title = "Ogohlantirish"
         else:
             border_color = "#3b82f6"
-            icon_text = "ℹ️"
+            icon_text = "\u2139\ufe0f"
             default_title = "Ma'lumot"
 
         self.setStyleSheet(f"""
@@ -1013,27 +1020,57 @@ class ToastItem(QFrame):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(10)
+        layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
 
         icon_lbl = QLabel(icon_text)
+        icon_lbl.setFixedWidth(26)
         icon_lbl.setStyleSheet("font-size: 18px; border: none; background: transparent;")
         icon_lbl.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
-        layout.addWidget(icon_lbl)
+        layout.addWidget(icon_lbl, 0, Qt.AlignmentFlag.AlignTop)
 
         content_lay = QVBoxLayout()
-        content_lay.setSpacing(2)
+        content_lay.setSpacing(3)
+        content_lay.setContentsMargins(0, 0, 0, 0)
 
-        title_lbl = QLabel(title or default_title)
-        title_lbl.setStyleSheet("font-weight: bold; font-size: 13px; color: #0f172a; border: none; background: transparent;")
-        content_lay.addWidget(title_lbl)
+        text_width = self.WIDTH - self._SIDE_CHROME
 
-        msg_lbl = QLabel(message)
-        msg_lbl.setStyleSheet("font-size: 12px; color: #475569; border: none; background: transparent;")
-        msg_lbl.setWordWrap(True)
-        content_lay.addWidget(msg_lbl)
+        self.title_lbl = QLabel(self._clean(title or default_title))
+        title_font = QFont(self.font())
+        title_font.setPixelSize(13)
+        title_font.setBold(True)
+        self.title_lbl.setFont(title_font)
+        self.title_lbl.setStyleSheet(
+            "color: #0f172a; border: none; background: transparent;"
+        )
+        self.title_lbl.setWordWrap(True)
+        self.title_lbl.setFixedWidth(text_width)
+        self.title_lbl.setFixedHeight(self._wrapped_height(self.title_lbl, text_width))
+        content_lay.addWidget(self.title_lbl)
+
+        full_message = self._clean(message)
+        self.msg_lbl = QLabel()
+        message_font = QFont(self.font())
+        message_font.setPixelSize(12)
+        self.msg_lbl.setFont(message_font)
+        self.msg_lbl.setStyleSheet(
+            "color: #475569; border: none; background: transparent;"
+        )
+        self.msg_lbl.setWordWrap(True)
+        self.msg_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.msg_lbl.setFixedWidth(text_width)
+        shown_message = self._fit_message(full_message, text_width, message_font)
+        self.msg_lbl.setText(shown_message)
+        if shown_message != full_message:
+            # Nothing is lost: the untruncated text stays one hover away and is
+            # always kept in full in the notifications panel.
+            self.msg_lbl.setToolTip(full_message)
+        self.msg_lbl.setFixedHeight(self._wrapped_height(self.msg_lbl, text_width))
+        content_lay.addWidget(self.msg_lbl)
+        content_lay.addStretch()
 
         layout.addLayout(content_lay, 1)
 
-        close_btn = QPushButton("✕")
+        close_btn = QPushButton("\u2715")
         close_btn.setFixedSize(20, 20)
         close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         close_btn.setStyleSheet("""
@@ -1043,12 +1080,81 @@ class ToastItem(QFrame):
             QPushButton:hover { color: #0f172a; }
         """)
         close_btn.clicked.connect(self.dismiss)
-        layout.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(close_btn, 0, Qt.AlignmentFlag.AlignTop)
+
+        # Qt cannot resolve heightForWidth through nested layouts in a widget
+        # that is positioned by hand, so the height is computed here instead of
+        # relying on adjustSize() - that is what used to clip long messages.
+        self.setFixedHeight(
+            12 + self.title_lbl.height() + content_lay.spacing() + self.msg_lbl.height() + 12
+        )
 
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self.dismiss)
-        self._timer.start(duration_ms)
+        self._timer.start(max(1200, int(duration_ms)))
+
+    @staticmethod
+    def _clean(text):
+        text = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        return "\n".join(line.rstrip() for line in text.split("\n"))
+
+    @staticmethod
+    def _wrapped_height(label, width):
+        """Exact rendered height of a word-wrapped label at ``width`` pixels."""
+        metrics = QFontMetrics(label.font())
+        rect = metrics.boundingRect(
+            0, 0, width, 100000,
+            int(Qt.TextFlag.TextWordWrap) | int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop),
+            label.text(),
+        )
+        return max(metrics.height(), rect.height())
+
+    @classmethod
+    def _fit_message(cls, text, width, font=None):
+        """Trim a very long message to MAX_MESSAGE_LINES rendered lines."""
+        if not text:
+            return ""
+        metrics = QFontMetrics(font) if font is not None else QFontMetrics(QLabel().font())
+        # Break tokens that can never wrap on their own (hashes, file names,
+        # long ids) so they cannot push the card out of shape.
+        text = cls._break_long_tokens(text, metrics, width)
+        line_height = max(1, metrics.lineSpacing())
+        max_height = line_height * cls.MAX_MESSAGE_LINES
+        flags = int(Qt.TextFlag.TextWordWrap) | int(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+        )
+        if metrics.boundingRect(0, 0, width, 100000, flags, text).height() <= max_height:
+            return text
+
+        low, high = 0, len(text)
+        while low < high:
+            middle = (low + high + 1) // 2
+            candidate = text[:middle].rstrip() + "\u2026"
+            if metrics.boundingRect(0, 0, width, 100000, flags, candidate).height() <= max_height:
+                low = middle
+            else:
+                high = middle - 1
+        return text[:low].rstrip() + "\u2026"
+
+    @staticmethod
+    def _break_long_tokens(text, metrics, width):
+        pieces = []
+        for token in text.split(" "):
+            if metrics.horizontalAdvance(token) <= width or "\n" in token:
+                pieces.append(token)
+                continue
+            current = ""
+            for char in token:
+                if metrics.horizontalAdvance(current + char) > width and current:
+                    pieces.append(current)
+                    pieces.append("\u200b")
+                    current = char
+                else:
+                    current += char
+            if current:
+                pieces.append(current)
+        return " ".join(pieces).replace(" \u200b ", "\n")
 
     def dismiss(self):
         self._timer.stop()
@@ -1059,16 +1165,21 @@ class ToastItem(QFrame):
 
 
 class ToastManager(QWidget):
+    SPACING = 8
+    TOP_MARGIN = 68
+    BOTTOM_MARGIN = 24
+    MAX_VISIBLE = 4
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("toastManager")
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
         self.setStyleSheet("background: transparent; border: none;")
-        self.setFixedWidth(340)
+        self.setFixedWidth(ToastItem.WIDTH)
 
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
-        self._layout.setSpacing(8)
+        self._layout.setSpacing(self.SPACING)
         self._layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.hide()
 
@@ -1083,26 +1194,61 @@ class ToastManager(QWidget):
         )
         self._layout.addWidget(item)
         item.show()
-        self.adjustSize()
-        self.reposition()
+        self._drop_overflow()
+        self._resize_to_content()
         self.show()
         self.raise_()
 
+    def _items(self):
+        return [
+            self._layout.itemAt(index).widget()
+            for index in range(self._layout.count())
+            if self._layout.itemAt(index).widget() is not None
+        ]
+
+    def _drop_overflow(self):
+        """Keep the stack inside the window: retire the oldest cards first."""
+        items = self._items()
+        available = self._available_height()
+        while len(items) > 1 and (
+            len(items) > self.MAX_VISIBLE or self._stack_height(items) > available
+        ):
+            oldest = items.pop(0)
+            self._layout.removeWidget(oldest)
+            oldest.setParent(None)
+            oldest.deleteLater()
+
+    def _available_height(self):
+        parent = self.parent()
+        if parent is None:
+            return 100000
+        return max(120, parent.rect().height() - self.TOP_MARGIN - self.BOTTOM_MARGIN)
+
+    def _stack_height(self, items):
+        if not items:
+            return 0
+        return sum(item.height() for item in items) + self.SPACING * (len(items) - 1)
+
+    def _resize_to_content(self):
+        items = self._items()
+        self.setFixedHeight(self._stack_height(items))
+        self.reposition()
+
     def _remove_item(self, item):
         self._layout.removeWidget(item)
+        item.setParent(None)
         item.deleteLater()
-        self.adjustSize()
-        self.reposition()
         if self._layout.count() == 0:
             self.hide()
+            return
+        self._resize_to_content()
 
     def reposition(self):
         if not self.parent():
             return
         parent_rect = self.parent().rect()
         x = parent_rect.width() - self.width() - 24
-        y = 68
-        self.move(max(10, x), y)
+        self.move(max(10, x), self.TOP_MARGIN)
         self.raise_()
 
 
@@ -1225,7 +1371,7 @@ class MainWindow(QMainWindow):
             "reports_group": ("reports", "sales_details"),
         }
         if self.user["role"] == "admin":
-            self.nav_group_items["products_group"] = ("products", "stock", "finalize_sales")
+            self.nav_group_items["products_group"] = ("products", "finalize_sales")
         nav_frame = QWidget()
         nav_frame.setStyleSheet("background: transparent;")
         nav_layout = QVBoxLayout(nav_frame)
@@ -1250,7 +1396,6 @@ class MainWindow(QMainWindow):
                 self.labels["products"],
                 [
                     (self.labels["products"], "products"),
-                    (self.labels["stock"], "stock"),
                     (self.labels.get("finalize_sales", "Sotishni yakunlash"), "finalize_sales"),
                 ],
             )
@@ -1340,14 +1485,14 @@ class MainWindow(QMainWindow):
         user_top_row.addStretch()
         user_top_row.addWidget(self.user_help_lbl)
 
-        # Update badge: same idea as the sync button's counter in the top bar,
-        # but a plain red dot - there is nothing to count, a release either is
-        # newer than what is installed or it is not.
+        # Update badge: a counter styled exactly like the sync button's badge in
+        # the top bar. One unreleased version is one waiting item, so it reads
+        # "1" - the same language the rest of the app already uses for "there is
+        # something here for you".
         self.release_dot_lbl = QLabel(self.user_menu_btn)
-        self.release_dot_lbl.setFixedSize(10, 10)
-        self.release_dot_lbl.setStyleSheet(
-            "background:#ef4444;border:1px solid #ffffff;border-radius:5px;"
-        )
+        self.release_dot_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.release_dot_lbl.setFixedSize(16, 16)
+        self.release_dot_lbl.setStyleSheet(self._counter_badge_style())
         self.release_dot_lbl.hide()
 
         user_lay.addWidget(self.user_menu_btn)
@@ -1405,7 +1550,6 @@ class MainWindow(QMainWindow):
         if self.user["role"] == "admin":
             self.pages.update({
                 "products": ProductsWidget(self.user),
-                "stock": StockWidget(),
                 "finalize_sales": FinalizeSalesWidget(self.user),
                 "reports": ReportsWidget(user=self.user),
                 "sales_details": SalesDetailsWidget(user=self.user),
@@ -1675,14 +1819,7 @@ class MainWindow(QMainWindow):
         self.sync_badge_lbl.setFixedSize(width, 16)
         self.sync_badge_lbl.move(40 - width, 0)
         self.sync_badge_lbl.setText(text)
-        self.sync_badge_lbl.setStyleSheet(f"""
-            background: {background};
-            color: white;
-            border: 1px solid white;
-            border-radius: 8px;
-            font-size: 9px;
-            font-weight: bold;
-        """)
+        self.sync_badge_lbl.setStyleSheet(self._counter_badge_style(background))
         self.sync_badge_lbl.show()
         self.sync_badge_lbl.raise_()
 
@@ -2023,19 +2160,38 @@ class MainWindow(QMainWindow):
             duration_ms=8000,
         )
 
+    @staticmethod
+    def _counter_badge_style(background="#ef4444"):
+        """Shared look for the small red counters (sync, updates)."""
+        return f"""
+            background: {background};
+            color: white;
+            border: 1px solid white;
+            border-radius: 8px;
+            font-size: 9px;
+            font-weight: bold;
+        """
+
+    def pending_release_count(self):
+        """How many released versions are newer than the one running (0 or 1)."""
+        version = (db.get_known_release() or {}).get("version") or ""
+        return 1 if version and is_newer_version(version, APP_VERSION) else 0
+
     def _refresh_release_badge(self):
         if not hasattr(self, "release_dot_lbl"):
             return
         version = (db.get_known_release() or {}).get("version") or ""
-        # The dot tracks what is actually installed, so it clears itself after an
-        # update instead of waiting for the user to open the dialog.
-        pending = bool(version) and is_newer_version(version, APP_VERSION)
-        if not pending:
+        # The badge tracks what is actually installed, so it clears itself after
+        # an update instead of waiting for the user to open the dialog.
+        count = self.pending_release_count()
+        if not count:
             self.release_dot_lbl.hide()
             self.user_menu_btn.setToolTip("")
             return
         tooltip = self.labels.get("release_badge_tooltip", "Yangi versiya mavjud: {v}")
         self.user_menu_btn.setToolTip(tooltip.replace("{v}", version))
+        self.release_dot_lbl.setText(str(count))
+        self.release_dot_lbl.setStyleSheet(self._counter_badge_style())
         self._position_release_dot()
         self.release_dot_lbl.show()
         self.release_dot_lbl.raise_()
@@ -2044,7 +2200,8 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "release_dot_lbl"):
             return
         width = self.user_menu_btn.width() or self.sidebar.width() - 24
-        self.release_dot_lbl.move(max(width - 16, 0), 6)
+        badge_width = self.release_dot_lbl.width() or 16
+        self.release_dot_lbl.move(max(width - badge_width - 6, 0), 6)
 
     def _apply_remote_assets(self, generation=None, checked_generation=None):
         if self._sync_busy():
@@ -2272,10 +2429,19 @@ class MainWindow(QMainWindow):
                 dlg.set_error(self.labels.get("password_required", "Parol kiriting."))
                 continue
             try:
+                # The password is only ever checked by the server; nothing is
+                # cached locally, so this needs a live connection.
                 api_client.login(email, password)
                 break
+            except api_client.ApiOfflineError:
+                dlg.set_error(self.labels.get(
+                    "unlock_needs_internet",
+                    "Serverga ulanib bo'lmadi. Bu amal uchun internet kerak.",
+                ))
             except api_client.ApiClientError as exc:
                 dlg.set_error(str(exc))
+            except Exception as exc:  # noqa: BLE001 - shown to the user
+                dlg.set_error(str(exc) or type(exc).__name__)
         self.user["role"] = "admin"
         self.next_window = MainWindow(dict(self.user))
         self.next_window.showMaximized()

@@ -97,14 +97,12 @@ class UiDatabaseSmokeTest(unittest.TestCase):
         from ui.products_widget import ProductsWidget
         from ui.reports_widget import ReportsWidget, SalesDetailsWidget
         from ui.sales_widget import SalesWidget
-        from ui.stock_widget import StockWidget
         from ui.supplier_debts_widget import SupplierDebtsWidget
         from ui.users_widget import UsersWidget
 
         widgets = [
             SalesWidget(user),
             ProductsWidget(user),
-            StockWidget(),
             ReportsWidget(),
             UsersWidget(),
             LoginHistoryWidget(),
@@ -117,7 +115,7 @@ class UiDatabaseSmokeTest(unittest.TestCase):
             load = getattr(widget, "load_data", None)
             if callable(load):
                 load()
-        products = widgets[1]
+        products = next(w for w in widgets if isinstance(w, ProductsWidget))
         self.assertEqual(products.table.columnCount(), 7)
         self.assertNotIn(
             "Copy",
@@ -132,7 +130,7 @@ class UiDatabaseSmokeTest(unittest.TestCase):
         set_language(products, "ru")
         self.assertIn("В наличии:", products.stats_lbl.text())
         self.assertEqual(products.search_edit.placeholderText(), "Поиск...")
-        reports = widgets[3]
+        reports = next(w for w in widgets if isinstance(w, ReportsWidget))
         self.assertEqual(len(reports.summary_cards), 6)
         self.assertTrue(reports.summary_card_frames["salary"].isHidden())
         cashier_report_index = reports.report_type_combo.findData("cashier")
@@ -145,11 +143,11 @@ class UiDatabaseSmokeTest(unittest.TestCase):
         ]
         self.assertIn("Sotuvlar soni", metric_labels)
         self.assertNotIn("Cheklar", metric_labels)
-        debts = widgets[6]
+        debts = next(w for w in widgets if isinstance(w, SupplierDebtsWidget))
         set_language(debts, "en")
         self.assertIn("Total", debts.total_lbl.text())
         self.assertIn(debts.add_btn.text(), {"+ Supplier", "+ Debtor"})
-        self.assertEqual(len(widgets), 10)
+        self.assertEqual(len(widgets), 9)
         app.processEvents()
 
     def test_cashier_products_and_reports_are_restricted(self):

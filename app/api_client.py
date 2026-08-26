@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from urllib.parse import urlencode
@@ -8,6 +9,17 @@ from ssl_support import create_ssl_context
 
 DEFAULT_API_URL = "https://drinking-relight-trailside.ngrok-free.dev/api/v1"
 
+# Auth runs over a tunnel that can be cold-starting: give it a real budget
+# instead of the 10s default used by the small sync polls.
+AUTH_TIMEOUT = 25
+AUTH_RETRIES = 2
+_RETRY_BACKOFF_SECONDS = (1.0, 2.5)
+
+# HTTP codes that mean "the app server is not answering right now" rather than
+# "your request was rejected". ngrok answers with 404/502 when the tunnel is
+# down, and a restarting backend answers with 502/503/504.
+_SERVER_UNAVAILABLE_CODES = {404, 500, 502, 503, 504}
+
 
 class ApiClientError(Exception):
     """Raised when the online API cannot authenticate or respond."""
@@ -15,6 +27,14 @@ class ApiClientError(Exception):
 
 class ApiOfflineError(ApiClientError):
     """Raised when the server could not be reached at all (no internet/tunnel)."""
+
+
+class ApiAuthError(ApiClientError):
+    """Raised when the server actively rejected the credentials (wrong e-mail/parol)."""
+
+
+class ApiVerificationRequiredError(ApiClientError):
+    """Raised when the account exists but its e-mail was never confirmed."""
 
 
 class SyncConflictError(ApiClientError):
@@ -52,8 +72,15 @@ def _format_api_detail(detail):
             return "Tasdiqlash kodi noto'g'ri yoki muddati tugagan."
         if "not waiting for verification" in lower:
             return "Akkaunt tasdiqlash kutayotgan holatda emas."
+        if "email verification is required" in lower:
+            return (
+                "Email tasdiqlanmagan. 'Signup' bo'limidan shu email uchun "
+                "kodni qayta olib, tasdiqlashni yakunlang."
+            )
         if "can be resent in" in lower:
             return "Kodni qayta yuborish uchun biroz kuting."
+        if "temporarily unavailable" in lower:
+            return "Email xizmati vaqtincha ishlamayapti. Birozdan keyin urinib ko'ring."
         return detail
     return None
 
@@ -75,7 +102,7 @@ def _build_headers(token=None, extra=None):
     return headers
 
 
-def _request_json(path, payload=None, token=None, timeout=10, method=None, headers=None):
+def _single_request_json(path, payload=None, token=None, timeout=10, method=None, headers=None):
     data = None
     request_headers = _build_headers(token, headers)
     if payload is not None:
@@ -92,7 +119,7 @@ def _request_json(path, payload=None, token=None, timeout=10, method=None, heade
         try:
             body = exc.read().decode("utf-8")
             detail = json.loads(body).get("detail") if body else None
-        except (UnicodeDecodeError, json.JSONDecodeError):
+        except (UnicodeDecodeError, json.JSONDecodeError, OSError):
             detail = None
         if exc.code == 409 and isinstance(detail, dict) and detail.get("code") == "sync_conflict":
             raise SyncConflictError(
@@ -103,65 +130,140 @@ def _request_json(path, payload=None, token=None, timeout=10, method=None, heade
         detail_text = _format_api_detail(detail)
         if exc.code == 409:
             raise ApiClientError(detail_text or "Bu email allaqachon ro'yxatdan o'tgan. Iltimos, 'Login' orqali kiring.") from exc
-        if exc.code in (400, 401, 403, 422, 429):
-            raise ApiClientError(detail_text or "Email yoki parol noto'g'ri.") from exc
+        if exc.code == 403 and detail_text and "tasdiqlanmagan" in detail_text.lower():
+            raise ApiVerificationRequiredError(detail_text) from exc
+        if exc.code in (401, 403):
+            raise ApiAuthError(detail_text or "Email yoki parol noto'g'ri.") from exc
+        if exc.code in (400, 422, 429):
+            raise ApiClientError(detail_text or "So'rov qabul qilinmadi. Ma'lumotlarni tekshiring.") from exc
+        if exc.code in _SERVER_UNAVAILABLE_CODES:
+            # A tunnel/gateway answer, not an application answer: treat it as
+            # "server is down" so the caller can retry or fall back offline.
+            raise ApiOfflineError(
+                f"Server hozir javob bermayapti (HTTP {exc.code}). Birozdan keyin urinib ko'ring."
+            ) from exc
         raise ApiClientError(detail_text or f"Server xatosi: HTTP {exc.code}") from exc
     except (URLError, TimeoutError, OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ApiOfflineError("Internet yoki server bilan aloqa yo'q. Iltimos, internet ulanishingizni tekshiring.") from exc
 
 
+def _request_json(path, payload=None, token=None, timeout=10, method=None, headers=None, retries=0):
+    """Perform one API call, optionally retrying transient transport failures.
+
+    Only :class:`ApiOfflineError` is retried - it means the request never
+    reached the application, so replaying it cannot duplicate a side effect.
+    Any answer the server actually produced (auth failure, validation error,
+    conflict) is raised immediately.
+    """
+    attempts = max(0, int(retries)) + 1
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            return _single_request_json(
+                path, payload=payload, token=token, timeout=timeout,
+                method=method, headers=headers,
+            )
+        except ApiOfflineError as exc:
+            last_error = exc
+            if attempt + 1 >= attempts:
+                break
+            backoff = _RETRY_BACKOFF_SECONDS[min(attempt, len(_RETRY_BACKOFF_SECONDS) - 1)]
+            time.sleep(backoff)
+    raise last_error
+
+
+def normalize_email(value):
+    """Client-side mirror of the server's e-mail normalisation."""
+    return (value or "").strip().lower()
+
+
 def login(email, password):
-    token_response = _request_json("/auth/login", {"email": email, "password": password})
+    email = normalize_email(email)
+    if not email or "@" not in email:
+        raise ApiClientError("Email manzilini to'g'ri kiriting.")
+    if not password:
+        raise ApiClientError("Parolni kiriting.")
+    if len(password) < 6:
+        raise ApiAuthError("Parol kamida 6 ta belgidan iborat bo'lishi kerak.")
+    token_response = _request_json(
+        "/auth/login",
+        {"email": email, "password": password},
+        timeout=AUTH_TIMEOUT,
+        retries=AUTH_RETRIES,
+    )
     token = token_response.get("access_token")
     if not token:
         raise ApiClientError("Server token qaytarmadi.")
-    user = _request_json("/auth/me", token=token)
+    user = get_current_user(token)
+    if not (user.get("user_uid") or user.get("uid")):
+        raise ApiClientError("Server account ma'lumotini to'liq qaytarmadi.")
     return {"token": token, "user": user}
 
 
 def request_registration_code(email):
-    return _request_json("/auth/register", {"email": email, "password": "TempInitPassword123!"})
+    return _request_json(
+        "/auth/register",
+        {"email": normalize_email(email), "password": "TempInitPassword123!"},
+        timeout=AUTH_TIMEOUT,
+    )
 
 
 def register(email, password):
-    return _request_json("/auth/register", {"email": email, "password": password})
+    return _request_json(
+        "/auth/register",
+        {"email": normalize_email(email), "password": password},
+        timeout=AUTH_TIMEOUT,
+    )
 
 
 def confirm_registration(email, code, password=None):
+    email = normalize_email(email)
+    code = "".join(ch for ch in str(code or "") if ch.isdigit())
     payload = {"email": email, "code": code}
     if password:
         payload["password"] = password
     try:
-        token_response = _request_json("/auth/register/confirm", payload)
+        token_response = _request_json("/auth/register/confirm", payload, timeout=AUTH_TIMEOUT)
     except ApiClientError as exc:
         if "422" in str(exc) and password:
-            token_response = _request_json("/auth/register/confirm", {"email": email, "code": code})
+            token_response = _request_json(
+                "/auth/register/confirm", {"email": email, "code": code}, timeout=AUTH_TIMEOUT
+            )
         else:
             raise
     token = token_response.get("access_token")
     if not token:
         raise ApiClientError("Server token qaytarmadi.")
-    user = _request_json("/auth/me", token=token)
+    user = get_current_user(token)
     return {"token": token, "user": user}
 
 
 def resend_registration_code(email):
-    return _request_json("/auth/register/resend", {"email": email})
+    return _request_json(
+        "/auth/register/resend", {"email": normalize_email(email)}, timeout=AUTH_TIMEOUT
+    )
 
 
 def request_password_reset(email):
-    return _request_json("/auth/password-reset/request", {"email": email})
+    return _request_json(
+        "/auth/password-reset/request", {"email": normalize_email(email)}, timeout=AUTH_TIMEOUT
+    )
 
 
 def confirm_password_reset(email, code, new_password):
     return _request_json(
         "/auth/password-reset/confirm",
-        {"email": email, "code": code, "new_password": new_password},
+        {
+            "email": normalize_email(email),
+            "code": "".join(ch for ch in str(code or "") if ch.isdigit()),
+            "new_password": new_password,
+        },
+        timeout=AUTH_TIMEOUT,
     )
 
 
 def get_current_user(token):
-    return _request_json("/auth/me", token=token)
+    return _request_json("/auth/me", token=token, timeout=AUTH_TIMEOUT, retries=AUTH_RETRIES)
 
 
 def push_sync_records(token, records, device_key=None, note=None, timeout=30, expected_generation=None):

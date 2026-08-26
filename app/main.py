@@ -1,5 +1,6 @@
 import sys
 import os
+import traceback
 from pathlib import Path
 
 # Add project root to path
@@ -55,18 +56,23 @@ def main():
         QToolTip { background: #1e293b; color: white; border: none; padding: 4px 8px; border-radius: 4px; }
     """)
 
-    recent_user = db.restore_recent_account_user(max_days=7)
+    try:
+        recent_user = db.restore_recent_account_user(max_days=7)
+    except Exception:
+        # A broken/partial session file must never block the login screen.
+        traceback.print_exc()
+        recent_user = None
     if recent_user:
         recent_user["role"] = "cashier"
+        # The stored session is what authorises this launch; a sync that fails
+        # (server down, tunnel restarting) is retried from inside the app and
+        # must not send the user back to the login screen.
         try:
             sync_result = sync_service.synchronize_account_storage(recent_user)
             if sync_result.get("direction") == "none":
-                try:
-                    sync_service.refresh_account_assets(recent_user)
-                except Exception:
-                    pass
+                sync_service.refresh_account_assets(recent_user)
         except Exception:
-            recent_user = None
+            traceback.print_exc()
     if recent_user:
         db.touch_user_activity(recent_user["id"])
         window = MainWindow(dict(recent_user))

@@ -76,10 +76,17 @@ class ExpenseDialog(QDialog):
     def _build_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 20)
-        form = QFormLayout()
+        self.form = QFormLayout()
+        form = self.form
         self.category_combo = QComboBox()
         self.category_combo.addItem("— Kategoriya —", None)
         self._cashier_category_ids = set()
+        # Guarantee the category is offered even on a database created before
+        # cashier expenses existed.
+        try:
+            db.ensure_cashier_expense_category()
+        except Exception:
+            pass
         for category in db.get_expense_categories():
             self.category_combo.addItem(category["name"], category["id"])
             if db.is_cashier_expense_category_name(category["name"]):
@@ -90,10 +97,12 @@ class ExpenseDialog(QDialog):
                 self.category_combo.setCurrentIndex(idx)
         self.cashier_combo = QComboBox()
         self.cashier_combo.addItem(t("— Kassirni tanlang —", self.language), None)
+        self._has_cashiers = False
         for user in db.get_users():
             if user["role"] != "cashier":
                 continue
             self.cashier_combo.addItem(user["username"] or user["email"], user["id"])
+            self._has_cashiers = True
         if self.expense and self.expense.get("cashier_id"):
             idx = self.cashier_combo.findData(self.expense["cashier_id"])
             if idx >= 0:
@@ -127,6 +136,7 @@ class ExpenseDialog(QDialog):
         form.addRow("Kategoriya:", self.category_combo)
         self.cashier_label = QLabel(t("Kassir:", self.language))
         form.addRow(self.cashier_label, self.cashier_combo)
+        self._cashier_row_index = form.rowCount() - 1
         form.addRow("Summa:", amount_row)
         form.addRow("Description:", self.description_edit)
         layout.addLayout(form)
@@ -149,7 +159,11 @@ class ExpenseDialog(QDialog):
             QMessageBox.warning(self, t("Xatolik", self.language), t("Summani kiriting!", self.language))
             return
         if self._is_cashier_category() and not self.cashier_combo.currentData():
-            QMessageBox.warning(self, t("Xatolik", self.language), t("Kassirni tanlang!", self.language))
+            message = (
+                "Kassirni tanlang!" if self._has_cashiers
+                else "Avval 'Kassirlar' bo'limidan kassir qo'shing."
+            )
+            QMessageBox.warning(self, t("Xatolik", self.language), t(message, self.language))
             return
         self.accept()
 
@@ -167,8 +181,17 @@ class ExpenseDialog(QDialog):
 
     def _update_cashier_visibility(self, *_args):
         visible = self._is_cashier_category()
+        # setRowVisible also collapses the empty row; hiding the two widgets on
+        # its own leaves a gap on some Qt builds.
+        if hasattr(self.form, "setRowVisible"):
+            self.form.setRowVisible(self._cashier_row_index, visible)
         self.cashier_label.setVisible(visible)
         self.cashier_combo.setVisible(visible)
+        if visible and not self._has_cashiers:
+            self.cashier_combo.setItemText(
+                0, t("Kassir yo'q - avval 'Kassirlar' bo'limidan qo'shing", self.language)
+            )
+        self.adjustSize()
 
     def amount(self):
         text = self.amount_edit.text().strip().replace(" ", "").replace(",", ".")
@@ -517,10 +540,10 @@ class ExpensesWidget(QWidget):
         layout.addLayout(toolbar)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(6)
-        self.table.setHorizontalHeaderLabels(["Vaqt", "Kategoriya", "Summa", "Valyuta", "Description", "Amallar"])
-        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
-        for column, width in [(0, 160), (1, 150), (2, 130), (3, 90), (5, 80)]:
+        self.table.setColumnCount(7)
+        self.table.setHorizontalHeaderLabels(["Vaqt", "Kategoriya", "Kassir", "Summa", "Valyuta", "Description", "Amallar"])
+        self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        for column, width in [(0, 160), (1, 150), (2, 150), (3, 130), (4, 90), (6, 80)]:
             self.table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
             self.table.setColumnWidth(column, width)
         self.table.verticalHeader().setDefaultSectionSize(54)
@@ -551,12 +574,17 @@ class ExpensesWidget(QWidget):
             item.setData(Qt.ItemDataRole.UserRole, dict(expense))
             self.table.setItem(row, 0, item)
             self.table.setItem(row, 1, QTableWidgetItem(expense["category_name"] or ""))
+            cashier_item = QTableWidgetItem(expense["cashier_name"] or "-")
+            if expense["cashier_name"]:
+                cashier_item.setForeground(QColor("#be123c"))
+                cashier_item.setToolTip(t("Bu harajat kassir oyligidan ayriladi", self.property("app_language") or "uz"))
+            self.table.setItem(row, 2, cashier_item)
             amount_item = QTableWidgetItem(f"{expense['amount']:,.2f}")
             amount_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self.table.setItem(row, 2, amount_item)
-            self.table.setItem(row, 3, QTableWidgetItem(expense["currency_code"] or "UZS"))
-            self.table.setItem(row, 4, QTableWidgetItem(expense["description"] or ""))
-            self.table.setCellWidget(row, 5, self._actions_widget(row))
+            self.table.setItem(row, 3, amount_item)
+            self.table.setItem(row, 4, QTableWidgetItem(expense["currency_code"] or "UZS"))
+            self.table.setItem(row, 5, QTableWidgetItem(expense["description"] or ""))
+            self.table.setCellWidget(row, 6, self._actions_widget(row))
             self.table.setRowHeight(row, 54)
         set_language(self, self.property("app_language") or "uz")
 

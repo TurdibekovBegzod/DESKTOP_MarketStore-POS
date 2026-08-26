@@ -21,6 +21,7 @@ from sqlalchemy import (
     and_,
     case,
     create_engine,
+    delete,
     event,
     func,
     or_,
@@ -58,6 +59,11 @@ LEGACY_DB_PATH = os.path.join(DATA_DIR, "market_pos.db")
 ACCOUNT_DB_ROOT = os.path.join(DATA_DIR, "accounts")
 ACCOUNT_SESSION_PATH = os.path.join(DATA_DIR, "account_session.json")
 DB_PATH = LEGACY_DB_PATH
+
+# Expenses filed under this category are taken out of the selected cashier's
+# salary instead of being a plain shop expense.
+CASHIER_EXPENSE_CATEGORY_NAME = "Kassir"
+CASHIER_EXPENSE_CATEGORY_ALIASES = frozenset({"kassir", "cashier", "кассир"})
 
 Base = declarative_base()
 _ENGINE = None
@@ -1391,10 +1397,24 @@ def init_db(account_owner=None, seed_defaults=True):
                 if not session.scalar(select(Currency).where(Currency.code == code)):
                     session.add(Currency(code=code, name=name, rate_to_uzs=rate, is_base=is_base))
 
+            # An earlier build cached a password hash for offline sign-in.
+            # Logging in is server-side only now, so drop any leftovers.
+            session.execute(
+                delete(UserSetting).where(UserSetting.key == "offline_password_hash")
+            )
+
+            existing_category_names = set(session.scalars(select(ExpenseCategory.name)).all())
             if seed_defaults:
                 for name in ["Ijara", "Transport", "Kommunal", "Ish haqi", "Kassir", "Boshqa"]:
-                    if not session.scalar(select(ExpenseCategory).where(ExpenseCategory.name == name)):
+                    if name not in existing_category_names:
                         session.add(ExpenseCategory(name=name))
+                        existing_category_names.add(name)
+
+            # The cashier category drives salary deductions, so it must exist in
+            # databases created before the feature shipped as well.
+            if not any(is_cashier_expense_category_name(name) for name in existing_category_names):
+                session.add(ExpenseCategory(name=CASHIER_EXPENSE_CATEGORY_NAME))
+                existing_category_names.add(CASHIER_EXPENSE_CATEGORY_NAME)
 
             if seed_defaults and session.scalar(select(func.count(ProductTemplate.id))) == 0:
                 template = ProductTemplate(name="Umumiy mahsulot", section_id=default_section_id)
@@ -3002,7 +3022,7 @@ def add_stock(product_id, quantity, note=""):
         f"Omborga kirim: {p_name}",
         f"+{quantity} {p_unit} kiritildi | Jami qoldiq: {p_stock} | Izoh: {note or '-'}",
         level="success",
-        target="stock",
+        target="products",
         badge="Kirim",
     )
 
@@ -3930,7 +3950,8 @@ def get_overall_period_series(start_date, end_date, section_id=None):
         for sale in sales:
             label = _local_date_label(sale.created_at)
             row = grouped.setdefault(label, Row(dict(
-                label=label, sales_count=0, product_count=0, revenue=0, profit=0, cashier_reward=0
+                label=label, sales_count=0, product_count=0, revenue=0, profit=0,
+                cashier_reward=0, salary_deduction=0,
             )))
             if section_id:
                 totals = _sale_section_totals(session, sale.id, section_id)
@@ -3947,6 +3968,15 @@ def get_overall_period_series(start_date, end_date, section_id=None):
             row["revenue"] += revenue
             row["profit"] += revenue - _sale_cost(session, sale.id)
             row["cashier_reward"] += sale.cashier_reward or 0
+        if section_id is None:
+            for label, deduction in _all_cashier_expense_deductions(
+                session, start_date, end_date
+            ).items():
+                row = grouped.setdefault(label, Row(dict(
+                    label=label, sales_count=0, product_count=0, revenue=0,
+                    profit=0, cashier_reward=0, salary_deduction=0,
+                )))
+                row["salary_deduction"] = (row["salary_deduction"] or 0) + deduction
         return [grouped[key] for key in sorted(grouped)]
 
 
@@ -3961,7 +3991,8 @@ def get_overall_day_hourly_series(date_str, section_id=None):
         for sale in sales:
             label = _local_hour_label(sale.created_at)
             row = grouped.setdefault(label, Row(dict(
-                label=label, sales_count=0, product_count=0, revenue=0, profit=0, cashier_reward=0
+                label=label, sales_count=0, product_count=0, revenue=0, profit=0,
+                cashier_reward=0, salary_deduction=0,
             )))
             if section_id:
                 totals = _sale_section_totals(session, sale.id, section_id)
@@ -3978,7 +4009,33 @@ def get_overall_day_hourly_series(date_str, section_id=None):
             row["revenue"] += revenue
             row["profit"] += revenue - _sale_cost(session, sale.id)
             row["cashier_reward"] += sale.cashier_reward or 0
+        if section_id is None:
+            for label, deduction in _all_cashier_expense_deductions(
+                session, date_str, date_str, hourly=True
+            ).items():
+                row = grouped.setdefault(label, Row(dict(
+                    label=label, sales_count=0, product_count=0, revenue=0,
+                    profit=0, cashier_reward=0, salary_deduction=0,
+                )))
+                row["salary_deduction"] = (row["salary_deduction"] or 0) + deduction
         return [grouped[key] for key in sorted(grouped)]
+
+
+def _all_cashier_expense_deductions(session, start_date, end_date, hourly=False):
+    """Cashier-charged expenses for every cashier, keyed by period label."""
+    rows = session.execute(
+        select(Expense, Currency.rate_to_uzs)
+        .outerjoin(Currency, Currency.code == Expense.currency_code)
+        .where(
+            Expense.cashier_id.is_not(None),
+            _date_expr(Expense.created_at).between(start_date, end_date),
+        )
+    ).all()
+    deductions = {}
+    for expense, rate_to_uzs in rows:
+        label = _local_hour_label(expense.created_at) if hourly else _local_date_label(expense.created_at)
+        deductions[label] = deductions.get(label, 0) + (expense.amount or 0) * (rate_to_uzs or 1)
+    return deductions
 
 
 def _cashier_expense_deductions(session, cashier_id, start_date, end_date, hourly=False):
@@ -3995,6 +4052,79 @@ def _cashier_expense_deductions(session, cashier_id, start_date, end_date, hourl
         label = _local_hour_label(expense.created_at) if hourly else _local_date_label(expense.created_at)
         deductions[label] = deductions.get(label, 0) + (expense.amount or 0) * (rate_to_uzs or 1)
     return deductions
+
+
+def get_cashier_expense_deductions(start_date, end_date, cashier_id=None):
+    """Cashier-charged expenses in a period, converted to UZS and grouped by cashier.
+
+    These are the "Kassir" category expenses: money already handed to (or spent
+    on behalf of) a cashier, which therefore comes off the salary the sales have
+    earned them.
+    """
+    with session_scope() as session:
+        stmt = (
+            select(
+                Expense.cashier_id,
+                func.coalesce(User.username, User.email).label("cashier_name"),
+                func.coalesce(func.sum(Expense.amount * func.coalesce(Currency.rate_to_uzs, 1)), 0).label("amount"),
+                func.count(Expense.id).label("expense_count"),
+            )
+            .select_from(Expense)
+            .outerjoin(Currency, Currency.code == Expense.currency_code)
+            .outerjoin(User, User.id == Expense.cashier_id)
+            .where(
+                Expense.cashier_id.is_not(None),
+                _date_expr(Expense.created_at).between(start_date, end_date),
+            )
+            .group_by(Expense.cashier_id, "cashier_name")
+        )
+        if cashier_id is not None:
+            stmt = stmt.where(Expense.cashier_id == cashier_id)
+        return [Row(dict(row._mapping)) for row in session.execute(stmt)]
+
+
+def get_cashier_expense_total(start_date, end_date, cashier_id=None):
+    """Single UZS figure for :func:`get_cashier_expense_deductions`."""
+    return sum(
+        row["amount"] or 0
+        for row in get_cashier_expense_deductions(start_date, end_date, cashier_id)
+    )
+
+
+def get_cashier_expense_entries(start_date, end_date, cashier_id=None):
+    """Individual cashier-charged expenses, newest first (for detail views)."""
+    with session_scope() as session:
+        stmt = (
+            select(
+                Expense,
+                ExpenseCategory.name.label("category_name"),
+                func.coalesce(User.username, User.email).label("cashier_name"),
+                func.coalesce(Currency.rate_to_uzs, 1).label("rate_to_uzs"),
+            )
+            .select_from(Expense)
+            .outerjoin(ExpenseCategory, ExpenseCategory.id == Expense.category_id)
+            .outerjoin(User, User.id == Expense.cashier_id)
+            .outerjoin(Currency, Currency.code == Expense.currency_code)
+            .where(
+                Expense.cashier_id.is_not(None),
+                _date_expr(Expense.created_at).between(start_date, end_date),
+            )
+            .order_by(Expense.created_at.desc(), Expense.id.desc())
+        )
+        if cashier_id is not None:
+            stmt = stmt.where(Expense.cashier_id == cashier_id)
+        return [
+            _row_from_model(
+                expense,
+                category_name=category_name,
+                cashier_name=cashier_name,
+                amount_uzs=(expense.amount or 0) * (rate_to_uzs or 1),
+                # Local time, so these line up with the sales rows they are
+                # shown next to in the details table.
+                created_at=_utc_to_local(expense.created_at) if expense.created_at else None,
+            )
+            for expense, category_name, cashier_name, rate_to_uzs in session.execute(stmt)
+        ]
 
 
 def get_cashier_period_summary(start_date, end_date, section_id=None, only_cashiers=False):
@@ -4670,6 +4800,17 @@ def update_expense_category(category_id, name):
         try:
             row = session.get(ExpenseCategory, category_id)
             if row:
+                if (
+                    is_cashier_expense_category_name(row.name)
+                    and not is_cashier_expense_category_name(clean_name)
+                    and session.scalar(
+                        select(func.count(Expense.id)).where(Expense.category_id == category_id)
+                    )
+                ):
+                    raise AppError(
+                        "Bu kategoriya kassir oyligiga bog'langan. "
+                        "Nomini o'zgartirish uchun avval undagi harajatlarni o'chiring."
+                    )
                 row.name = clean_name
                 session.flush()
         except IntegrityError as exc:
@@ -4689,9 +4830,17 @@ def delete_expense_category(category_id):
     with session_scope() as session:
         row = session.get(ExpenseCategory, category_id)
         if row:
+            if is_cashier_expense_category_name(row.name) and session.scalar(
+                select(func.count(Expense.id)).where(Expense.category_id == category_id)
+            ):
+                raise AppError(
+                    "Kassir kategoriyasida harajatlar bor. "
+                    "Uni o'chirish kassirlar oyligini buzadi."
+                )
             cat_name = row.name
             for expense in session.scalars(select(Expense).where(Expense.category_id == category_id)):
                 expense.category_id = None
+                expense.cashier_id = None
             session.delete(row)
     if cat_name:
         log_activity(
@@ -4730,7 +4879,37 @@ def get_expenses():
 
 
 def is_cashier_expense_category_name(name):
-    return str(name or "").strip().casefold() in {"kassir", "cashier", "кассир"}
+    cleaned = str(name or "").strip().casefold()
+    if not cleaned:
+        return False
+    if cleaned in CASHIER_EXPENSE_CATEGORY_ALIASES:
+        return True
+    # Also accept renamed variants such as "Kassir oyligi" or "Cashier advance",
+    # so the feature keeps working if the shop relabels the category.
+    return cleaned.split()[0] in CASHIER_EXPENSE_CATEGORY_ALIASES
+
+
+def ensure_cashier_expense_category():
+    """Create the cashier expense category if this database has none.
+
+    init_db() already does this, but the expenses screen calls it too so the
+    category can never be missing from the dialog on an older database.
+    """
+    with session_scope() as session:
+        for name in session.scalars(select(ExpenseCategory.name)):
+            if is_cashier_expense_category_name(name):
+                return name
+        session.add(ExpenseCategory(name=CASHIER_EXPENSE_CATEGORY_NAME))
+    return CASHIER_EXPENSE_CATEGORY_NAME
+
+
+def get_cashier_expense_category():
+    """Return the category rows that route an expense to a cashier's salary."""
+    with session_scope() as session:
+        return _rows_from_models([
+            row for row in session.scalars(select(ExpenseCategory).order_by(ExpenseCategory.name)).all()
+            if is_cashier_expense_category_name(row.name)
+        ])
 
 
 def _validated_expense_cashier(session, category_id, cashier_id):
@@ -4827,7 +5006,7 @@ def _apply_expense_owner_filter(stmt, session, user_id=None, include_unassigned=
     return stmt.where(Expense.user_id == user_id)
 
 
-def get_expense_report(start_date, end_date, category_id=None, user_id=None, include_unassigned=False):
+def get_expense_report(start_date, end_date, category_id=None, user_id=None, include_unassigned=False, include_cashier=True):
     stmt = (
         select(_date_expr(Expense.created_at).label("label"), Expense.currency_code, func.coalesce(func.sum(Expense.amount), 0).label("amount"))
         .where(_date_expr(Expense.created_at).between(start_date, end_date))
@@ -4836,12 +5015,16 @@ def get_expense_report(start_date, end_date, category_id=None, user_id=None, inc
     )
     if category_id:
         stmt = stmt.where(Expense.category_id == category_id)
+    if not include_cashier:
+        # Expenses charged to a cashier are paid out of that cashier's salary,
+        # not out of the shop's profit, so profit reports leave them out.
+        stmt = stmt.where(Expense.cashier_id.is_(None))
     with session_scope() as session:
         stmt = _apply_expense_owner_filter(stmt, session, user_id, include_unassigned)
         return [Row(dict(row._mapping)) for row in session.execute(stmt)]
 
 
-def get_expense_hourly_report(date_str, category_id=None, user_id=None, include_unassigned=False):
+def get_expense_hourly_report(date_str, category_id=None, user_id=None, include_unassigned=False, include_cashier=True):
     hour_label = func.substr(func.datetime(Expense.created_at, "localtime"), 12, 2).op("||")(":00").label("label")
     stmt = (
         select(hour_label, Expense.currency_code, func.coalesce(func.sum(Expense.amount), 0).label("amount"))
@@ -4851,6 +5034,8 @@ def get_expense_hourly_report(date_str, category_id=None, user_id=None, include_
     )
     if category_id:
         stmt = stmt.where(Expense.category_id == category_id)
+    if not include_cashier:
+        stmt = stmt.where(Expense.cashier_id.is_(None))
     with session_scope() as session:
         stmt = _apply_expense_owner_filter(stmt, session, user_id, include_unassigned)
         return [Row(dict(row._mapping)) for row in session.execute(stmt)]
@@ -5313,8 +5498,8 @@ def get_notifications_data(threshold=5, user_id=None):
             "type": "stock",
             "level": "danger" if is_empty else "warning",
             "title": f"Tugadi: {p['name']}" if is_empty else f"Kam qoldi: {p['name']}",
-            "message": f"Shtrix-kod: {p.get('barcode') or '-'} | Ombordagi qoldiq: {p.get('stock', 0)} {p.get('unit', 'dona')} | Sotish narxi: {p.get('price', 0):,.0f} {p.get('price_currency', 'UZS')}",
-            "target": "stock",
+            "message": f"Shtrix-kod: {p.get('barcode') or '-'} | Qoldiq: {p.get('stock', 0)} {p.get('unit', 'dona')} | Sotish narxi: {p.get('price', 0):,.0f} {p.get('price_currency', 'UZS')}",
+            "target": "products",
             "created_at": p.get("created_at") or "",
             "badge": "Tugagan" if is_empty else "Kam qolgan",
             "is_read": is_read,

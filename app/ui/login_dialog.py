@@ -1,15 +1,98 @@
 import math
 import time
+import traceback
 
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QMessageBox, QFrame
 )
 
-from PyQt6.QtCore import QTimer, Qt
+from PyQt6.QtCore import QObject, QThread, QTimer, Qt, pyqtSignal, pyqtSlot
 import api_client
 import database as db
 import sync_service
+
+
+class _AuthWorker(QObject):
+    """Runs one blocking auth call off the GUI thread.
+
+    Everything network-bound in the login flow goes through here, so the window
+    stays responsive and Windows never paints the "Not responding" overlay while
+    a slow tunnel is answering.
+    """
+
+    succeeded = pyqtSignal(object)
+    failed = pyqtSignal(object)
+
+    def __init__(self, operation):
+        super().__init__()
+        self._operation = operation
+
+    @pyqtSlot()
+    def run(self):
+        try:
+            self.succeeded.emit(self._operation())
+        except BaseException as exc:  # noqa: BLE001 - reported to the user verbatim
+            self.failed.emit(exc)
+
+
+class _AsyncAuthCall(QObject):
+    """Owns the worker thread for a single in-flight auth request."""
+
+    def __init__(self, owner):
+        super().__init__(owner)
+        self.owner = owner
+        self._thread = None
+        self._worker = None
+        self._on_success = None
+        self._on_failure = None
+
+    @property
+    def busy(self):
+        return bool(self._thread and self._thread.isRunning())
+
+    def start(self, operation, on_success, on_failure):
+        if self.busy:
+            return False
+        self._on_success = on_success
+        self._on_failure = on_failure
+        self._thread = QThread(self.owner)
+        self._worker = _AuthWorker(operation)
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.run)
+        self._worker.succeeded.connect(self._handle_success)
+        self._worker.failed.connect(self._handle_failure)
+        self._thread.start()
+        return True
+
+    @pyqtSlot(object)
+    def _handle_success(self, result):
+        callback = self._on_success
+        self._teardown()
+        if callback:
+            callback(result)
+
+    @pyqtSlot(object)
+    def _handle_failure(self, exc):
+        callback = self._on_failure
+        self._teardown()
+        if callback:
+            callback(exc)
+
+    def _teardown(self):
+        thread = self._thread
+        self._thread = None
+        self._worker = None
+        self._on_success = None
+        self._on_failure = None
+        if thread:
+            thread.quit()
+            thread.wait(5000)
+
+    def wait_for_finish(self, msecs=5000):
+        if self._thread:
+            self._thread.quit()
+            self._thread.wait(msecs)
 
 
 class PasswordResetDialog(QDialog):
@@ -20,6 +103,8 @@ class PasswordResetDialog(QDialog):
         self.reset_countdown = 0
         self.reset_resend_at = 0.0
         self.has_sent_once = False
+        self._auth_call = None
+        self._busy = False
         self.reset_timer = QTimer(self)
         self.reset_timer.setInterval(1000)
         self.reset_timer.timeout.connect(self._tick_reset_countdown)
@@ -100,11 +185,14 @@ class PasswordResetDialog(QDialog):
         self.error_lbl.setWordWrap(True)
         layout.addWidget(self.error_lbl)
 
-        confirm_btn = QPushButton("Parolni yangilash")
-        confirm_btn.setObjectName("primary")
-        confirm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        confirm_btn.clicked.connect(self._confirm_reset)
-        layout.addWidget(confirm_btn)
+        self.confirm_btn = QPushButton("Parolni yangilash")
+        self.confirm_btn.setObjectName("primary")
+        self.confirm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.confirm_btn.clicked.connect(self._confirm_reset)
+        layout.addWidget(self.confirm_btn)
+        self.code_edit.returnPressed.connect(self._confirm_reset)
+        self.new_password_edit.returnPressed.connect(self._confirm_reset)
+        self._auth_call = _AsyncAuthCall(self)
 
     def _start_countdown(self, seconds=180):
         self.reset_countdown = seconds
@@ -130,50 +218,101 @@ class PasswordResetDialog(QDialog):
             else:
                 self.send_btn.setText("Kodni jo'natish")
 
+    def _show_error(self, message):
+        self.error_lbl.setStyleSheet("color: #f87171; font-size: 12px;")
+        self.error_lbl.setText(str(message or "Noma'lum xatolik."))
+
+    def _show_info(self, message):
+        self.error_lbl.setStyleSheet("color: #22c55e; font-size: 12px;")
+        self.error_lbl.setText(str(message or ""))
+
+    def _set_busy(self, busy, message=""):
+        self._busy = bool(busy)
+        for widget in (
+            self.email_edit, self.send_btn, self.code_edit,
+            self.new_password_edit, self.confirm_btn,
+        ):
+            widget.setEnabled(not busy)
+        if busy:
+            self._show_info(message or "Kuting...")
+        elif self.reset_countdown <= 0:
+            self.send_btn.setEnabled(True)
+
     def _send_code(self):
-        if self.reset_countdown > 0:
+        if self._busy or self.reset_countdown > 0:
             return
-        email = self.email_edit.text().strip()
-        if not email:
-            self.error_lbl.setStyleSheet("color: #f87171; font-size: 12px;")
-            self.error_lbl.setText("Email kiriting.")
+        email = api_client.normalize_email(self.email_edit.text())
+        if not email or "@" not in email:
+            self._show_error("Email manzilini to'g'ri kiriting.")
             return
-        try:
-            api_client.request_password_reset(email)
-            self.has_sent_once = True
-            self.error_lbl.setStyleSheet("color: #22c55e; font-size: 12px;")
-            self.error_lbl.setText("Agar email mavjud bo'lsa, verification code yuborildi.")
-            self.code_edit.setFocus()
-            self._start_countdown(180)
-        except (api_client.ApiClientError, Exception) as exc:
-            self.error_lbl.setStyleSheet("color: #f87171; font-size: 12px;")
-            self.error_lbl.setText(str(exc))
+
+        self._set_busy(True, "Kod yuborilmoqda...")
+        started = self._auth_call.start(
+            lambda: api_client.request_password_reset(email),
+            lambda _result: self._on_code_sent(),
+            self._on_call_failed,
+        )
+        if not started:
+            self._set_busy(False)
+
+    def _on_code_sent(self):
+        self._set_busy(False)
+        self.has_sent_once = True
+        self._show_info("Agar email mavjud bo'lsa, verification code yuborildi.")
+        self.code_edit.setFocus()
+        self._start_countdown(180)
+
+    def _on_call_failed(self, exc):
+        self._set_busy(False)
+        self._show_error(LoginDialog._error_text(exc))
 
     def _confirm_reset(self):
-        email = self.email_edit.text().strip()
+        if self._busy:
+            return
+        email = api_client.normalize_email(self.email_edit.text())
         code = self.code_edit.text().strip()
         new_password = self.new_password_edit.text().strip()
         if not email or not code or not new_password:
-            self.error_lbl.setStyleSheet("color: #f87171; font-size: 12px;")
-            self.error_lbl.setText("Email, code va yangi parolni kiriting.")
+            self._show_error("Email, code va yangi parolni kiriting.")
             return
         if len(new_password) < 6:
-            self.error_lbl.setStyleSheet("color: #f87171; font-size: 12px;")
-            self.error_lbl.setText("Parol kamida 6 ta belgidan iborat bo'lishi kerak.")
+            self._show_error("Parol kamida 6 ta belgidan iborat bo'lishi kerak.")
             return
-        try:
-            api_client.confirm_password_reset(email, code, new_password)
-            QMessageBox.information(self, "Tayyor", "Parol yangilandi. Endi yangi parol bilan kiring.")
-            self.accept()
-        except (api_client.ApiClientError, Exception) as exc:
-            self.error_lbl.setStyleSheet("color: #f87171; font-size: 12px;")
-            self.error_lbl.setText(str(exc))
+
+        self._set_busy(True, "Parol yangilanmoqda...")
+        started = self._auth_call.start(
+            lambda: api_client.confirm_password_reset(email, code, new_password),
+            lambda _result: self._on_reset_confirmed(),
+            self._on_call_failed,
+        )
+        if not started:
+            self._set_busy(False)
+
+    def _on_reset_confirmed(self):
+        self._set_busy(False)
+        QMessageBox.information(self, "Tayyor", "Parol yangilandi. Endi yangi parol bilan kiring.")
+        self.accept()
+
+    def reject(self):
+        if self._busy:
+            return
+        super().reject()
+
+    def closeEvent(self, event):
+        if self._busy:
+            event.ignore()
+            return
+        if self._auth_call:
+            self._auth_call.wait_for_finish()
+        super().closeEvent(event)
 
 
 class LoginDialog(QDialog):
     def __init__(self):
         super().__init__()
         self.logged_user = None
+        self._auth_call = None
+        self._busy = False
         self.auth_mode = "login"
         self.signup_stage = "enter_email"
         self.signup_countdown = 0
@@ -331,7 +470,9 @@ class LoginDialog(QDialog):
         """)
         self.forgot_btn.clicked.connect(self._open_password_reset)
         layout.addWidget(self.forgot_btn)
+        self._auth_call = _AsyncAuthCall(self)
         self._set_mode("login")
+        self.email_edit.setFocus()
 
     def _handle_email_return(self):
         if self.auth_mode == "signup" and self.signup_stage == "enter_email":
@@ -420,38 +561,99 @@ class LoginDialog(QDialog):
                 self.signup_send_code_btn.setText("Kodni jo'natish")
 
     def _request_signup_code(self):
-        if self.signup_countdown > 0:
+        if self._busy or self.signup_countdown > 0:
             return
-        email = self.email_edit.text().strip()
-        if not email:
-            self.error_lbl.setStyleSheet("color: #f87171; font-size: 12px;")
-            self.error_lbl.setText("Email kiriting.")
+        email = api_client.normalize_email(self.email_edit.text())
+        if not email or "@" not in email:
+            self._show_error("Email manzilini to'g'ri kiriting.")
+            self.email_edit.setFocus()
             return
-        try:
-            api_client.request_registration_code(email)
-            self.has_signup_sent_once = True
-            self.signup_stage = "enter_code_and_password"
-            self.verification_hint.setVisible(True)
-            self.verification_code_edit.setVisible(True)
-            self.password_edit.setVisible(True)
-            self.confirm_password_edit.setVisible(True)
-            self.submit_btn.setVisible(True)
-            self.submit_btn.setText("Ro'yxatdan o'tish")
-            self.error_lbl.setStyleSheet("color: #22c55e; font-size: 12px;")
-            self.error_lbl.setText("Verification code emailingizga yuborildi.")
-            self.verification_code_edit.setFocus()
-            self._start_signup_countdown(180)
-            self.resize(420, 580)
-        except (api_client.ApiClientError, Exception) as exc:
-            self.error_lbl.setStyleSheet("color: #f87171; font-size: 12px;")
-            self.error_lbl.setText(str(exc))
+
+        self._set_busy(True, "Kod yuborilmoqda...")
+        self._submit_text_before_busy = "Ro'yxatdan o'tish"
+        started = self._auth_call.start(
+            lambda: api_client.request_registration_code(email),
+            lambda _result: self._on_signup_code_sent(),
+            self._on_signup_code_failed,
+        )
+        if not started:
+            self._set_busy(False)
+
+    def _on_signup_code_sent(self):
+        self._set_busy(False)
+        self.has_signup_sent_once = True
+        self.signup_stage = "enter_code_and_password"
+        self.verification_hint.setVisible(True)
+        self.verification_code_edit.setVisible(True)
+        self.password_edit.setVisible(True)
+        self.confirm_password_edit.setVisible(True)
+        self.submit_btn.setVisible(True)
+        self.submit_btn.setText("Ro'yxatdan o'tish")
+        self._show_info("Verification code emailingizga yuborildi.")
+        self.verification_code_edit.setFocus()
+        self._start_signup_countdown(180)
+        self.resize(420, 580)
+
+    def _on_signup_code_failed(self, exc):
+        self._set_busy(False)
+        self._show_error(self._error_text(exc))
+        self.email_edit.setFocus()
 
     def _open_password_reset(self):
+        if self._busy:
+            return
         dlg = PasswordResetDialog(self.email_edit.text().strip(), self)
         dlg.exec()
 
+    # ------------------------------------------------------------------
+    # Busy state
+    # ------------------------------------------------------------------
+    def _set_busy(self, busy, message=""):
+        self._busy = bool(busy)
+        for widget in (
+            self.submit_btn, self.signup_send_code_btn, self.forgot_btn,
+            self.login_mode_btn, self.signup_mode_btn, self.email_edit,
+            self.password_edit, self.confirm_password_edit,
+            self.verification_code_edit,
+        ):
+            widget.setEnabled(not busy)
+        if busy:
+            self._submit_text_before_busy = self.submit_btn.text()
+            self.submit_btn.setText(message or "Kirilmoqda...")
+            self._show_info(message or "Serverga ulanilmoqda, kuting...")
+        else:
+            restored = getattr(self, "_submit_text_before_busy", None)
+            if restored:
+                self.submit_btn.setText(restored)
+            self._update_signup_send_button()
+
+    def _show_error(self, message):
+        self.error_lbl.setStyleSheet("color: #f87171; font-size: 12px;")
+        self.error_lbl.setText(str(message or "Noma'lum xatolik."))
+
+    def _show_info(self, message):
+        self.error_lbl.setStyleSheet("color: #22c55e; font-size: 12px;")
+        self.error_lbl.setText(str(message or ""))
+
+    @staticmethod
+    def _error_text(exc):
+        """Turn any exception into something a cashier can act on."""
+        if isinstance(exc, (api_client.ApiClientError, db.AppError, sync_service.SyncError)):
+            text = str(exc).strip()
+            if text:
+                return text
+        if isinstance(exc, (OSError, TimeoutError)):
+            return "Internet yoki server bilan aloqa yo'q. Iltimos, internet ulanishingizni tekshiring."
+        text = str(exc).strip()
+        return text or f"Kutilmagan xatolik: {type(exc).__name__}"
+
+    # ------------------------------------------------------------------
+    # Submit
+    # ------------------------------------------------------------------
     def _try_login(self):
-        email = self.email_edit.text().strip()
+        if self._busy:
+            return
+        email = api_client.normalize_email(self.email_edit.text())
         password = self.password_edit.text().strip()
         confirm_password = self.confirm_password_edit.text().strip()
 
@@ -462,49 +664,92 @@ class LoginDialog(QDialog):
 
             code = self.verification_code_edit.text().strip()
             if not code or not password or not confirm_password:
-                self.error_lbl.setStyleSheet("color: #f87171; font-size: 12px;")
-                self.error_lbl.setText("Barcha maydonlarni to'ldiring.")
+                self._show_error("Barcha maydonlarni to'ldiring.")
                 return
             if len(password) < 6:
-                self.error_lbl.setStyleSheet("color: #f87171; font-size: 12px;")
-                self.error_lbl.setText("Parol kamida 6 ta belgidan iborat bo'lishi kerak.")
+                self._show_error("Parol kamida 6 ta belgidan iborat bo'lishi kerak.")
                 return
             if password != confirm_password:
-                self.error_lbl.setStyleSheet("color: #f87171; font-size: 12px;")
-                self.error_lbl.setText("Parollar bir xil emas.")
+                self._show_error("Parollar bir xil emas.")
                 return
-            try:
-                online_session = api_client.confirm_registration(email, code, password)
-                self._complete_online_login(
-                    online_session["token"],
-                    online_session["user"],
-                    allow_legacy_import=False,
-                )
-            except (api_client.ApiClientError, db.AppError, Exception) as exc:
-                self.error_lbl.setStyleSheet("color: #f87171; font-size: 12px;")
-                self.error_lbl.setText(str(exc))
-                self.verification_code_edit.setFocus()
+            self._start_signup_confirm(email, code, password)
             return
 
-        if not email or not password:
-            self.error_lbl.setStyleSheet("color: #f87171; font-size: 12px;")
-            self.error_lbl.setText("Iltimos, barcha maydonlarni to'ldiring.")
+        if not email or "@" not in email:
+            self._show_error("Email manzilini to'g'ri kiriting.")
+            self.email_edit.setFocus()
             return
+        if not password:
+            self._show_error("Parolni kiriting.")
+            self.password_edit.setFocus()
+            return
+        self._start_login(email, password)
 
-        try:
+    def _start_login(self, email, password):
+        def operation():
             online_session = api_client.login(email, password)
-            self._complete_online_login(
+            return self._establish_session(
                 online_session["token"],
                 online_session["user"],
-                allow_legacy_import=False,
             )
-        except (api_client.ApiClientError, db.AppError, Exception) as exc:
-            self.error_lbl.setStyleSheet("color: #f87171; font-size: 12px;")
-            self.error_lbl.setText(str(exc))
-            self.password_edit.clear()
-            self.password_edit.setFocus()
 
-    def _complete_online_login(self, token, api_user=None, allow_legacy_import=False):
+        self._set_busy(True, "Kirilmoqda...")
+        started = self._auth_call.start(
+            operation,
+            self._on_login_success,
+            self._on_login_failure,
+        )
+        if not started:
+            self._set_busy(False)
+
+    def _start_signup_confirm(self, email, code, password):
+        def operation():
+            online_session = api_client.confirm_registration(email, code, password)
+            return self._establish_session(
+                online_session["token"],
+                online_session["user"],
+            )
+
+        self._set_busy(True, "Tasdiqlanmoqda...")
+        started = self._auth_call.start(
+            operation,
+            self._on_login_success,
+            self._on_signup_failure,
+        )
+        if not started:
+            self._set_busy(False)
+
+    def _on_login_success(self, logged_user):
+        self._set_busy(False)
+        self.logged_user = logged_user
+        self.accept()
+
+    def _on_signup_failure(self, exc):
+        self._set_busy(False)
+        self._show_error(self._error_text(exc))
+        self.verification_code_edit.setFocus()
+
+    def _on_login_failure(self, exc):
+        # Signing in is always the server's decision - there is no local copy of
+        # the password to fall back on, so an unreachable server means no entry.
+        self._set_busy(False)
+        if isinstance(exc, api_client.ApiOfflineError):
+            self._show_error(
+                "Serverga ulanib bo'lmadi. Kirish uchun internet kerak - "
+                "ulanishni tekshirib qayta urinib ko'ring."
+            )
+            self.password_edit.setFocus()
+            self.password_edit.selectAll()
+            return
+
+        self._show_error(self._error_text(exc))
+        self.password_edit.clear()
+        self.password_edit.setFocus()
+
+    # ------------------------------------------------------------------
+    # Session setup (runs on the worker thread)
+    # ------------------------------------------------------------------
+    def _establish_session(self, token, api_user=None, allow_legacy_import=False):
         api_user = api_user or api_client.get_current_user(token)
         user_uid = api_user.get("user_uid") or api_user.get("uid")
         if not user_uid:
@@ -526,14 +771,44 @@ class LoginDialog(QDialog):
         )
         db.remove_foreign_online_accounts(user["id"], user_uid)
         db.save_account_session(api_user, token)
-        self.logged_user = dict(user)
+        logged_user = dict(user)
         # role is already correctly set by sync_online_user (admin for account owners)
-        self.logged_user["api_access_token"] = token
-        self.logged_user["api_user_id"] = api_user.get("id")
-        self.logged_user["api_user_uid"] = user_uid
-        sync_result = sync_service.synchronize_account_storage(self.logged_user)
-        if sync_result.get("direction") == "none":
-            sync_service.refresh_account_assets(self.logged_user)
-        db.log_login(self.logged_user)
+        logged_user["api_access_token"] = token
+        logged_user["api_user_id"] = api_user.get("id")
+        logged_user["api_user_uid"] = user_uid
+
+        # Credentials are already proven at this point. A sync hiccup must never
+        # turn a valid login into "wrong e-mail or password" - the main window
+        # retries the sync itself.
+        try:
+            sync_result = sync_service.synchronize_account_storage(logged_user)
+            if sync_result.get("direction") == "none":
+                sync_service.refresh_account_assets(logged_user)
+        except Exception:
+            traceback.print_exc()
+
+        try:
+            db.log_login(logged_user)
+        except Exception:
+            traceback.print_exc()
+        return logged_user
+
+    def _complete_online_login(self, token, api_user=None, allow_legacy_import=False):
+        """Backwards-compatible entry point for callers outside this dialog."""
+        self.logged_user = self._establish_session(
+            token, api_user, allow_legacy_import=allow_legacy_import
+        )
         self.accept()
 
+    def reject(self):
+        if self._busy:
+            return
+        super().reject()
+
+    def closeEvent(self, event):
+        if self._busy:
+            event.ignore()
+            return
+        if self._auth_call:
+            self._auth_call.wait_for_finish()
+        super().closeEvent(event)

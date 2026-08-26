@@ -121,9 +121,7 @@ class NotificationCard(QFrame):
         target = self.notif.get("target")
         if target and self.on_navigate:
             btn_text = "O'tish"
-            if target == "stock":
-                btn_text = "Ombor"
-            elif target == "supplier_debts":
+            if target == "supplier_debts":
                 btn_text = "Qarzlar"
             elif target == "products":
                 btn_text = "Mahsulotlar"
@@ -286,7 +284,7 @@ class NotificationsWidget(QWidget):
             ("📌 Barchasi", "all", unread_total),
             ("🛒 Sotuvlar", "sales", unread_by_type.get("sales", 0)),
             ("📦 Mahsulotlar", "products", unread_by_type.get("products", 0)),
-            ("📊 Ombor", "stock", unread_by_type.get("stock", 0)),
+            ("📊 Qoldiq", "stock", unread_by_type.get("stock", 0)),
             ("🔍 Checking", "checking", unread_by_type.get("checking", 0)),
             ("💰 Qarzlar", "supplier_debts", unread_by_type.get("supplier_debts", 0)),
             ("💸 Xarajatlar", "expenses", unread_by_type.get("expenses", 0)),

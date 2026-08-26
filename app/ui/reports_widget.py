@@ -330,15 +330,22 @@ class ReportsWidget(QWidget):
             card_layout.setSpacing(4)
             title_lbl = QLabel(title)
             title_lbl.setObjectName("summary_title")
-            title_lbl.setStyleSheet("color:#64748b;font-size:11px;")
+            title_lbl.setStyleSheet("color:#64748b;font-size:11px;background:transparent;border:none;")
             value_lbl = QLabel("0")
             value_lbl.setObjectName("summary_value")
             value_lbl.setProperty("accent_color", color)
-            value_lbl.setStyleSheet(f"color:{color};font-size:14px;font-weight:bold;")
+            value_lbl.setStyleSheet(f"color:{color};font-size:14px;font-weight:bold;background:transparent;border:none;")
             value_lbl.setWordWrap(False)
             value_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             card_layout.addWidget(title_lbl)
             card_layout.addWidget(value_lbl)
+            if key == "salary":
+                hint_lbl = QLabel("")
+                hint_lbl.setObjectName("summary_hint")
+                hint_lbl.setProperty("i18n_skip", True)
+                hint_lbl.setStyleSheet("color:#b91c1c;font-size:10px;font-weight:bold;background:transparent;border:none;")
+                hint_lbl.setVisible(False)
+                card_layout.addWidget(hint_lbl)
             card_layout.addStretch()
             self.summary_cards[key] = value_lbl
             self.summary_card_frames[key] = card
@@ -477,6 +484,10 @@ class ReportsWidget(QWidget):
             elif label.objectName() == "summary_value":
                 color = label.property("accent_color") or theme["accent"]
                 label.setStyleSheet(f"color:{color};font-size:14px;font-weight:bold;background:transparent;border:none;")
+            elif label.objectName() == "summary_hint":
+                label.setStyleSheet(
+                    "color:#b91c1c;font-size:10px;font-weight:bold;background:transparent;border:none;"
+                )
             else:
                 label.setStyleSheet(f"color:{theme['title']};background:transparent;border:none;")
 
@@ -518,11 +529,11 @@ class ReportsWidget(QWidget):
             salary_rows = [r for r in salary_rows if r.get("entity_id") == user_id]
         elif period == "day":
             rows = db.get_overall_day_hourly_series(start_date, section_id)
-            expense_rows = db.get_expense_hourly_report(start_date)
+            expense_rows = db.get_expense_hourly_report(start_date, include_cashier=False)
             salary_rows = db.get_cashier_salary_period_summary(start_date, end_date, section_id)
         else:
             rows = db.get_overall_period_series(start_date, end_date, section_id)
-            expense_rows = db.get_expense_report(start_date, end_date)
+            expense_rows = db.get_expense_report(start_date, end_date, include_cashier=False)
             salary_rows = db.get_cashier_salary_period_summary(start_date, end_date, section_id)
         return {
             "start_date": start_date,
@@ -557,7 +568,8 @@ class ReportsWidget(QWidget):
             "net_profit": sum(row["net_profit"] for row in filled),
             "count": sum(row["sales_count"] for row in filled),
             "products": sum(row["product_count"] for row in filled),
-            "salary": sum(row.get("cashier_reward", 0) or row.get("total_salary", 0) or 0 for row in data.get("salary_rows", [])),
+            "salary": sum(row.get("total_salary", 0) or 0 for row in data.get("salary_rows", [])),
+            "salary_deduction": sum(row.get("salary_deduction", 0) or 0 for row in data.get("salary_rows", [])),
         }
         self.summary_cards["revenue"].setText(self._format_money(totals["revenue"], currency))
         self.summary_cards["profit"].setText(self._format_money(totals["profit"], currency))
@@ -565,11 +577,35 @@ class ReportsWidget(QWidget):
         self.summary_cards["products"].setText(f"{totals['products']:,.0f}")
         self.summary_cards["net_profit"].setText(self._format_money(totals["net_profit"], currency))
         self.summary_cards["salary"].setText(self._format_money(totals["salary"], currency))
+        self._apply_salary_card_hint(totals.get("salary_deduction", 0), currency)
         self._update_summary_card_visibility()
 
         self.overall_rows = filled
         self._refresh_report_panel(start_date, end_date, filled)
         set_language(self, self.property("app_language") or "uz")
+
+    def _apply_salary_card_hint(self, deduction, currency):
+        """Show, on the salary card, how much was taken back through expenses."""
+        label = self.summary_cards.get("salary") if hasattr(self, "summary_cards") else None
+        if label is None:
+            return
+        language = self.property("app_language") or "uz"
+        deduction = deduction or 0
+        if deduction > 0:
+            text = f"{t('Harajat', language)}: -{self._format_money(deduction, currency)}"
+            label.setToolTip(f"{t('Kassir harajatlari ayrildi', language)} ({text})")
+        else:
+            label.setToolTip("")
+        card = self.summary_card_frames.get("salary") if hasattr(self, "summary_card_frames") else None
+        if card is not None:
+            hint = card.findChild(QLabel, "summary_hint")
+            if hint is not None:
+                hint.setProperty("i18n_skip", True)
+                hint.setText(
+                    f"− {self._format_money(deduction, currency)} {t('harajat', language)}"
+                    if deduction > 0 else ""
+                )
+                hint.setVisible(deduction > 0)
 
     def _refresh_report_panel(self, start_date, end_date, overall_rows):
         if self.detail_mode == "overall":
@@ -636,7 +672,9 @@ class ReportsWidget(QWidget):
             self.detail_chart.set_data([])
             return
         start_date, end_date = self._date_range()
-        rows = self._entity_series("cashier", self.selected_entity_id, start_date, end_date)
+        # "cashier_salary" is the series that also reports expenses charged to
+        # this cashier, so the salary figures below are net of them.
+        rows = self._entity_series("cashier_salary", self.selected_entity_id, start_date, end_date)
         filled_rows = self._filled_series(rows, start_date, end_date)
         if self._selected_section_id():
             for row in filled_rows:
@@ -649,14 +687,20 @@ class ReportsWidget(QWidget):
         # Update top summary cards for the selected cashier
         if hasattr(self, "summary_cards") and self.summary_cards:
             currency = self._selected_report_currency()
+            gross_salary = sum(
+                row.get("cashier_reward", 0) or row.get("salary", 0) or 0 for row in filled
+            )
+            salary_deduction = sum(row.get("salary_deduction", 0) or 0 for row in filled)
             cashier_totals = {
                 "revenue": sum(row.get("revenue", 0) or 0 for row in filled),
                 "profit": sum(row.get("profit", 0) or 0 for row in filled),
                 "count": sum(row.get("sales_count", 0) or 0 for row in filled),
                 "products": sum(row.get("product_count", 0) or 0 for row in filled),
-                "salary": sum(row.get("cashier_reward", 0) or row.get("total_salary", 0) or row.get("salary", 0) or 0 for row in filled),
+                # What the cashier is still owed: earned minus already taken.
+                "salary": gross_salary - salary_deduction,
+                "salary_deduction": salary_deduction,
             }
-            cashier_totals["net_profit"] = cashier_totals["profit"] - cashier_totals["salary"]
+            cashier_totals["net_profit"] = cashier_totals["profit"] - gross_salary
 
             if "revenue" in self.summary_cards:
                 self.summary_cards["revenue"].setText(self._format_money(cashier_totals["revenue"], currency))
@@ -670,6 +714,7 @@ class ReportsWidget(QWidget):
                 self.summary_cards["net_profit"].setText(self._format_money(cashier_totals["net_profit"], currency))
             if "salary" in self.summary_cards:
                 self.summary_cards["salary"].setText(self._format_money(cashier_totals["salary"], currency))
+            self._apply_salary_card_hint(cashier_totals.get("salary_deduction", 0), currency)
 
         self._update_summary_card_visibility()
 
@@ -930,6 +975,7 @@ class ReportsWidget(QWidget):
             item["cashier_reward"] += row.get("cashier_reward", 0) or 0
             item["salary"] += row.get("salary", 0) or 0
             item["total_salary"] += row.get("total_salary", 0) or row.get("salary", 0) or 0
+            item["salary_deduction"] += row.get("salary_deduction", 0) or 0
 
         filled = []
         for key in self._period_keys(start_date, end_date, period):
@@ -1007,9 +1053,17 @@ class ReportsWidget(QWidget):
         return db.get_entity_period_series(entity_type, entity_id, start_date, end_date, section_id)
 
     def _expense_rows(self, start_date, end_date, user_id=None, include_unassigned=False):
+        # include_cashier=False: money charged to a cashier comes out of that
+        # cashier's salary, so it must never move the shop's profit figures.
         if self.period_combo.currentData() == "day":
-            return db.get_expense_hourly_report(start_date, user_id=user_id, include_unassigned=include_unassigned)
-        return db.get_expense_report(start_date, end_date, user_id=user_id, include_unassigned=include_unassigned)
+            return db.get_expense_hourly_report(
+                start_date, user_id=user_id, include_unassigned=include_unassigned,
+                include_cashier=False,
+            )
+        return db.get_expense_report(
+            start_date, end_date, user_id=user_id, include_unassigned=include_unassigned,
+            include_cashier=False,
+        )
 
     def _period_display_label(self, key, period):
         if period == "day":
@@ -1090,12 +1144,12 @@ class ReportsWidget(QWidget):
 
     @staticmethod
     def _cashier_cost(row):
-        return (
-            row.get("cashier_reward", 0)
-            or row.get("total_salary", 0)
-            or row.get("salary", 0)
-            or 0
-        )
+        # The full reward the sales earned the cashier. Whether part of it was
+        # already handed over as an expense changes who holds the money, not
+        # what the shop paid, so the deduction is not applied here.
+        if "cashier_reward" in row:
+            return row.get("cashier_reward") or 0
+        return row.get("total_salary", 0) or row.get("salary", 0) or 0
 
     def _expense_totals_by_period(self, start_date, end_date, user_id=None, include_unassigned=False):
         rates = {currency["code"]: currency["rate_to_uzs"] or 1 for currency in db.get_currencies()}
@@ -1359,6 +1413,7 @@ class SalesDetailsWidget(QWidget):
         self.cashier_only = bool(cashier_only)
         self._async_loader = None
         self._last_rows = []
+        self._last_deductions = []
         self._build_ui()
 
     def _build_ui(self):
@@ -1458,20 +1513,28 @@ class SalesDetailsWidget(QWidget):
                 card_layout.setSpacing(4)
                 title_lbl = QLabel(title)
                 title_lbl.setObjectName("summary_title")
-                title_lbl.setStyleSheet("color:#64748b;font-size:11px;")
+                title_lbl.setStyleSheet("color:#64748b;font-size:11px;background:transparent;border:none;")
                 value_lbl = QLabel("0")
                 value_lbl.setObjectName("summary_value")
                 value_lbl.setProperty("accent_color", color)
-                value_lbl.setStyleSheet(f"color:{color};font-size:14px;font-weight:bold;")
+                value_lbl.setStyleSheet(f"color:{color};font-size:14px;font-weight:bold;background:transparent;border:none;")
                 value_lbl.setWordWrap(False)
                 value_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
                 card_layout.addWidget(title_lbl)
                 card_layout.addWidget(value_lbl)
+                if key == "salary":
+                    hint_lbl = QLabel("")
+                    hint_lbl.setObjectName("summary_hint")
+                    hint_lbl.setProperty("i18n_skip", True)
+                    hint_lbl.setStyleSheet("color:#b91c1c;font-size:10px;font-weight:bold;background:transparent;border:none;")
+                    hint_lbl.setVisible(False)
+                    card_layout.addWidget(hint_lbl)
                 card_layout.addStretch()
                 self.summary_cards[key] = value_lbl
                 self.summary_card_frames[key] = card
                 self.summary_layout.addWidget(card, 0, index)
             layout.addLayout(self.summary_layout)
+
 
         summary = QHBoxLayout()
         self.summary_title_lbl = QLabel("Sotuv tafsilotlari")
@@ -1530,18 +1593,91 @@ class SalesDetailsWidget(QWidget):
         cashier_id = self.cashier_combo.currentData()
         start_date, end_date = self._date_range()
         section_id = self.section_combo.currentData()
-        fetch = lambda: [dict(row) for row in db.get_cashier_sales_details(
-            cashier_id,
-            start_date,
-            end_date,
-            section_id,
-            only_cashiers=True,
-        )]
-        if self.isVisible():
-            self._async_loader.start(fetch, self._fill_table)
-        else:
-            self._fill_table(fetch())
 
+        def fetch():
+            rows = [dict(row) for row in db.get_cashier_sales_details(
+                cashier_id,
+                start_date,
+                end_date,
+                section_id,
+                only_cashiers=True,
+            )]
+            # Cashier-charged expenses are not tied to a product section, so a
+            # section filter leaves them out rather than mis-attributing them.
+            deductions = [] if section_id else [
+                dict(row) for row in db.get_cashier_expense_entries(
+                    start_date, end_date, cashier_id
+                )
+            ]
+            return {"rows": rows, "deductions": deductions}
+
+        if self.isVisible():
+            self._async_loader.start(fetch, self._apply_details_data)
+        else:
+            self._apply_details_data(fetch())
+
+    def _apply_salary_card_hint(self, deduction, gross_salary):
+        """Annotate the "Oylik" card with the amount already taken as expenses."""
+        label = self.summary_cards.get("salary")
+        card = self.summary_card_frames.get("salary")
+        if label is None:
+            return
+        language = self.property("app_language") or "uz"
+        deduction = deduction or 0
+        if deduction > 0:
+            label.setToolTip(
+                f"{t('Jami ajratildi', language)}: {self._format_money(gross_salary)}\n"
+                f"{t('Kassir harajatlari', language)}: -{self._format_money(deduction)}"
+            )
+        else:
+            label.setToolTip("")
+        if card is None:
+            return
+        hint = card.findChild(QLabel, "summary_hint")
+        if hint is None:
+            return
+        hint.setProperty("i18n_skip", True)
+        hint.setText(
+            f"− {self._format_money(deduction)} {t('harajat', language)}" if deduction > 0 else ""
+        )
+        hint.setVisible(deduction > 0)
+
+    def _apply_details_data(self, data):
+        self._last_deductions = list(data.get("deductions") or [])
+        self._fill_table(data.get("rows") or [])
+
+    def _total_deduction(self):
+        return sum(
+            (row.get("amount_uzs", 0) or 0) for row in getattr(self, "_last_deductions", [])
+        )
+
+    def _expense_table_rows(self):
+        """Turn cashier-charged expenses into rows for the sales table.
+
+        They belong next to the sales, not in a banner above them: the money
+        left the cashier's salary on a given day just like a sale added to it.
+        """
+        language = self.property("app_language") or "uz"
+        show_owner = self.cashier_combo.currentData() is None
+        rows = []
+        for entry in getattr(self, "_last_deductions", []):
+            amount = entry.get("amount_uzs", 0) or 0
+            if amount <= 0:
+                continue
+            label = entry.get("description") or t("Kassir harajati", language)
+            owner = entry.get("cashier_name") or ""
+            rows.append({
+                "is_expense": True,
+                "created_at": entry.get("created_at") or "",
+                "product_name": f"{owner} · {label}" if (show_owner and owner) else label,
+                "barcode": "-",
+                "expense_amount": amount,
+                "expense_currency_amount": entry.get("amount", 0) or 0,
+                "expense_currency_code": entry.get("currency_code") or "UZS",
+                "cashier_name": owner,
+                "category_name": entry.get("category_name") or "",
+            })
+        return rows
 
     def _fill_table(self, rows):
         raw_rows = [dict(row) for row in rows]
@@ -1560,6 +1696,12 @@ class SalesDetailsWidget(QWidget):
             if (r.get("net_quantity", 0) or 0) > 0
             or (r.get("returned_quantity", 0) or 0) > 0
         ]
+        # Cashier expenses sit in the same list as the sales, ordered by time.
+        rows = sorted(
+            rows + self._expense_table_rows(),
+            key=lambda row: row.get("created_at") or "",
+            reverse=True,
+        )
         self.table.setRowCount(0)
         self.table.setUpdatesEnabled(False)
         language = self.property("app_language") or "uz"
@@ -1571,8 +1713,16 @@ class SalesDetailsWidget(QWidget):
         revenue_uzs = sum(r.get("item_total_after_discount", 0) or 0 for r in finalized_raw)
         cost_uzs = sum((r.get("cost", 0) or 0) * (r.get("net_quantity", 0) or 0) for r in finalized_raw)
         profit_uzs = max(0, revenue_uzs - cost_uzs)
-        salary_uzs = sum(r.get("cashier_reward", 0) or 0 for r in finalized_raw)
-        net_profit_uzs = max(0, profit_uzs - salary_uzs)
+        gross_salary_uzs = sum(r.get("cashier_reward", 0) or 0 for r in finalized_raw)
+        # Money already handed to the cashier as a "Kassir" expense is taken
+        # off once, here; later sales keep adding to the salary as normal.
+        deduction_uzs = self._total_deduction()
+        # Deliberately not clamped: when the expenses exceed what the sales have
+        # earned so far, the cashier owes the difference back and must see it.
+        salary_uzs = gross_salary_uzs - deduction_uzs
+        # The shop still paid the full amount - part as an expense, part as the
+        # remaining salary - so the net profit uses the gross figure.
+        net_profit_uzs = max(0, profit_uzs - gross_salary_uzs)
 
         if hasattr(self, "summary_cards"):
             if "revenue" in self.summary_cards:
@@ -1587,12 +1737,21 @@ class SalesDetailsWidget(QWidget):
                 self.summary_cards["net_profit"].setText(self._format_money(net_profit_uzs))
             if "salary" in self.summary_cards:
                 self.summary_cards["salary"].setText(self._format_money(salary_uzs))
+                self._apply_salary_card_hint(deduction_uzs, gross_salary_uzs)
 
-        finalized_table_rows = [r for r in rows if bool(r.get("is_finalized")) and (r.get("net_quantity", 0) or 0) > 0]
+        finalized_table_rows = [
+            r for r in rows
+            if not r.get("is_expense")
+            and bool(r.get("is_finalized"))
+            and (r.get("net_quantity", 0) or 0) > 0
+        ]
         total_quantity = sum(row.get("net_quantity", 0) or 0 for row in finalized_table_rows)
-        total_returns = sum(row.get("returned_quantity", 0) or 0 for row in rows)
+        total_returns = sum(
+            row.get("returned_quantity", 0) or 0 for row in rows if not row.get("is_expense")
+        )
         total_value = sum(row.get("item_total_after_discount", 0) or 0 for row in finalized_table_rows)
         total_cashier_reward = sum(row.get("cashier_reward", 0) or 0 for row in finalized_table_rows)
+        net_cashier_reward = total_cashier_reward - deduction_uzs
         if rows:
             summary_values = [
                 "",
@@ -1602,7 +1761,8 @@ class SalesDetailsWidget(QWidget):
                 f"{total_returns:g}",
                 "",
                 self._format_money(total_value),
-                self._format_money(total_cashier_reward) if total_cashier_reward > 0 else "-",
+                self._format_money(net_cashier_reward)
+                if (total_cashier_reward > 0 or deduction_uzs > 0) else "-",
                 "",
                 "",
             ]
@@ -1619,6 +1779,13 @@ class SalesDetailsWidget(QWidget):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 elif column in (0, 2, 8, 9):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if column == 7 and deduction_uzs > 0:
+                    item.setForeground(QColor("#991b1b"))
+                    item.setToolTip(
+                        f"{t('Jami ajratildi', language)}: {self._format_money(total_cashier_reward)}\n"
+                        f"{t('Kassir harajatlari', language)}: -{self._format_money(deduction_uzs)}\n"
+                        f"{t('Qolgan oylik', language)}: {self._format_money(net_cashier_reward)}"
+                    )
                 self.table.setItem(0, column, item)
             self.table.setRowHeight(0, 48)
 
@@ -1632,6 +1799,11 @@ class SalesDetailsWidget(QWidget):
             payment = data.get("payment_method") or ""
             is_finalized = bool(data.get("is_finalized"))
             cashier_reward = data.get("cashier_reward", 0) or 0
+
+            if data.get("is_expense"):
+                self._fill_expense_row(table_row, data, language)
+                continue
+
             if returned > 0 and net_quantity <= 0:
                 status_key, row_hex, status_hex, status_text = (
                     "Qaytarilgan", "#fee2e2", "#fecaca", "#991b1b"
@@ -1693,6 +1865,67 @@ class SalesDetailsWidget(QWidget):
         self.summary_title_lbl.setText(f"{cashier_name} · {title}" if cashier_name else title)
         self.summary_stats_lbl.setProperty("i18n_skip", True)
         self.summary_stats_lbl.setText("")
+
+    # Red, because money left the cashier's salary. The badge is a solid red
+    # chip rather than the pale tint "Qaytarilgan" uses, so the two red states
+    # still read as different things at a glance.
+    EXPENSE_ROW_HEX = "#fef2f2"
+    EXPENSE_STATUS_HEX = "#dc2626"
+    EXPENSE_STATUS_TEXT = "#ffffff"
+    EXPENSE_TEXT = "#b91c1c"
+    EXPENSE_AMOUNT_TEXT = "#b91c1c"
+
+    def _fill_expense_row(self, table_row, data, language):
+        amount = data.get("expense_amount", 0) or 0
+        original = data.get("expense_currency_amount", 0) or 0
+        code = data.get("expense_currency_code") or "UZS"
+        status_key = "Harajat"
+        values = [
+            self._compact_details_time(data.get("created_at")),
+            str(data.get("product_name") or "-"),
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+            f"-{self._format_money(amount)}",
+            "-",
+            "\U0001f4b8",
+        ]
+        tooltip = f"{t('Kassir harajati', language)}: -{self._format_money(amount)}"
+        if code != "UZS" and original:
+            tooltip += f"\n{original:,.2f} {code}"
+        if data.get("cashier_name"):
+            tooltip += f"\n{t('Kassir:', language)} {data['cashier_name']}"
+        tooltip += f"\n{t('Kassirga ajratildi', language)} {t('summasidan ayrildi', language)}"
+
+        for column, value in enumerate(values):
+            item = QTableWidgetItem(value)
+            item.setBackground(QColor(self.EXPENSE_ROW_HEX))
+            item.setForeground(QColor("#1e293b"))
+            item.setToolTip(tooltip)
+            if column in (3, 4, 5, 6, 7):
+                item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            elif column in (0, 2, 8, 9):
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            if column == 7:
+                item.setForeground(QColor(self.EXPENSE_AMOUNT_TEXT))
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+            if column == 1:
+                item.setForeground(QColor(self.EXPENSE_TEXT))
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+            if column == 9:
+                item.setBackground(QColor(self.EXPENSE_STATUS_HEX))
+                item.setForeground(QColor(self.EXPENSE_STATUS_TEXT))
+                item.setToolTip(t(status_key, language))
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+            self.table.setItem(table_row, column, item)
 
     def _group_sales_rows(self, rows):
         states = self._sales_return_states(rows)
@@ -1965,11 +2198,44 @@ class SalesDetailsWidget(QWidget):
             button.setStyleSheet(button_style)
         self.summary_title_lbl.setStyleSheet(f"font-size:16px;font-weight:bold;color:{theme['title']};background:transparent;")
         self.summary_stats_lbl.setStyleSheet(f"font-size:13px;font-weight:bold;color:{theme['muted']};background:transparent;")
+        self._apply_summary_card_theme(theme)
         self.cashier_lbl.setStyleSheet(f"color:{theme['muted']};font-weight:bold;background:transparent;")
         self.section_lbl.setStyleSheet(f"color:{theme['muted']};font-weight:bold;background:transparent;")
         self.date_lbl.setStyleSheet(f"color:{theme['muted']};font-weight:bold;background:transparent;")
         self.table.setStyleSheet(self._table_style(theme))
         self.table.verticalHeader().setStyleSheet(self._vertical_header_style())
+
+    def _apply_summary_card_theme(self, theme):
+        """Repaint the metric cards, keeping their text backgrounds transparent."""
+        for key, card in self.summary_card_frames.items():
+            color = card.property("accent_color") or theme["accent"]
+            card.setStyleSheet(f"""
+                QFrame#{card.objectName()} {{
+                    background:{theme['topbar']};
+                    border-left:4px solid {color};
+                    border-top:1px solid #e2e8f0;
+                    border-right:1px solid #e2e8f0;
+                    border-bottom:1px solid #e2e8f0;
+                    border-radius:8px;
+                }}
+            """)
+            title = card.findChild(QLabel, "summary_title")
+            if title is not None:
+                title.setStyleSheet(
+                    f"color:{theme['muted']};font-size:11px;background:transparent;border:none;"
+                )
+            value = card.findChild(QLabel, "summary_value")
+            if value is not None:
+                value_color = value.property("accent_color") or theme["accent"]
+                value.setStyleSheet(
+                    f"color:{value_color};font-size:14px;font-weight:bold;"
+                    "background:transparent;border:none;"
+                )
+            hint = card.findChild(QLabel, "summary_hint")
+            if hint is not None:
+                hint.setStyleSheet(
+                    "color:#b91c1c;font-size:10px;font-weight:bold;background:transparent;border:none;"
+                )
 
     @staticmethod
     def _vertical_header_style():
