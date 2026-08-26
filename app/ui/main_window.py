@@ -2359,7 +2359,14 @@ class MainWindow(QMainWindow):
             mode_callback = self._unlock_main_area
         menu.addAction(self._menu_button_action(menu, mode_text, mode_callback, theme, width=action_width))
         menu.addAction(self._menu_button_action(menu, self.labels["settings"], self._open_settings, theme, width=action_width))
-        menu.addAction(self._menu_button_action(menu, self.labels.get("check_updates", "Yangilanishlar"), self._open_updater, theme, width=action_width))
+        menu.addAction(self._menu_button_action(
+            menu,
+            self.labels.get("check_updates", "Yangilanishlar"),
+            self._open_updater,
+            theme,
+            width=action_width,
+            badge=self.pending_release_count(),
+        ))
         menu.addAction(self._menu_button_action(menu, self.labels["logout"], self._logout, theme, danger=True, width=action_width))
         size = menu.sizeHint()
         pos = self.user_menu_btn.mapToGlobal(self.user_menu_btn.rect().topLeft())
@@ -2381,13 +2388,24 @@ class MainWindow(QMainWindow):
         if version:
             db.set_known_release(version, tag=data.get("tag_name"), published_at=data.get("published_at"))
 
-    def _menu_button_action(self, menu, text, callback, theme, danger=False, width=None):
+    def _menu_button_action(self, menu, text, callback, theme, danger=False, width=None, badge=0):
         action = QWidgetAction(menu)
         btn = QPushButton(text)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.setFixedHeight(34)
         if width:
             btn.setFixedWidth(width)
+        if badge:
+            # Same red counter as the account button and the sync button, so the
+            # number the user saw outside is the number they find inside.
+            badge_row = QHBoxLayout(btn)
+            badge_row.setContentsMargins(0, 0, 10, 0)
+            badge_row.addStretch()
+            badge_lbl = QLabel("99+" if badge > 99 else str(badge))
+            badge_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            badge_lbl.setFixedSize(22 if badge > 99 else 16, 16)
+            badge_lbl.setStyleSheet(self._counter_badge_style())
+            badge_row.addWidget(badge_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
         color = "#dc2626" if danger else theme["title"]
         hover_bg = "#fee2e2" if danger else "#f1f5f9"
         hover_color = "#b91c1c" if danger else theme["title"]
