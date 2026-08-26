@@ -42,23 +42,52 @@ serverga read-only deploy key qo'shing, aks holda `git fetch` parol so'raydi.
 
 ### 2. Deploy uchun SSH kalit yarating
 
-**O'z kompyuteringizda** (serverda emas):
+**O'z kompyuteringizda** (serverda emas).
+
+#### Windows (CMD)
+
+`~` bu yerda ishlamaydi va `.ssh` papkasi bo'lmasligi mumkin, shuning uchun
+avval uni yarating:
+
+```bat
+mkdir "%USERPROFILE%\.ssh"
+ssh-keygen -t ed25519 -C "github-actions-deploy" -f "%USERPROFILE%\.ssh\marketstore_deploy" -N ""
+```
+
+Ochiq kalitni serverga qo'shing (Windows'da `ssh-copy-id` yo'q):
+
+```bat
+type "%USERPROFILE%\.ssh\marketstore_deploy.pub" | ssh <user>@<server> "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+```
+
+Kalit ishlashini tekshiring (parol so'ramasligi kerak):
+
+```bat
+ssh -i "%USERPROFILE%\.ssh\marketstore_deploy" <user>@<server> "echo ULANDI"
+```
+
+`DEPLOY_SSH_KEY` secretiga qo'yiladigan **yopiq** kalitni ko'chirish uchun:
+
+```bat
+type "%USERPROFILE%\.ssh\marketstore_deploy"
+```
+
+`-----BEGIN OPENSSH PRIVATE KEY-----` dan `-----END OPENSSH PRIVATE KEY-----`
+gacha, oxirgi bo'sh qatori bilan birga to'liq nusxalang. `.pub` fayl emas.
+
+`DEPLOY_KNOWN_HOSTS` uchun:
+
+```bat
+ssh-keyscan -H <server>
+```
+
+#### Linux / macOS
 
 ```bash
 ssh-keygen -t ed25519 -C "github-actions-deploy" -f ~/.ssh/marketstore_deploy -N ""
-```
-
-Ochiq qismini serverga qo'shing:
-
-```bash
 ssh-copy-id -i ~/.ssh/marketstore_deploy.pub <user>@<server>
-# yoki qo'lda: server ~/.ssh/authorized_keys fayliga .pub tarkibini qo'shing
-```
-
-Server kalitini pin qilish uchun (majburiy emas, lekin tavsiya etiladi):
-
-```bash
-ssh-keyscan -H <server> 
+cat ~/.ssh/marketstore_deploy     # DEPLOY_SSH_KEY
+ssh-keyscan -H <server>           # DEPLOY_KNOWN_HOSTS
 ```
 
 ### 3. GitHub secrets
@@ -100,6 +129,8 @@ Sozlanadigan qiymatlar: `DEPLOY_BRANCH` (default `main`), `DEPLOY_FORCE=1`
 | Xato | Sababi |
 |---|---|
 | `Permission denied (publickey)` | `DEPLOY_SSH_KEY` yopiq kalit emas (`.pub` qo'yilgan), yoki serverdagi `authorized_keys` ga qo'shilmagan |
+| `Saving key "~/.ssh/..." failed: No such file or directory` | Windows CMD `~` ni tushunmaydi — `%USERPROFILE%\.ssh\...` yozing va papkani `mkdir` bilan oldin yarating |
+| `Load key ...: error in libcrypto` | Secretga kalit yarim ko'chirilgan — `BEGIN`/`END` qatorlari bilan to'liq qo'ying |
 | `Host key verification failed` | `DEPLOY_KNOWN_HOSTS` eskirgan — `ssh-keyscan` ni qayta oling |
 | `api/.env topilmadi` | `DEPLOY_PATH` noto'g'ri, yoki serverda `.env` yaratilmagan |
 | `API ... javob bermadi` | Yangi build ishga tushmadi; skript o'zi orqaga qaytargan, logni Actions ichidan o'qing |
