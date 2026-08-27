@@ -8,6 +8,7 @@ import shutil
 import sqlite3
 import sys
 import threading
+import uuid
 from contextlib import closing, contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 
@@ -115,6 +116,13 @@ SYNC_TABLES = (
     "inventory_check_sessions",
     "inventory_check_items",
     "finance_manual_movements",
+)
+
+
+# app_settings is keyed by a setting name and account_assets by an asset name;
+# every other synchronised table is keyed by a UUID.
+UUID_KEYED_TABLES = frozenset(
+    table for table in SYNC_TABLES if table not in ("app_settings", "account_assets")
 )
 
 
@@ -596,9 +604,52 @@ def _email_from_username(username):
     return f"{safe}@gmail.com"
 
 
+# --- Row identity -----------------------------------------------------------
+#
+# Every synchronised row is identified by a UUID rather than by the SQLite
+# rowid.  Two devices used to hand the same integer to two different sales,
+# and the server -- which keys records by (account, table, local_id) -- kept
+# only one of them.  A UUID cannot collide, so no sale can overwrite another.
+#
+# ``ROW_ID_NAMESPACE`` is fixed for the lifetime of the product: migration 012
+# derives each existing row's UUID from it, so every device converts its own
+# copy of the same row to exactly the same identifier without talking to the
+# server first.  Changing this constant would re-scramble every installation.
+
+ROW_ID_NAMESPACE = uuid.UUID("6d61726b-6574-7374-6f72-652d706f7300")
+ROW_ID_LENGTH = 36
+
+
+def new_row_id():
+    """Identifier for a brand new row."""
+    return str(uuid.uuid4())
+
+
+def stable_row_id(table_name, legacy_id):
+    """The UUID that a pre-migration row must get, on every device alike."""
+    return str(uuid.uuid5(ROW_ID_NAMESPACE, f"{table_name}:{legacy_id}"))
+
+
+def is_row_uuid(value):
+    """True when a value looks like an identifier this schema can accept."""
+    try:
+        uuid.UUID(str(value))
+    except (TypeError, ValueError, AttributeError):
+        return False
+    return True
+
+
+def owner_row_id(account_uid):
+    """The account owner's user row, identical on every device of the account."""
+    key = str(account_uid or "").strip().lower()
+    if not key:
+        return None
+    return str(uuid.uuid5(ROW_ID_NAMESPACE, f"account-owner:{key}"))
+
+
 class User(Base):
     __tablename__ = "users"
-    id = Column(Integer, primary_key=True)
+    id = Column(String(ROW_ID_LENGTH), primary_key=True, default=new_row_id)
     username = Column(String, unique=True, nullable=False)
     email = Column(String, unique=True)
     password = Column(String, nullable=False)
@@ -608,8 +659,8 @@ class User(Base):
 
 class LoginLog(Base):
     __tablename__ = "login_logs"
-    id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey("users.id"))
+    id = Column(String(ROW_ID_LENGTH), primary_key=True, default=new_row_id)
+    user_id = Column(String(ROW_ID_LENGTH), ForeignKey("users.id"))
     username = Column(String, nullable=False)
     role = Column(String, nullable=False)
     logged_at = Column(String, server_default=text("CURRENT_TIMESTAMP"))
@@ -617,13 +668,13 @@ class LoginLog(Base):
 
 class Category(Base):
     __tablename__ = "categories"
-    id = Column(Integer, primary_key=True)
+    id = Column(String(ROW_ID_LENGTH), primary_key=True, default=new_row_id)
     name = Column(String, unique=True, nullable=False)
 
 
 class Currency(Base):
     __tablename__ = "currencies"
-    id = Column(Integer, primary_key=True)
+    id = Column(String(ROW_ID_LENGTH), primary_key=True, default=new_row_id)
     code = Column(String, unique=True, nullable=False)
     name = Column(String, nullable=False)
     rate_to_uzs = Column(Float, nullable=False, default=1)
@@ -648,7 +699,7 @@ class AccountAsset(Base):
 
 class UserSetting(Base):
     __tablename__ = "user_settings"
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    user_id = Column(String(ROW_ID_LENGTH), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
     key = Column(String, primary_key=True)
     value = Column(String)
 
@@ -662,8 +713,8 @@ class SyncTombstone(Base):
 
 class ProductTemplate(Base):
     __tablename__ = "product_templates"
-    id = Column(Integer, primary_key=True)
-    section_id = Column(Integer, ForeignKey("product_sections.id", ondelete="CASCADE"))
+    id = Column(String(ROW_ID_LENGTH), primary_key=True, default=new_row_id)
+    section_id = Column(String(ROW_ID_LENGTH), ForeignKey("product_sections.id", ondelete="CASCADE"))
     name = Column(String, nullable=False)
     original_name = Column(String)
     is_deleted = Column(Integer, default=0)
@@ -676,7 +727,7 @@ class ProductTemplate(Base):
 
 class ProductSection(Base):
     __tablename__ = "product_sections"
-    id = Column(Integer, primary_key=True)
+    id = Column(String(ROW_ID_LENGTH), primary_key=True, default=new_row_id)
     name = Column(String, unique=True, nullable=False)
     original_name = Column(String)
     is_deleted = Column(Integer, default=0)
@@ -687,8 +738,8 @@ class ProductSection(Base):
 
 class ProductTemplateField(Base):
     __tablename__ = "product_template_fields"
-    id = Column(Integer, primary_key=True)
-    template_id = Column(Integer, ForeignKey("product_templates.id", ondelete="CASCADE"), nullable=False)
+    id = Column(String(ROW_ID_LENGTH), primary_key=True, default=new_row_id)
+    template_id = Column(String(ROW_ID_LENGTH), ForeignKey("product_templates.id", ondelete="CASCADE"), nullable=False)
     name = Column(String, nullable=False)
     field_type = Column(String, default="text")
     required = Column(Integer, default=0)
@@ -697,15 +748,15 @@ class ProductTemplateField(Base):
 
 class Product(Base):
     __tablename__ = "products"
-    id = Column(Integer, primary_key=True)
+    id = Column(String(ROW_ID_LENGTH), primary_key=True, default=new_row_id)
     barcode = Column(String, unique=True)
     original_barcode = Column(String)
     name = Column(String, nullable=False)
-    section_id = Column(Integer, ForeignKey("product_sections.id"))
-    template_id = Column(Integer, ForeignKey("product_templates.id"))
-    supplier_id = Column(Integer, ForeignKey("suppliers.id"))
-    category_id = Column(Integer, ForeignKey("categories.id"))
-    created_by_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"))
+    section_id = Column(String(ROW_ID_LENGTH), ForeignKey("product_sections.id"))
+    template_id = Column(String(ROW_ID_LENGTH), ForeignKey("product_templates.id"))
+    supplier_id = Column(String(ROW_ID_LENGTH), ForeignKey("suppliers.id"))
+    category_id = Column(String(ROW_ID_LENGTH), ForeignKey("categories.id"))
+    created_by_user_id = Column(String(ROW_ID_LENGTH), ForeignKey("users.id", ondelete="SET NULL"))
     price = Column(Float, nullable=False, default=0)
     cost = Column(Float, nullable=False, default=0)
     price_currency = Column(String, default="UZS")
@@ -731,16 +782,16 @@ class Product(Base):
 
 class ProductAttribute(Base):
     __tablename__ = "product_attributes"
-    id = Column(Integer, primary_key=True)
-    product_id = Column(Integer, ForeignKey("products.id", ondelete="CASCADE"), nullable=False)
-    field_id = Column(Integer, ForeignKey("product_template_fields.id", ondelete="CASCADE"), nullable=False)
+    id = Column(String(ROW_ID_LENGTH), primary_key=True, default=new_row_id)
+    product_id = Column(String(ROW_ID_LENGTH), ForeignKey("products.id", ondelete="CASCADE"), nullable=False)
+    field_id = Column(String(ROW_ID_LENGTH), ForeignKey("product_template_fields.id", ondelete="CASCADE"), nullable=False)
     value = Column(String)
     __table_args__ = (UniqueConstraint("product_id", "field_id"),)
 
 
 class Customer(Base):
     __tablename__ = "customers"
-    id = Column(Integer, primary_key=True)
+    id = Column(String(ROW_ID_LENGTH), primary_key=True, default=new_row_id)
     name = Column(String, nullable=False)
     phone = Column(String)
     email = Column(String)
@@ -751,7 +802,7 @@ class Customer(Base):
 
 class Supplier(Base):
     __tablename__ = "suppliers"
-    id = Column(Integer, primary_key=True)
+    id = Column(String(ROW_ID_LENGTH), primary_key=True, default=new_row_id)
     name = Column(String, nullable=False)
     phone = Column(String)
     note = Column(String)
@@ -763,8 +814,8 @@ class Supplier(Base):
 
 class SupplierDebtMovement(Base):
     __tablename__ = "supplier_debt_movements"
-    id = Column(Integer, primary_key=True)
-    supplier_id = Column(Integer, ForeignKey("suppliers.id"), nullable=False)
+    id = Column(String(ROW_ID_LENGTH), primary_key=True, default=new_row_id)
+    supplier_id = Column(String(ROW_ID_LENGTH), ForeignKey("suppliers.id"), nullable=False)
     type = Column(String, nullable=False)
     amount = Column(Float, nullable=False)
     note = Column(String)
@@ -773,8 +824,8 @@ class SupplierDebtMovement(Base):
 
 class Debtor(Base):
     __tablename__ = "debtors"
-    id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey("users.id"))
+    id = Column(String(ROW_ID_LENGTH), primary_key=True, default=new_row_id)
+    user_id = Column(String(ROW_ID_LENGTH), ForeignKey("users.id"))
     name = Column(String, nullable=False)
     phone = Column(String)
     note = Column(String)
@@ -786,8 +837,8 @@ class Debtor(Base):
 
 class DebtorDebtMovement(Base):
     __tablename__ = "debtor_debt_movements"
-    id = Column(Integer, primary_key=True)
-    debtor_id = Column(Integer, ForeignKey("debtors.id"), nullable=False)
+    id = Column(String(ROW_ID_LENGTH), primary_key=True, default=new_row_id)
+    debtor_id = Column(String(ROW_ID_LENGTH), ForeignKey("debtors.id"), nullable=False)
     type = Column(String, nullable=False)
     amount = Column(Float, nullable=False)
     note = Column(String)
@@ -796,16 +847,16 @@ class DebtorDebtMovement(Base):
 
 class ExpenseCategory(Base):
     __tablename__ = "expense_categories"
-    id = Column(Integer, primary_key=True)
+    id = Column(String(ROW_ID_LENGTH), primary_key=True, default=new_row_id)
     name = Column(String, unique=True, nullable=False)
 
 
 class Expense(Base):
     __tablename__ = "expenses"
-    id = Column(Integer, primary_key=True)
-    category_id = Column(Integer, ForeignKey("expense_categories.id"))
-    user_id = Column(Integer, ForeignKey("users.id"))
-    cashier_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"))
+    id = Column(String(ROW_ID_LENGTH), primary_key=True, default=new_row_id)
+    category_id = Column(String(ROW_ID_LENGTH), ForeignKey("expense_categories.id"))
+    user_id = Column(String(ROW_ID_LENGTH), ForeignKey("users.id"))
+    cashier_id = Column(String(ROW_ID_LENGTH), ForeignKey("users.id", ondelete="SET NULL"))
     amount = Column(Float, nullable=False)
     currency_code = Column(String, default="UZS")
     description = Column(String)
@@ -814,9 +865,12 @@ class Expense(Base):
 
 class Sale(Base):
     __tablename__ = "sales"
-    id = Column(Integer, primary_key=True)
-    customer_id = Column(Integer, ForeignKey("customers.id"))
-    cashier_id = Column(Integer, ForeignKey("users.id"))
+    id = Column(String(ROW_ID_LENGTH), primary_key=True, default=new_row_id)
+    # Shown to the cashier as "Sotuv #12".  Display only: nothing looks a sale
+    # up by this number, so two devices producing the same one is cosmetic.
+    display_no = Column(Integer)
+    customer_id = Column(String(ROW_ID_LENGTH), ForeignKey("customers.id"))
+    cashier_id = Column(String(ROW_ID_LENGTH), ForeignKey("users.id"))
     customer_name = Column(String)
     customer_phone = Column(String)
     total = Column(Float, nullable=False)
@@ -836,9 +890,9 @@ class Sale(Base):
 
 class SaleItem(Base):
     __tablename__ = "sale_items"
-    id = Column(Integer, primary_key=True)
-    sale_id = Column(Integer, ForeignKey("sales.id"))
-    product_id = Column(Integer, ForeignKey("products.id"))
+    id = Column(String(ROW_ID_LENGTH), primary_key=True, default=new_row_id)
+    sale_id = Column(String(ROW_ID_LENGTH), ForeignKey("sales.id"))
+    product_id = Column(String(ROW_ID_LENGTH), ForeignKey("products.id"))
     quantity = Column(Integer, nullable=False)
     returned_quantity = Column(Integer, default=0)
     returned_at = Column(String)
@@ -848,8 +902,8 @@ class SaleItem(Base):
 
 class StockMovement(Base):
     __tablename__ = "stock_movements"
-    id = Column(Integer, primary_key=True)
-    product_id = Column(Integer, ForeignKey("products.id"))
+    id = Column(String(ROW_ID_LENGTH), primary_key=True, default=new_row_id)
+    product_id = Column(String(ROW_ID_LENGTH), ForeignKey("products.id"))
     type = Column(String, nullable=False)
     quantity = Column(Integer, nullable=False)
     note = Column(String)
@@ -858,8 +912,8 @@ class StockMovement(Base):
 
 class InventoryCheckSession(Base):
     __tablename__ = "inventory_check_sessions"
-    id = Column(Integer, primary_key=True)
-    started_by = Column(Integer, ForeignKey("users.id"))
+    id = Column(String(ROW_ID_LENGTH), primary_key=True, default=new_row_id)
+    started_by = Column(String(ROW_ID_LENGTH), ForeignKey("users.id"))
     status = Column(String, nullable=False, default="active")
     started_at = Column(String, server_default=text("CURRENT_TIMESTAMP"))
     finished_at = Column(String)
@@ -867,9 +921,9 @@ class InventoryCheckSession(Base):
 
 class InventoryCheckItem(Base):
     __tablename__ = "inventory_check_items"
-    id = Column(Integer, primary_key=True)
-    session_id = Column(Integer, ForeignKey("inventory_check_sessions.id", ondelete="CASCADE"), nullable=False)
-    product_id = Column(Integer, ForeignKey("products.id"))
+    id = Column(String(ROW_ID_LENGTH), primary_key=True, default=new_row_id)
+    session_id = Column(String(ROW_ID_LENGTH), ForeignKey("inventory_check_sessions.id", ondelete="CASCADE"), nullable=False)
+    product_id = Column(String(ROW_ID_LENGTH), ForeignKey("products.id"))
     product_name = Column(String, nullable=False)
     barcode = Column(String)
     expected_stock = Column(Integer, default=0)
@@ -880,7 +934,7 @@ class InventoryCheckItem(Base):
 
 class FinanceManualMovement(Base):
     __tablename__ = "finance_manual_movements"
-    id = Column(Integer, primary_key=True)
+    id = Column(String(ROW_ID_LENGTH), primary_key=True, default=new_row_id)
     movement_date = Column(String, nullable=False)
     kind = Column(String, nullable=False)
     operation = Column(String, nullable=False, default="+")
@@ -892,7 +946,7 @@ class FinanceManualMovement(Base):
 
 class ActivityLog(Base):
     __tablename__ = "activity_logs"
-    id = Column(Integer, primary_key=True)
+    id = Column(String(ROW_ID_LENGTH), primary_key=True, default=new_row_id)
     action = Column(String, nullable=False)
     title = Column(String, nullable=False)
     message = Column(String, nullable=False)
@@ -904,8 +958,8 @@ class ActivityLog(Base):
 
 class NotificationRead(Base):
     __tablename__ = "notification_reads"
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True)
+    id = Column(String(ROW_ID_LENGTH), primary_key=True, default=new_row_id)
+    user_id = Column(String(ROW_ID_LENGTH), ForeignKey("users.id", ondelete="CASCADE"), nullable=True)
     notification_id = Column(String, index=True, nullable=False)
     read_at = Column(String, nullable=False)
 
@@ -922,6 +976,7 @@ MIGRATIONS = (
     ("009_add_expense_cashier", "Link salary deductions to the selected cashier."),
     ("010_add_sale_item_returned_at", "Track when sold items are returned."),
     ("011_create_account_assets", "Store account-specific synchronized branding assets."),
+    ("012_uuid_row_identity", "Give every row a UUID so two devices can never claim the same id."),
 )
 
 
@@ -1024,11 +1079,11 @@ def _add_missing_columns(conn=None):
             "updated_at": "ALTER TABLE currencies ADD COLUMN updated_at TEXT",
         },
         "products": {
-            "section_id": "ALTER TABLE products ADD COLUMN section_id INTEGER REFERENCES product_sections(id)",
+            "section_id": "ALTER TABLE products ADD COLUMN section_id TEXT REFERENCES product_sections(id)",
             "original_barcode": "ALTER TABLE products ADD COLUMN original_barcode TEXT",
-            "template_id": "ALTER TABLE products ADD COLUMN template_id INTEGER REFERENCES product_templates(id)",
-            "supplier_id": "ALTER TABLE products ADD COLUMN supplier_id INTEGER REFERENCES suppliers(id)",
-            "created_by_user_id": "ALTER TABLE products ADD COLUMN created_by_user_id INTEGER REFERENCES users(id)",
+            "template_id": "ALTER TABLE products ADD COLUMN template_id TEXT REFERENCES product_templates(id)",
+            "supplier_id": "ALTER TABLE products ADD COLUMN supplier_id TEXT REFERENCES suppliers(id)",
+            "created_by_user_id": "ALTER TABLE products ADD COLUMN created_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL",
             "price_currency": "ALTER TABLE products ADD COLUMN price_currency TEXT DEFAULT 'UZS'",
             "price_exchange_rate": "ALTER TABLE products ADD COLUMN price_exchange_rate REAL DEFAULT 1",
             "price_original": "ALTER TABLE products ADD COLUMN price_original REAL DEFAULT 0",
@@ -1048,7 +1103,7 @@ def _add_missing_columns(conn=None):
             "created_at": "ALTER TABLE products ADD COLUMN created_at TEXT",
         },
         "product_templates": {
-            "section_id": "ALTER TABLE product_templates ADD COLUMN section_id INTEGER REFERENCES product_sections(id)",
+            "section_id": "ALTER TABLE product_templates ADD COLUMN section_id TEXT REFERENCES product_sections(id)",
             "original_name": "ALTER TABLE product_templates ADD COLUMN original_name TEXT",
             "is_deleted": "ALTER TABLE product_templates ADD COLUMN is_deleted INTEGER DEFAULT 0",
             "deleted_at": "ALTER TABLE product_templates ADD COLUMN deleted_at TEXT",
@@ -1086,7 +1141,7 @@ def _add_missing_columns(conn=None):
             "created_at": "ALTER TABLE supplier_debt_movements ADD COLUMN created_at TEXT",
         },
         "debtors": {
-            "user_id": "ALTER TABLE debtors ADD COLUMN user_id INTEGER",
+            "user_id": "ALTER TABLE debtors ADD COLUMN user_id TEXT REFERENCES users(id)",
             "phone": "ALTER TABLE debtors ADD COLUMN phone TEXT",
             "note": "ALTER TABLE debtors ADD COLUMN note TEXT",
             "debt_currency": "ALTER TABLE debtors ADD COLUMN debt_currency TEXT DEFAULT 'UZS'",
@@ -1120,7 +1175,7 @@ def _add_missing_columns(conn=None):
             "created_at": "ALTER TABLE stock_movements ADD COLUMN created_at TEXT",
         },
         "inventory_check_sessions": {
-            "started_by": "ALTER TABLE inventory_check_sessions ADD COLUMN started_by INTEGER REFERENCES users(id)",
+            "started_by": "ALTER TABLE inventory_check_sessions ADD COLUMN started_by TEXT REFERENCES users(id)",
             "status": "ALTER TABLE inventory_check_sessions ADD COLUMN status TEXT DEFAULT 'active'",
             "started_at": "ALTER TABLE inventory_check_sessions ADD COLUMN started_at TEXT",
             "finished_at": "ALTER TABLE inventory_check_sessions ADD COLUMN finished_at TEXT",
@@ -1130,8 +1185,8 @@ def _add_missing_columns(conn=None):
             "checked_at": "ALTER TABLE inventory_check_items ADD COLUMN checked_at TEXT",
         },
         "expenses": {
-            "user_id": "ALTER TABLE expenses ADD COLUMN user_id INTEGER REFERENCES users(id)",
-            "cashier_id": "ALTER TABLE expenses ADD COLUMN cashier_id INTEGER REFERENCES users(id) ON DELETE SET NULL",
+            "user_id": "ALTER TABLE expenses ADD COLUMN user_id TEXT REFERENCES users(id)",
+            "cashier_id": "ALTER TABLE expenses ADD COLUMN cashier_id TEXT REFERENCES users(id) ON DELETE SET NULL",
             "currency_code": "ALTER TABLE expenses ADD COLUMN currency_code TEXT DEFAULT 'UZS'",
             "description": "ALTER TABLE expenses ADD COLUMN description TEXT",
             "created_at": "ALTER TABLE expenses ADD COLUMN created_at TEXT",
@@ -1255,6 +1310,192 @@ def _migration_create_account_assets(conn):
     Base.metadata.create_all(bind=conn, tables=[AccountAsset.__table__])
 
 
+
+def _ordered_table_columns(conn, table_name):
+    return [row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info('{table_name}')").fetchall()]
+
+
+def _legacy_primary_key_is_integer(conn, table_name):
+    for row in conn.exec_driver_sql(f"PRAGMA table_info('{table_name}')").fetchall():
+        if row[1] == "id":
+            return str(row[2] or "").upper().startswith("INT")
+    return False
+
+
+def _account_uid_from_state(conn):
+    if _has_table(conn, "sync_state"):
+        row = conn.exec_driver_sql(
+            "SELECT value FROM sync_state WHERE key='account_user_uid'"
+        ).fetchone()
+        if row and row[0]:
+            return str(row[0])
+    return _ACTIVE_ACCOUNT_UID
+
+
+def _record_dangling_references(conn):
+    """Note references that point at rows this device does not have.
+
+    These are not created by the migration - they are older damage from two
+    devices minting the same integer.  We keep the reference rather than
+    clearing it, because the missing row now has a predictable UUID: when the
+    device that owns it syncs, the link repairs itself.
+    """
+    findings = {}
+    for table in Base.metadata.sorted_tables:
+        if not _has_table(conn, table.name):
+            continue
+        for column in table.columns:
+            for foreign_key in column.foreign_keys:
+                parent = foreign_key.column.table.name
+                if not _has_table(conn, parent):
+                    continue
+                count = conn.exec_driver_sql(
+                    f"SELECT COUNT(*) FROM {_quote_identifier(table.name)} "
+                    f"WHERE {_quote_identifier(column.name)} IS NOT NULL "
+                    f"AND {_quote_identifier(column.name)} NOT IN "
+                    f"(SELECT {_quote_identifier(foreign_key.column.name)} FROM {_quote_identifier(parent)})"
+                ).scalar()
+                if count:
+                    findings[f"{table.name}.{column.name}"] = int(count)
+    _sync_state_set(conn, "identity_dangling_refs", json.dumps(findings, sort_keys=True))
+    return findings
+
+
+def get_dangling_reference_report():
+    """What the identity migration found pointing at rows we do not hold."""
+    with _get_engine().begin() as conn:
+        row = conn.exec_driver_sql(
+            "SELECT value FROM sync_state WHERE key='identity_dangling_refs'"
+        ).fetchone()
+    try:
+        return json.loads(row[0]) if row and row[0] else {}
+    except (TypeError, ValueError):
+        return {}
+
+
+def _migration_uuid_row_identity(conn):
+    """Rebuild the schema on UUID keys without discarding existing data.
+
+    Two devices used to mint the same integer for two different sales, and the
+    server -- which keys records by (account, table, local_id) -- kept only one
+    of them.  A UUID cannot collide, so nothing can be silently lost again.
+
+    Existing primary keys are translated deterministically and every foreign
+    key follows the same map. The account owner receives ``owner_row_id`` so
+    every device agrees on that identity. This keeps products, sales, cashiers,
+    settings and history intact while moving the database to the new schema.
+
+    The server still holds the old integer-keyed records, so the account is
+    flagged for a full server reset on the next sync; without that, the next
+    pull would put the obsolete integer rows straight back.
+    """
+    Base.metadata.create_all(bind=conn)
+    if not _has_table(conn, "users") or not _legacy_primary_key_is_integer(conn, "users"):
+        return
+
+    account_uid = _account_uid_from_state(conn)
+    owner_uuid = owner_row_id(account_uid)
+    owner_legacy_id = None
+    if owner_uuid and _has_table(conn, "user_settings"):
+        row = conn.exec_driver_sql(
+            "SELECT user_id FROM user_settings WHERE key='api_user_uid' AND value=?",
+            (account_uid,),
+        ).fetchone()
+        if row and row[0] is not None:
+            owner_legacy_id = str(row[0])
+
+    tables = [table for table in Base.metadata.sorted_tables if _has_table(conn, table.name)]
+    snapshots = {}
+    for table in tables:
+        columns = _ordered_table_columns(conn, table.name)
+        if not columns:
+            snapshots[table.name] = []
+            continue
+        quoted_columns = ", ".join(_quote_identifier(column) for column in columns)
+        snapshots[table.name] = [
+            dict(row)
+            for row in conn.exec_driver_sql(
+                f"SELECT {quoted_columns} FROM {_quote_identifier(table.name)}"
+            ).mappings().all()
+        ]
+
+    id_maps = {}
+    for table in tables:
+        if "id" not in {column.name for column in table.columns}:
+            continue
+        mapping = {}
+        for row in snapshots.get(table.name, []):
+            old_id = row.get("id")
+            if old_id is None:
+                continue
+            old_key = str(old_id)
+            if is_row_uuid(old_id):
+                mapped = old_key
+            elif table.name == "users" and owner_uuid and old_key == owner_legacy_id:
+                mapped = owner_uuid
+            else:
+                mapped = stable_row_id(table.name, old_key)
+            mapping[old_key] = mapped
+            row["id"] = mapped
+        id_maps[table.name] = mapping
+
+    # Rewrite every declared foreign key through its parent's id map. Composite
+    # and string-keyed tables (settings/assets) keep their natural keys.
+    for table in tables:
+        for row in snapshots.get(table.name, []):
+            for column in table.columns:
+                value = row.get(column.name)
+                if value is None:
+                    continue
+                for foreign_key in column.foreign_keys:
+                    parent_table = foreign_key.column.table.name
+                    mapped = id_maps.get(parent_table, {}).get(str(value))
+                    if mapped:
+                        row[column.name] = mapped
+                        break
+
+            if table.name == "sync_tombstones":
+                target_table = str(row.get("table_name") or "")
+                mapped = id_maps.get(target_table, {}).get(str(row.get("local_id")))
+                if mapped:
+                    row["local_id"] = mapped
+
+    try:
+        for table in reversed(tables):
+            conn.exec_driver_sql(f"DROP TABLE {_quote_identifier(table.name)}")
+        Base.metadata.create_all(bind=conn)
+
+        for table in tables:
+            current_columns = {column.name for column in table.columns}
+            for source_row in snapshots.get(table.name, []):
+                row = {key: value for key, value in source_row.items() if key in current_columns}
+                if not row:
+                    continue
+                columns = list(row)
+                placeholders = ", ".join("?" for _ in columns)
+                conn.exec_driver_sql(
+                    f"INSERT INTO {_quote_identifier(table.name)} "
+                    f"({', '.join(_quote_identifier(column) for column in columns)}) "
+                    f"VALUES ({placeholders})",
+                    tuple(row[column] for column in columns),
+                )
+
+        if _has_table(conn, "sync_outbox"):
+            conn.exec_driver_sql("DELETE FROM sync_outbox")
+
+        # Local identifiers no longer match the server's legacy integers, so
+        # the first upgraded device replaces the server copy with this intact
+        # UUID snapshot.
+        _sync_state_set(conn, "identity_reset_required", "1")
+        _sync_state_set(conn, "server_reseed_required", "1")
+        _sync_state_set(conn, "pending_change_count", "0")
+        _sync_state_set(conn, "remote_generation", "0")
+        _sync_state_set(conn, "remote_tables", "")
+        _sync_state_set(conn, "last_dirty_at", "")
+    finally:
+        _record_dangling_references(conn)
+
+
 MIGRATION_FUNCTIONS = {
     "001_create_missing_tables": _migration_create_missing_tables,
     "002_add_missing_columns": _migration_add_missing_columns,
@@ -1267,34 +1508,45 @@ MIGRATION_FUNCTIONS = {
     "009_add_expense_cashier": _migration_add_expense_cashier,
     "010_add_sale_item_returned_at": _migration_add_sale_item_returned_at,
     "011_create_account_assets": _migration_create_account_assets,
+    "012_uuid_row_identity": _migration_uuid_row_identity,
 }
 
 
 def run_migrations():
+    """Bring the database up to date, with referential checks stood down.
+
+    A migration that rebuilds a table has to drop it and refill it, and for the
+    moment in between every constraint pointing at that table is unsatisfied.
+    SQLite ignores ``PRAGMA foreign_keys`` once a transaction is open, so it has
+    to be the very first statement on this connection - before anything else
+    makes SQLite emit a BEGIN.  Checks are handed back by disposing the pool,
+    which forces the next connection through the engine's connect hook.
+    """
     engine = _get_engine()
+    applied_now = []
     with engine.begin() as conn:
+        conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
         _ensure_schema_migrations_table(conn)
         applied = {row[0] for row in conn.exec_driver_sql("SELECT version FROM schema_migrations").fetchall()}
         pending = [(version, description) for version, description in MIGRATIONS if version not in applied]
-        if not pending:
-            return []
-        _backup_database_before_migration(conn)
-        applied_now = []
-        for version, description in pending:
-            MIGRATION_FUNCTIONS[version](conn)
-            _mark_migration_applied(conn, version, description)
-            applied_now.append(version)
-        return applied_now
+        if pending:
+            _backup_database_before_migration(conn)
+            for version, description in pending:
+                MIGRATION_FUNCTIONS[version](conn)
+                _mark_migration_applied(conn, version, description)
+                applied_now.append(version)
+    engine.dispose()
+    return applied_now
 
 
 def _default_product_section_id(session):
     section = session.scalar(
         select(ProductSection)
         .where(func.coalesce(ProductSection.is_deleted, 0) == 0)
-        .order_by(ProductSection.id)
+        .order_by(func.coalesce(ProductSection.created_at, ""), ProductSection.id)
     )
     if section is None:
-        section = ProductSection(name="Umumiy")
+        section = ProductSection(id=stable_row_id("product_sections", "Umumiy"), name="Umumiy")
         session.add(section)
         session.flush()
     return section.id
@@ -1327,6 +1579,48 @@ def _reassign_user_references(session, source_user_id, target_user_id):
     # login_logs is device-local history, not synced - a bulk update is fine.
     session.execute(update(LoginLog).where(LoginLog.user_id == source_user_id).values(user_id=target_user_id))
     session.query(UserSetting).filter(UserSetting.user_id == source_user_id).delete(synchronize_session=False)
+
+
+def _rekey_user_identity(session, user, new_id):
+    """Move a user row onto a new identifier without losing anything.
+
+    The account owner must carry the same identifier on every device, because
+    that is what ``sales.cashier_id`` and ``expenses.cashier_id`` point at; an
+    owner row created before that rule existed is moved here.  The replacement
+    is inserted under a placeholder name first: username and email are unique
+    and both rows exist for the length of the swap.  Settings are copied by
+    hand because reassigning references deliberately drops the old ones, and
+    one of them is the API token that keeps this device signed in.
+    """
+    old_id = user.id
+    if not new_id or old_id == new_id or session.get(User, new_id) is not None:
+        return user
+    settings = [
+        (setting.key, setting.value)
+        for setting in session.scalars(select(UserSetting).where(UserSetting.user_id == old_id))
+    ]
+    placeholder = f"__rekey_{new_id}"
+    replacement = User(
+        id=new_id,
+        username=placeholder,
+        email=f"{placeholder}@local",
+        password=user.password,
+        role=user.role,
+        created_at=user.created_at,
+    )
+    session.add(replacement)
+    session.flush()
+    _reassign_user_references(session, old_id, new_id)
+    session.flush()
+    username, email = user.username, user.email
+    session.delete(user)
+    session.flush()
+    replacement.username = username
+    replacement.email = email
+    for key, value in settings:
+        session.add(UserSetting(user_id=new_id, key=key, value=value))
+    session.flush()
+    return replacement
 
 
 def init_db(account_owner=None, seed_defaults=True):
@@ -1369,14 +1663,22 @@ def init_db(account_owner=None, seed_defaults=True):
                 elif owner is not None and legacy_admin is not None and owner.id != legacy_admin.id:
                     _reassign_user_references(session, legacy_admin.id, owner.id)
                     session.delete(legacy_admin)
+                stable_owner_id = owner_row_id(_ACTIVE_ACCOUNT_UID)
                 if owner is None:
                     owner = User(
+                        id=stable_owner_id or new_row_id(),
                         username=(account_owner.get("display_name") or owner_email).strip(),
                         email=owner_email,
                         password=_hash_password(secrets.token_urlsafe(32)),
                         role="admin",
                     )
                     session.add(owner)
+                    session.flush()
+                elif stable_owner_id:
+                    # Same person, different row on each device: that is what
+                    # made cashier salary disagree. Name the row after the
+                    # account so every device points at the same one.
+                    owner = _rekey_user_identity(session, owner, stable_owner_id)
                 owner.role = "admin"
                 if not str(owner.password).startswith("pbkdf2_sha256$"):
                     owner.password = _hash_password(owner.password)
@@ -1411,7 +1713,7 @@ def init_db(account_owner=None, seed_defaults=True):
             if seed_defaults:
                 for name in ["Oziq-ovqat", "Ichimliklar", "Gigiena", "Uy-ro'zg'or"]:
                     if not session.scalar(select(Category).where(Category.name == name)):
-                        session.add(Category(name=name))
+                        session.add(Category(id=stable_row_id("categories", name), name=name))
 
             has_orphan_products = session.scalar(select(func.count(Product.id)).where(Product.section_id.is_(None))) > 0
             has_orphan_templates = session.scalar(
@@ -1431,7 +1733,13 @@ def init_db(account_owner=None, seed_defaults=True):
                 ("EUR", "Yevro", 13500, 0),
             ]:
                 if not session.scalar(select(Currency).where(Currency.code == code)):
-                    session.add(Currency(code=code, name=name, rate_to_uzs=rate, is_base=is_base))
+                    session.add(Currency(
+                        id=stable_row_id("currencies", code),
+                        code=code,
+                        name=name,
+                        rate_to_uzs=rate,
+                        is_base=is_base,
+                    ))
 
             # An earlier build cached a password hash for offline sign-in.
             # Logging in is server-side only now, so drop any leftovers.
@@ -1443,17 +1751,24 @@ def init_db(account_owner=None, seed_defaults=True):
             if seed_defaults:
                 for name in ["Ijara", "Transport", "Kommunal", "Ish haqi", "Kassir", "Boshqa"]:
                     if name not in existing_category_names:
-                        session.add(ExpenseCategory(name=name))
+                        session.add(ExpenseCategory(id=stable_row_id("expense_categories", name), name=name))
                         existing_category_names.add(name)
 
             # The cashier category drives salary deductions, so it must exist in
             # databases created before the feature shipped as well.
             if not any(is_cashier_expense_category_name(name) for name in existing_category_names):
-                session.add(ExpenseCategory(name=CASHIER_EXPENSE_CATEGORY_NAME))
+                session.add(ExpenseCategory(
+                    id=stable_row_id("expense_categories", CASHIER_EXPENSE_CATEGORY_NAME),
+                    name=CASHIER_EXPENSE_CATEGORY_NAME,
+                ))
                 existing_category_names.add(CASHIER_EXPENSE_CATEGORY_NAME)
 
             if seed_defaults and session.scalar(select(func.count(ProductTemplate.id))) == 0:
-                template = ProductTemplate(name="Umumiy mahsulot", section_id=default_section_id)
+                template = ProductTemplate(
+                    id=stable_row_id("product_templates", "Umumiy mahsulot"),
+                    name="Umumiy mahsulot",
+                    section_id=default_section_id,
+                )
                 session.add(template)
                 session.flush()
                 for order, field_name in enumerate(["Brend", "Model", "Rang"]):
@@ -1788,10 +2103,54 @@ def export_sync_records(incremental=False, with_watermark=False):
     return records
 
 
+def _unique_index_columns(conn, table_name):
+    """The column groups SQLite will refuse a duplicate on."""
+    groups = []
+    for row in conn.exec_driver_sql(f"PRAGMA index_list('{table_name}')").fetchall():
+        if not row[2]:
+            continue
+        columns = [item[2] for item in conn.exec_driver_sql(f"PRAGMA index_info('{row[1]}')").fetchall()]
+        if columns and all(columns):
+            groups.append(columns)
+    return groups
+
+
+def _clear_conflicting_unique_rows(conn, table_name, filtered, pk_col):
+    """Make room for an incoming row that clashes on a unique business key.
+
+    Two devices can independently create a category called "Ichimliklar"; each
+    gives it its own UUID, and neither row can sit beside the other because the
+    name is unique.  The whole sync model is last-writer-wins, so the arriving
+    row takes the name and the local one that held it is removed.  Without this
+    a single such clash raises and abandons the entire download.
+    """
+    incoming_key = filtered.get(pk_col)
+    removed = 0
+    for columns in _unique_index_columns(conn, table_name):
+        if pk_col in columns or not all(column in filtered for column in columns):
+            continue
+        where = " AND ".join(f"{_quote_identifier(column)} IS ?" for column in columns)
+        clashing = conn.exec_driver_sql(
+            f"SELECT {_quote_identifier(pk_col)} FROM {_quote_identifier(table_name)} WHERE {where}",
+            tuple(filtered[column] for column in columns),
+        ).fetchall()
+        for row in clashing:
+            if str(row[0]) == str(incoming_key):
+                continue
+            conn.exec_driver_sql(
+                f"DELETE FROM {_quote_identifier(table_name)} WHERE {_quote_identifier(pk_col)} = ?",
+                (row[0],),
+            )
+            removed += 1
+    return removed
+
+
 def import_sync_records(records):
     if not records:
         return 0
     imported = 0
+    skipped_legacy = 0
+    rejected = 0
     engine = _get_engine()
     _sync_suspend_token = suspend_sync()
     _sync_suspend_token.__enter__()
@@ -1816,6 +2175,16 @@ def import_sync_records(records):
                 data = record.get("data") or {}
                 if not isinstance(data, dict):
                     continue
+                # A row still keyed by the old integers belongs to a device that
+                # has not upgraded yet. Letting it in would put a colliding id
+                # back into a table that just got rid of them, so it is dropped
+                # rather than merged; that device will re-send it as a UUID once
+                # it upgrades.
+                if table_name in UUID_KEYED_TABLES:
+                    incoming_id = data.get("id", record.get("local_id"))
+                    if incoming_id is not None and not is_row_uuid(incoming_id):
+                        skipped_legacy += 1
+                        continue
                 columns = _table_columns(conn, table_name)
                 filtered = {key: value for key, value in data.items() if key in columns}
                 if not filtered:
@@ -1842,11 +2211,25 @@ def import_sync_records(records):
                     )
                     if update_columns else "DO NOTHING"
                 )
-                conn.exec_driver_sql(
+                statement = (
                     f"INSERT INTO {quoted_table} ({quoted_columns}) VALUES ({placeholders}) "
-                    f"ON CONFLICT({_quote_identifier(pk_col)}) {conflict_action}",
-                    values,
+                    f"ON CONFLICT({_quote_identifier(pk_col)}) {conflict_action}"
                 )
+                try:
+                    with conn.begin_nested():
+                        conn.exec_driver_sql(statement, values)
+                except IntegrityError:
+                    # Almost always a unique business key held by a different
+                    # row. Clear the holder and let the newer copy win; if it
+                    # still will not go in, skip this one record rather than
+                    # losing the rest of the download.
+                    try:
+                        with conn.begin_nested():
+                            _clear_conflicting_unique_rows(conn, table_name, filtered, pk_col)
+                            conn.exec_driver_sql(statement, values)
+                    except IntegrityError:
+                        rejected += 1
+                        continue
                 if _has_table(conn, "sync_tombstones"):
                     conn.exec_driver_sql(
                         "DELETE FROM sync_tombstones WHERE table_name=? AND local_id=?",
@@ -1854,6 +2237,8 @@ def import_sync_records(records):
                     )
                 imported += 1
             _sync_state_set(conn, "last_pull_at", _utc_now())
+            _sync_state_set(conn, "last_pull_skipped_legacy", str(skipped_legacy))
+            _sync_state_set(conn, "last_pull_rejected", str(rejected))
     finally:
         _sync_suspend_token.__exit__(None, None, None)
     return imported
@@ -2030,6 +2415,17 @@ def set_sync_generation(value):
         return
     with _get_engine().begin() as conn:
         _sync_state_set(conn, "server_generation", str(generation))
+
+
+def is_identity_reset_required():
+    """True while the server still holds rows keyed by the old integers."""
+    with _get_engine().begin() as conn:
+        return _sync_state_int(conn, "identity_reset_required", 0) == 1
+
+
+def mark_identity_reset_complete():
+    with _get_engine().begin() as conn:
+        _sync_state_set(conn, "identity_reset_required", "0")
 
 
 def get_applied_purge_generation():
@@ -2307,7 +2703,7 @@ def get_product_sections():
             session.scalars(
                 select(ProductSection)
                 .where(func.coalesce(ProductSection.is_deleted, 0) == 0)
-                .order_by(ProductSection.id)
+                .order_by(func.coalesce(ProductSection.created_at, ""), ProductSection.name)
             ).all()
         )
 
@@ -2796,7 +3192,7 @@ def _cleanup_unfinalized_sales_for_product(session, product_id):
                 item.product_id,
                 outstanding,
                 movement_type="bekor",
-                note=f"Yakunlanmagan sotuv bekor qilindi (#{item.sale_id})",
+                note=f"Yakunlanmagan sotuv bekor qilindi (#{_sale_label(session, item.sale_id)})",
             )
         session.merge(SyncTombstone(
             table_name="sale_items",
@@ -3046,7 +3442,7 @@ def ensure_product_template_for_section(section_id):
                 ProductTemplate.section_id == section_id,
                 func.coalesce(ProductTemplate.is_deleted, 0) == 0,
             )
-            .order_by(ProductTemplate.id)
+            .order_by(func.coalesce(ProductTemplate.created_at, ""), ProductTemplate.name)
         )
         if existing:
             return existing.id
@@ -3054,7 +3450,7 @@ def ensure_product_template_for_section(section_id):
         source = session.scalar(
             select(ProductTemplate)
             .where(func.coalesce(ProductTemplate.is_deleted, 0) == 0)
-            .order_by(ProductTemplate.id)
+            .order_by(func.coalesce(ProductTemplate.created_at, ""), ProductTemplate.name)
         )
         template = ProductTemplate(
             section_id=section_id,
@@ -3475,6 +3871,33 @@ def finish_inventory_check(session_id, apply_corrections=False):
     return Row(counts)
 
 
+def _sale_label(session, sale_id):
+    """How a sale is named in notes and messages.
+
+    The identifier is a UUID and means nothing to a cashier, so anything a
+    person reads uses the sale's display number instead.
+    """
+    sale = session.get(Sale, sale_id) if sale_id else None
+    display_no = getattr(sale, "display_no", None)
+    if display_no:
+        return str(display_no)
+    return str(sale_id or "")[:8]
+
+
+def _next_sale_display_no(session):
+    """The number the cashier sees on the receipt.
+
+    Display only. Nothing ever looks a sale up by it, so two devices handing
+    out the same number costs nothing but a repeated label -- unlike the
+    primary key, which is why that one is a UUID.
+    """
+    highest = session.scalar(select(func.max(Sale.display_no)))
+    try:
+        return int(highest) + 1
+    except (TypeError, ValueError):
+        return 1
+
+
 def create_sale(customer_id, cashier_id, items, total, discount, paid, payment_method, currency_code="UZS", exchange_rate=1, paid_original=None, customer_name=None, customer_phone=None, is_finalized=0):
     if not items:
         raise AppError("Savat bo'sh.")
@@ -3507,6 +3930,7 @@ def create_sale(customer_id, cashier_id, items, total, discount, paid, payment_m
             is_finalized = 1
         now_str = _utc_now()
         sale = Sale(
+            display_no=_next_sale_display_no(session),
             customer_id=customer_id,
             cashier_id=cashier_id,
             customer_name=customer_name,
@@ -3551,7 +3975,7 @@ def create_sale(customer_id, cashier_id, items, total, discount, paid, payment_m
                 subtotal=item["subtotal"],
             )
             session.add(sale_item)
-            session.add(StockMovement(product_id=product_id, type="sotuv", quantity=-quantity, note=f"Sotuv #{sale.id}"))
+            session.add(StockMovement(product_id=product_id, type="sotuv", quantity=-quantity, note=f"Sotuv #{sale.display_no}"))
         if customer_id:
             customer = session.get(Customer, customer_id)
             if customer:
@@ -3559,15 +3983,22 @@ def create_sale(customer_id, cashier_id, items, total, discount, paid, payment_m
                 if payment_method == "qarz":
                     customer.balance = (customer.balance or 0) + payable
         sale_id = sale.id
+        sale_display_no = sale.display_no
     log_activity(
         "sale_created",
-        f"Sotuv amalga oshirildi (#{sale_id})",
+        f"Sotuv amalga oshirildi (#{sale_display_no})",
         f"{len(items)} xil mahsulot sotildi | Jami: {total:,.0f} {currency_code} ({payment_method})",
         level="success",
         target="sales",
         badge="Sotildi",
     )
     return sale_id
+
+
+def get_sale_display_no(sale_id):
+    """The number shown to a person for this sale, not its identifier."""
+    with session_scope() as session:
+        return _sale_label(session, sale_id)
 
 
 def finalize_sale(sale_id, cashier_reward=0.0):
@@ -3581,7 +4012,7 @@ def finalize_sale(sale_id, cashier_reward=0.0):
         sale.is_finalized = 1
         sale.cashier_reward = float(cashier_reward or 0.0)
         sale.finalized_at = _utc_now()
-        sale_ref = sale.id
+        sale_ref = sale.display_no or str(sale.id)[:8]
     if sale_ref:
         log_activity(
             "sale_finalized",
@@ -3669,6 +4100,7 @@ def get_product_sales_archive(query="", start_date=None, end_date=None, only_cas
             result.append(Row(dict(
                 sale_item_id=item.id,
                 sale_id=item.sale_id,
+                sale_display_no=sale.display_no,
                 product_id=item.product_id,
                 product_name=product.name if product else "-",
                 barcode=(product.barcode if product else None) or "-",
@@ -4049,7 +4481,7 @@ def _return_sale_item_in_session(session, item, quantity, note=""):
         product_id=item.product_id,
         type="qaytarish",
         quantity=quantity,
-        note=note or f"Sotuv #{item.sale_id} qaytarildi",
+        note=note or f"Sotuv #{_sale_label(session, item.sale_id)} qaytarildi",
     ))
     sale.total = max((sale.total or 0) - refund, 0)
     sale.discount = min(max((sale.discount or 0) - discount_refund, 0), sale.total or 0)
@@ -4084,7 +4516,7 @@ def delete_sale_item(sale_item_id):
                 session,
                 item,
                 available,
-                note=f"Sotuv #{sale_id} yozuvi o'chirildi",
+                note=f"Sotuv #{_sale_label(session, sale_id)} yozuvi o'chirildi",
             )
         session.merge(SyncTombstone(
             table_name="sale_items",
@@ -4530,6 +4962,7 @@ def get_cashier_sales_details(cashier_id=None, start_date=None, end_date=None, s
             )
             result.append(Row(dict(
                 sale_id=sale.id,
+                sale_display_no=sale.display_no,
                 sale_item_id=item.id,
                 product_id=item.product_id,
                 product_name=product.name if product else "-",
@@ -5201,7 +5634,10 @@ def ensure_cashier_expense_category():
         for name in session.scalars(select(ExpenseCategory.name)):
             if is_cashier_expense_category_name(name):
                 return name
-        session.add(ExpenseCategory(name=CASHIER_EXPENSE_CATEGORY_NAME))
+        session.add(ExpenseCategory(
+            id=stable_row_id("expense_categories", CASHIER_EXPENSE_CATEGORY_NAME),
+            name=CASHIER_EXPENSE_CATEGORY_NAME,
+        ))
     return CASHIER_EXPENSE_CATEGORY_NAME
 
 
@@ -5296,14 +5732,28 @@ def delete_expense(expense_id):
         )
 
 
-def _first_admin_id(session):
-    return session.scalar(select(User.id).where(User.role == "admin").order_by(User.id))
+def _account_owner_id(session):
+    """Whose view of the books counts as the shop's own.
+
+    This used to be "the admin with the smallest id", which only worked while
+    ids were handed out in order.  They are UUIDs now, so the account owner is
+    named explicitly: the admin this device is signed in as, falling back to
+    the earliest admin by creation time.
+    """
+    owner_id = owner_row_id(_ACTIVE_ACCOUNT_UID)
+    if owner_id and session.get(User, owner_id) is not None:
+        return owner_id
+    return session.scalar(
+        select(User.id)
+        .where(User.role == "admin")
+        .order_by(func.coalesce(User.created_at, ""), User.id)
+    )
 
 
 def _apply_expense_owner_filter(stmt, session, user_id=None, include_unassigned=False):
     if not user_id:
         return stmt
-    if include_unassigned and user_id == _first_admin_id(session):
+    if include_unassigned and user_id == _account_owner_id(session):
         return stmt.where(or_(Expense.user_id == user_id, Expense.user_id.is_(None)))
     return stmt.where(Expense.user_id == user_id)
 

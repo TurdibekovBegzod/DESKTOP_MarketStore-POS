@@ -96,7 +96,47 @@ def _apply_generation(generation):
         db.clear_remote_change()
 
 
+def _server_uses_uuid_identity(records):
+    """Whether another upgraded device has already converted the account."""
+    for record in records or []:
+        table_name = record.get("table_name")
+        if table_name not in db.UUID_KEYED_TABLES:
+            continue
+        data = record.get("data") or {}
+        row_id = data.get("id") if isinstance(data, dict) else None
+        row_id = row_id if row_id is not None else record.get("local_id")
+        if db.is_row_uuid(row_id):
+            return True
+    return False
+
+
 def push_local_changes(user, batch_size=1000, incremental=True, force=False):
+    if not force and db.is_identity_reset_required():
+        token = _token_for_user(user)
+        snapshot = api_client.pull_sync_records(token, include_deleted=True)
+        purge = apply_server_control(snapshot)
+        if purge["purged"]:
+            return {
+                "sent": 0,
+                "saved": 0,
+                "batch_id": None,
+                "generation": db.get_sync_generation(),
+                "purged": True,
+            }
+        server_records = snapshot.get("records", [])
+        if not _server_uses_uuid_identity(server_records):
+            # This is the first upgraded device. Replace the legacy integer
+            # snapshot once, keeping the intact local data under UUID keys.
+            return force_upload(user)
+
+        # Another device already upgraded the account. Merge that UUID snapshot
+        # into this device before uploading, otherwise this later device would
+        # reset the server and erase work done on the first one.
+        db.import_sync_records(server_records)
+        db.mark_identity_reset_complete()
+        db.mark_server_bootstrap_complete()
+        _apply_generation(int(snapshot.get("generation") or 0))
+        incremental = False
     token = _token_for_user(user)
     state = get_server_state(user)
     if state.get("local_purge_applied"):
@@ -181,6 +221,14 @@ def push_local_changes(user, batch_size=1000, incremental=True, force=False):
 
 
 def pull_server_changes(user, table_name=None):
+    if db.is_identity_reset_required():
+        # Downloading before the server has been converted would mix obsolete
+        # integer ids into the new UUID schema. The upload path performs the
+        # one-time safe conversion/merge handshake.
+        raise SyncError(
+            "Bu qurilma yangi identifikatorlarga o'tdi. Avval \"Yuborish\" "
+            "orqali serverni yangilang, keyin ma'lumot olish mumkin bo'ladi."
+        )
     token = _token_for_user(user)
     result = api_client.pull_sync_records(
         token,
@@ -293,6 +341,7 @@ def force_upload(user):
             }
         raise SyncError("Serverdagi o'chirish buyrug'ini lokal bazaga qo'llab bo'lmadi.")
     db.mark_server_bootstrap_complete()
+    db.mark_identity_reset_complete()
     result = push_local_changes(user, incremental=False, force=True)
     return {
         "direction": "upload",

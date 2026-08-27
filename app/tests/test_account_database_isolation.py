@@ -101,7 +101,7 @@ class AccountDatabaseIsolationTest(unittest.TestCase):
             db.add_debtor("Owner", debt_currency="UZS", user_id=owner["id"])
 
         debtor_id = db.add_debtor("Cashier", debt_currency="UZS", user_id=cashier_id)
-        self.assertGreater(debtor_id, 0)
+        self.assertTrue(db.is_row_uuid(debtor_id), debtor_id)
 
     def test_account_logo_moves_between_computers_but_not_between_accounts(self):
         computer_a = os.path.join(self.storage_root, "computer-a")

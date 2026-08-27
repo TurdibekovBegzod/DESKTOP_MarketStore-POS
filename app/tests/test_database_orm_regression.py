@@ -28,7 +28,8 @@ class DatabaseOrmRegressionTest(unittest.TestCase):
                 if file_name.startswith(os.path.basename(self.path) + ".backup_"):
                     os.remove(os.path.join(os.path.dirname(self.path), file_name))
 
-    def test_init_db_migrates_old_database_without_losing_products(self):
+    def test_init_db_rebuilds_an_old_database_on_uuid_keys(self):
+        """An integer-keyed database is upgraded without losing its rows."""
         db._get_engine().dispose()
         for suffix in ("", "-shm", "-wal"):
             path = self.path + suffix
@@ -66,12 +67,29 @@ class DatabaseOrmRegressionTest(unittest.TestCase):
         self.assertIsNotNone(product)
         self.assertEqual(product["name"], "Old Product")
         self.assertEqual(product["stock"], 5)
-        self.assertIsNotNone(product["section_id"])
-        self.assertEqual(product["is_deleted"], 0)
+        self.assertTrue(db.is_row_uuid(product["id"]), product["id"])
 
         applied_versions = {row["version"] for row in db.get_applied_migrations()}
         self.assertIn("001_create_missing_tables", applied_versions)
         self.assertIn("002_add_missing_columns", applied_versions)
+        self.assertIn("012_uuid_row_identity", applied_versions)
+
+        conn = sqlite3.connect(self.path)
+        try:
+            id_types = {
+                table: next(
+                    (row[2] for row in conn.execute(f"PRAGMA table_info({table})") if row[1] == "id"),
+                    None,
+                )
+                for table in ("products", "sales", "sale_items", "users", "expenses")
+            }
+        finally:
+            conn.close()
+        for table, id_type in id_types.items():
+            self.assertFalse(
+                str(id_type or "").upper().startswith("INT"),
+                f"{table}.id is still an integer: {id_type}",
+            )
 
         conn = sqlite3.connect(self.path)
         try:

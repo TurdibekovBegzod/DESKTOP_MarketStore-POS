@@ -1994,7 +1994,9 @@ class SalesDetailsWidget(QWidget):
             sold = data.get("sold_quantity", 0) or 0
             returned = data.get("returned_quantity", 0) or 0
             net_quantity = data.get("net_quantity", max(0, sold - returned)) or 0
-            item_id = int(data.get("sale_item_id") or 0)
+            # Only ever a tiebreaker for rows sharing a timestamp -- ids are
+            # UUIDs now, so compare them as text rather than as numbers.
+            item_id = str(data.get("sale_item_id") or "")
             state["sold_quantity"] += sold
             state["net_quantity"] += net_quantity
             state["returned_quantity"] += returned
@@ -2031,7 +2033,7 @@ class SalesDetailsWidget(QWidget):
                 continue
             order_key = (
                 str(data.get("returned_at") or data.get("created_at") or ""),
-                int(data.get("sale_item_id") or 0),
+                str(data.get("sale_item_id") or ""),
             )
             previous = latest_returns.get(product_key)
             if previous is None or order_key > previous[0]:

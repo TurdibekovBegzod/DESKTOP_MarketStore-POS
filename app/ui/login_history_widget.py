@@ -73,7 +73,7 @@ class LoginHistoryWidget(QWidget):
             self.table.setItem(row, 0, QTableWidgetItem(log["logged_at"] or ""))
             self.table.setItem(row, 1, QTableWidgetItem(log["username"] or ""))
             self.table.setItem(row, 2, QTableWidgetItem("Admin" if log["role"] == "admin" else "Kassir"))
-            user_id_item = QTableWidgetItem(str(log["user_id"] or ""))
+            user_id_item = QTableWidgetItem(str(log["user_id"] or "")[:8])
             user_id_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.table.setItem(row, 3, user_id_item)
         set_language(self, self.property("app_language") or "uz")

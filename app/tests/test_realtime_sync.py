@@ -226,11 +226,12 @@ class DestructiveResolutionTest(_SyncDbTestCase):
 
     def test_force_download_backs_up_then_replaces_local_data(self):
         self._add_product("P-LOCAL", "Only local")
+        server_id = db.stable_row_id("products", "P-SERVER")
         server_records = [{
             "table_name": "products",
-            "local_id": "9001",
+            "local_id": server_id,
             "data": {
-                "id": 9001, "barcode": "P-SERVER", "name": "From server",
+                "id": server_id, "barcode": "P-SERVER", "name": "From server",
                 "price": 500, "cost": 250, "stock": 4, "unit": "dona",
             },
             "local_updated_at": "2026-08-25 10:00:00",
@@ -256,7 +257,10 @@ class DestructiveResolutionTest(_SyncDbTestCase):
 
     def test_force_upload_snapshots_the_server_copy_before_resetting_it(self):
         self._add_product("P-LOCAL", "Mine wins")
-        server_records = [{"table_name": "products", "local_id": "77", "data": {"id": 77, "name": "Server copy"}}]
+        server_id = db.stable_row_id("products", "server-copy")
+        server_records = [
+            {"table_name": "products", "local_id": server_id, "data": {"id": server_id, "name": "Server copy"}}
+        ]
         calls = {"reset": 0, "pushed": []}
 
         def fake_reset(_token, device_key=None, timeout=60, applied_purge_generation=None):
@@ -284,6 +288,52 @@ class DestructiveResolutionTest(_SyncDbTestCase):
             saved = json.loads(handle.read().decode("utf-8"))
         self.assertEqual(saved["records"], server_records)
         self.assertEqual(db.get_sync_generation(), 13)
+
+    def test_later_uuid_upgrade_merges_server_instead_of_resetting_it(self):
+        local_id = self._add_product("P-LOCAL", "Local")
+        server_id = db.stable_row_id("products", "P-SERVER")
+        server_records = [{
+            "table_name": "products",
+            "local_id": server_id,
+            "data": {
+                "id": server_id,
+                "barcode": "P-SERVER",
+                "name": "Server",
+                "price": 500,
+                "cost": 250,
+                "stock": 4,
+                "unit": "dona",
+            },
+        }]
+        pushed = []
+
+        def fake_push(_token, records, **_kwargs):
+            pushed.extend(records)
+            return {"saved": len(records), "batch_id": "merged", "generation": 8}
+
+        with patch.object(db, "is_identity_reset_required", return_value=True), \
+             patch.object(api_client, "pull_sync_records", return_value={
+                 "records": server_records,
+                 "generation": 7,
+                 "purge_generation": 0,
+             }), \
+             patch.object(api_client, "get_sync_state", return_value={
+                 "generation": 7,
+                 "records_count": 1,
+                 "purge_generation": 0,
+             }), \
+             patch.object(api_client, "reset_sync_records") as reset, \
+             patch.object(api_client, "push_sync_records", side_effect=fake_push):
+            result = sync_service.push_local_changes(self.owner)
+
+        reset.assert_not_called()
+        self.assertIsNotNone(db.get_product_by_barcode("P-SERVER"))
+        product_ids = {
+            record["local_id"] for record in pushed if record["table_name"] == "products"
+        }
+        self.assertIn(str(local_id), product_ids)
+        self.assertIn(server_id, product_ids)
+        self.assertEqual(result["generation"], 8)
 
 
 class LogoRealtimeTest(_SyncDbTestCase):

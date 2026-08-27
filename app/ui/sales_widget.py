@@ -921,7 +921,7 @@ class SalesWidget(QWidget):
         pay_label = t("To'lash:", language)
         payment_label = t("To'lov turi:", language)
         msg = (
-            f"{t('Sotuv', language)} #{sale_id} {t('muvaffaqiyatli!', language)}\n\n"
+            f"{t('Sotuv', language)} #{db.get_sale_display_no(sale_id)} {t('muvaffaqiyatli!', language)}\n\n"
             f"{t('Jami', language)}: {subtotal:,.0f} {money_unit}\n"
             f"{t('Chegirma:', language)} {discount:,.0f} {money_unit}\n"
             f"{pay_label} {total:,.0f} {money_unit}\n"

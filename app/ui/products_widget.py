@@ -285,7 +285,10 @@ class TemplateManagerDialog(QDialog):
             name_item.setData(Qt.ItemDataRole.UserRole, dict(template))
             self.table.setItem(row, 0, name_item)
             self.table.setItem(row, 1, QTableWidgetItem(", ".join(f["name"] for f in fields)))
-            self.table.setItem(row, 2, QTableWidgetItem(str(template["id"])))
+            # Identifiers are UUIDs; the column is there to tell two
+            # templates apart, and the leading block already does that.
+            short_id = str(template["id"] or "")[:8]
+            self.table.setItem(row, 2, QTableWidgetItem(short_id))
 
     def _selected_template(self):
         row = self.table.currentRow()
@@ -488,7 +491,7 @@ class ReturnSaleItemDialog(QDialog):
 
         info = QLabel(
             f"{self.archive_row['product_name']}\n"
-            f"{t('Sotuv', self.language)} #{self.archive_row['sale_id']} | "
+            f"{t('Sotuv', self.language)} #{self.archive_row.get('sale_display_no') or ''} | "
             f"{t('Qaytarish mumkin', self.language)}: {self.available}"
         )
         info.setStyleSheet("color:#1e293b;font-size:13px;font-weight:bold;")
@@ -749,7 +752,7 @@ class ProductArchiveDialog(QDialog):
             data = dict(archive_row)
             values = [
                 data["created_at"] or "",
-                f"#{data['sale_id']}",
+                f"#{data.get('sale_display_no') or ''}",
                 data["product_name"] or "",
                 data["barcode"] or "",
                 str(data["quantity"]),
@@ -2876,7 +2879,7 @@ class ProductsWidget(QWidget):
             QMessageBox.information(
                 self,
                 t("Sotuv yakunlandi", language),
-                f"{t('Sotuv', language)} #{sale_id} {t('saqlandi.', language)}",
+                f"{t('Sotuv', language)} #{db.get_sale_display_no(sale_id)} {t('saqlandi.', language)}",
             )
             self.load_data()
             self.tabs.setCurrentWidget(self.sold_table)

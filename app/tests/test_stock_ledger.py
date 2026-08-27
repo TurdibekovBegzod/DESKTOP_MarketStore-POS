@@ -9,7 +9,7 @@ import os
 import tempfile
 import unittest
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 import database as db
 
@@ -102,7 +102,9 @@ class StockLedgerTest(unittest.TestCase):
                 select(db.StockMovement.quantity).where(
                     db.StockMovement.product_id == product_id,
                     db.StockMovement.type == "korrektirovka",
-                ).order_by(db.StockMovement.id)
+                # Identifiers are UUIDs, so they say nothing about order.
+                # The journal is read in the order it was written.
+                ).order_by(text("rowid"))
             ).all())
         self.assertEqual(corrections, [30, -15])
 
