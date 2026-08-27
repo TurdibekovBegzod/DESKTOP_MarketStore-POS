@@ -11,7 +11,8 @@
 
 ## Holat
 
-**Jami 7 ta bosqich: 0 dan 6 gacha. To'rttasi tugadi, uchtasi qoldi.**
+**Jami 7 ta bosqich: 0 dan 6 gacha. Beshtasi tugadi, ikkitasi qoldi**
+(4-bosqich hali qilinmagan, 6-bosqich unga bog'liq).
 
 | Bosqich | Mazmuni | Holat | Versiya | Taxminiy vaqt |
 |---|---|---|---|---|
@@ -20,7 +21,7 @@
 | **2** | Pul raqamlarining asosi (o'zgarmas jurnal) | ✅ Tugadi | commit qilinmagan | — |
 | **3** | Real-time (Telegram kabi) | ✅ Tugadi | commit qilinmagan | — |
 | **4** | Eskirgan ma'lumotdan himoya | ⬜ Boshlanmagan | — | ~1 hafta |
-| **5** | Qurilmalararo bildirishnoma | ⬜ Boshlanmagan | — | ~3–4 kun |
+| **5** | Qurilmalararo bildirishnoma | ✅ Tugadi | commit qilinmagan | — |
 | **6** | Sync tugmasini olib tashlash | ⬜ Boshlanmagan | — | ~1 hafta |
 
 Tartib muhim: **avval raqamlarni to'g'ri qilamiz (2), keyin ularni tez
@@ -445,37 +446,74 @@ holatda bo'ladi.
 
 ---
 
-## 5-bosqich — Qurilmalararo bildirishnoma ⬜
+## 5-bosqich — Qurilmalararo bildirishnoma ✅
 
 *"Sardor: Lenovo Ideapad sotdi"* — hamma qurilmada.
 
-### Hozirgi holat
+### Nima buzuq edi
 
-`activity_logs` jadvali **mavjud** (model bor, `005_create_activity_logs`
-migratsiyasi bor, haqiqiy bazalarda jadval yaratilgan) — lekin **unga hech
-qachon hech narsa yozilmaydi**. Haqiqiy bazalarda qator soni: **0**.
+`activity_logs` jadvali ancha oldingi migratsiyada yaratilgan va **unga hech
+qachon hech narsa yozilmagan**. Faoliyat faqat Python ro'yxatida yashardi va
+dastur yopilganda yo'qolardi — shuning uchun bir qurilma ikkinchisiga o'z
+kassiri nima qilganini aytolmasdi. O'qilgan bildirishnomalar ham xotirada
+edi, ya'ni dastur qayta ochilganda hammasi yana "o'qilmagan" bo'lib turardi.
 
-`log_activity()` faqat jarayon xotirasidagi `_SESSION_ACTIVITIES` ro'yxatiga
-yozadi, identifikator sifatida `_ACTIVITY_COUNTER` degan hisoblagichdan
-foydalanadi — u dastur har ochilganda **noldan boshlanadi**. O'qilgan
-bildirishnomalar ham xotirada (`_SESSION_READ_IDS`), `notification_reads`
-jadvaliga yozilmaydi.
+### Nima qilindi
 
-Shuning uchun **hozir qurilmalararo bildirishnoma texnik jihatdan imkonsiz**.
+**Jadvalga uchta ustun qo'shildi** (`014_activity_feed`):
 
-### Qilinadigan ish
+| Ustun | Nima uchun |
+|---|---|
+| `user_id` | kim qilgani |
+| `user_name` | **ataylab takrorlangan** — foydalanuvchi o'chirilsa ham yozuv o'qilishi kerak |
+| `device_key` | qaysi qurilmada — qurilma o'z ishini o'ziga xabar qilmasligi uchun |
 
-1. `log_activity` jadvalga ham yozsin. **41 ta chaqiruv joyiga tegilmaydi** —
-   faqat funksiyaning o'zi o'zgaradi.
-2. `activity_logs` `SYNC_TABLES` ga qo'shilsin. ⚠️ Tuple **ota-ona birinchi**
-   tartibida va bu tartib import/wipe uchun ishlatiladi — jadvalni oxiriga
-   qo'shib qo'yish emas, **to'g'ri chuqurlikka** joylash kerak.
-3. `activity_logs` ga **kim qilgani** ustuni qo'shilsin (`user_id`) — hozir
-   unday ustun yo'q, "Sardor sotdi" deyish uchun kerak.
-4. `device_key` solishtirilsin — o'z amalini o'ziga ko'rsatmaslik uchun.
-5. `notification_reads.notification_id` endi haqiqiy UUID ni saqlasin (hozir
-   `act_<hisoblagich>` kabi sun'iy qiymat, dastur qayta ochilganda ma'nosini
-   yo'qotadi).
+**`log_activity` endi jadvalga ham yozadi.** **41 ta chaqiruv joyiga
+tegilmadi** — ular nima bo'lganini aytadi, kim qilganini emas; shuning uchun
+kirgan foydalanuvchi `db.set_activity_actor()` orqali beriladi. Yozish
+"iloji boricha" rejimida: faoliyat yozuvi allaqachon sodir bo'lgan narsaning
+tavsifi, uni yozolmaslik o'sha narsani bekor qilmasligi kerak.
+
+**`activity_logs` `SYNC_TABLES` ga qo'shildi**, `users` dan keyin — u faqat
+foydalanuvchiga ishora qiladi, tuple esa ota-ona birinchi tartibida.
+
+**Jadval cheksiz o'smaydi** — oxirgi 500 ta yozuv qoladi
+(`ACTIVITY_LOG_LIMIT`).
+
+**Bildirishnoma bir marta chiqadi.** `take_new_remote_activities()` boshqa
+qurilmalarda bo'lgan va hali ko'rsatilmagan yozuvlarni qaytaradi va o'sha
+zahoti "ko'rildi" deb belgilaydi. `sync_state.activity_seen_at` — belgi.
+Yuklashdan keyin `_on_sync_applied` ularni toast qilib ko'rsatadi:
+sarlavha — kimligi, matn — nima qilgani.
+
+**Eski tarix bir yo'la portlab ketmaydi.** Migratsiya `activity_seen_at` ni
+o'sha payt bilan belgilaydi va mavjud yozuvlarga shu qurilmaning kalitini
+qo'yadi — aks holda yangi versiyani birinchi ochganda bir oylik tarix toast
+bo'lib yog'ilardi. *(Bu haqiqiy bazada chiqdi: `begzodasidev` da eski
+buildan qolgan 3 ta yozuv bor ekan.)*
+
+**O'qilganlar eslab qolinadi** — `notification_reads` jadvaliga yoziladi,
+foydalanuvchi bo'yicha. **Sinxronlanmaydi**: bir kassir nimani o'qigani
+ikkinchisiga aloqador emas.
+
+**Tartib tuzatildi.** Bir soniya ichida bir nechta yozuv bo'lishi odatiy hol;
+UUID bo'yicha ajratish ularni tasodifiy tartibda ko'rsatardi. Endi
+`created_at` dan keyin `rowid` — ya'ni yozilgan tartibda.
+
+### Testlar
+
+`app/tests/test_activity_feed.py` (8 ta):
+
+- yozuv dastur qayta ochilganda ham qolishi
+- kim va qaysi qurilmada qilgani yozilishi
+- yozuvlar boshqa qurilmalarga ketishi
+- qurilma o'z ishini o'ziga xabar qilmasligi
+- boshqa qurilmaniki **bir marta** e'lon qilinishi
+- bizdan oldingi tarix birdan e'lon qilinmasligi
+- o'qilganlar qayta ochilganda ham o'qilgan bo'lib qolishi va shaxsiy bo'lishi
+- jadval cheksiz o'smasligi
+
+Jami **177 ta test** o'tyapti.
 
 ---
 

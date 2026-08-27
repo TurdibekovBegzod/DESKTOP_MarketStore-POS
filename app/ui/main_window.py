@@ -274,6 +274,7 @@ TEXTS = {
         "sync_adopt_server": "Shu qurilmani serverdagiga almashtirish",
         "sync_live_applied": "Boshqa qurilmadagi o'zgarishlar qo'llandi.",
         "sync_live_title": "Yangilandi",
+        "sync_other_device": "Boshqa qurilma",
         "sync_done": "Sync tugadi", "sync_error": "Sync xatosi",
         "sync_pending_count": "Yuborilmagan o'zgarishlar",
         "sync_remote": "Serverda yangi o'zgarish bor",
@@ -336,6 +337,7 @@ TEXTS = {
         "sync_adopt_server": "Replace this device with the server copy",
         "sync_live_applied": "Changes from another device were applied.",
         "sync_live_title": "Updated",
+        "sync_other_device": "Another device",
         "sync_done": "Sync completed", "sync_error": "Sync error",
         "sync_pending_count": "Unsynced changes",
         "sync_remote": "New changes on the server",
@@ -421,6 +423,7 @@ TEXTS["ru"].update({
     "sync_adopt_server": "Заменить это устройство копией сервера",
     "sync_live_applied": "Изменения с другого устройства применены.",
     "sync_live_title": "Обновлено",
+    "sync_other_device": "Другое устройство",
     "sync_done": "Синхронизация завершена",
     "sync_error": "Ошибка синхронизации",
 })
@@ -1402,6 +1405,12 @@ class MainWindow(QMainWindow):
         self._start_sync_engine()
         # Money is only written where every device can see it.
         db.set_online_check(lambda: self._realtime_online is not False)
+        # Every entry in the activity log carries who made it, so the other
+        # devices can say "Sardor sold ..." rather than "something changed".
+        db.set_activity_actor(lambda: {
+            "id": (self.user or {}).get("id"),
+            "name": (self.user or {}).get("username") or (self.user or {}).get("email"),
+        })
         app = QApplication.instance()
         if app:
             app.installEventFilter(self)
@@ -2226,13 +2235,35 @@ class MainWindow(QMainWindow):
         self._reload_current_page()
         self._refresh_sync_status()
         pulled = int(outcome.get("pulled") or 0)
-        if pulled:
-            self.show_toast(
-                self.labels.get("sync_live_applied", "Boshqa qurilmadagi o'zgarishlar qo'llandi."),
-                title=self.labels.get("sync_live_title", "Yangilandi"),
-                level="info",
-                duration_ms=4000,
-            )
+        if not pulled:
+            return
+        # Say what actually happened and who did it. Reading the entries marks
+        # them seen, so the same sale is never announced twice, and this
+        # device's own work never comes back to it.
+        announced = 0
+        try:
+            for activity in db.take_new_remote_activities(limit=4):
+                who = activity.get("user_name") or self.labels.get(
+                    "sync_other_device", "Boshqa qurilma"
+                )
+                self.show_toast(
+                    activity.get("title") or "",
+                    title=who,
+                    level=activity.get("level") or "info",
+                    duration_ms=6000,
+                )
+                announced += 1
+        except Exception:
+            announced = 0
+        if announced:
+            self._refresh_notif_badge()
+            return
+        self.show_toast(
+            self.labels.get("sync_live_applied", "Boshqa qurilmadagi o'zgarishlar qo'llandi."),
+            title=self.labels.get("sync_live_title", "Yangilandi"),
+            level="info",
+            duration_ms=4000,
+        )
 
     @pyqtSlot(str)
     def _on_sync_engine_state(self, _state):

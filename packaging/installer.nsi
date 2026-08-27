@@ -8,7 +8,7 @@
 ; General Definitions
 !define PRODUCT_NAME "MarketStore POS"
 !ifndef PRODUCT_VERSION
-!define PRODUCT_VERSION "1.1.7"
+!define PRODUCT_VERSION "1.1.8"
 !endif
 !define PRODUCT_PUBLISHER "MarketStore Team"
 !define PRODUCT_WEB_SITE "https://marketstore.uz"

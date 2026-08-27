@@ -118,6 +118,7 @@ SYNC_TABLES = (
     "inventory_check_sessions",
     "inventory_check_items",
     "finance_manual_movements",
+    "activity_logs",
 )
 
 
@@ -1034,8 +1035,22 @@ class FinanceManualMovement(Base):
 
 
 class ActivityLog(Base):
+    """What happened, who did it and where.
+
+    The table has existed since an early migration and was never written to:
+    activity only lived in a Python list that emptied on every restart, which
+    is why one device could never tell another what its cashier had just done.
+
+    ``user_name`` is denormalised on purpose -- the entry has to stay readable
+    after the person is removed -- and ``device_key`` is what keeps a device
+    from announcing its own work back to itself.
+    """
+
     __tablename__ = "activity_logs"
     id = Column(String(ROW_ID_LENGTH), primary_key=True, default=new_row_id)
+    user_id = Column(String(ROW_ID_LENGTH), ForeignKey("users.id", ondelete="SET NULL"))
+    user_name = Column(String)
+    device_key = Column(String)
     action = Column(String, nullable=False)
     title = Column(String, nullable=False)
     message = Column(String, nullable=False)
@@ -1067,6 +1082,7 @@ MIGRATIONS = (
     ("011_create_account_assets", "Store account-specific synchronized branding assets."),
     ("012_uuid_row_identity", "Give every row a UUID so two devices can never claim the same id."),
     ("013_money_ledger", "Derive every money figure from rows that are never rewritten."),
+    ("014_activity_feed", "Record what each device does so the others can be told."),
 )
 
 
@@ -1684,6 +1700,42 @@ def _migration_money_ledger(conn):
             )
 
 
+def _migration_activity_feed(conn):
+    """Give the activity log a writer, an author and a device.
+
+    The table was created years ago and nothing ever inserted into it, so there
+    is nothing to backfill -- only the three columns the entries need before
+    they can travel between devices.
+    """
+    Base.metadata.create_all(bind=conn)
+    if not _has_table(conn, "activity_logs"):
+        return
+    existing = _table_columns(conn, "activity_logs")
+    for column, statement in (
+        ("user_id", "ALTER TABLE activity_logs ADD COLUMN user_id TEXT REFERENCES users(id) ON DELETE SET NULL"),
+        ("user_name", "ALTER TABLE activity_logs ADD COLUMN user_name VARCHAR"),
+        ("device_key", "ALTER TABLE activity_logs ADD COLUMN device_key VARCHAR"),
+    ):
+        if column not in existing:
+            conn.exec_driver_sql(statement)
+
+    # An old build did leave a few entries behind. They were made here, so they
+    # are stamped with this device -- otherwise they would read as another
+    # device's work and be announced as news.
+    row = conn.exec_driver_sql(
+        "SELECT value FROM sync_state WHERE key='device_key'"
+    ).fetchone()
+    if row and row[0]:
+        conn.exec_driver_sql(
+            "UPDATE activity_logs SET device_key = ? "
+            "WHERE device_key IS NULL OR device_key = ''",
+            (row[0],),
+        )
+    # And whatever predates this migration is history, not news: nobody wants a
+    # month of toasts the first time they open the new build.
+    _sync_state_set(conn, "activity_seen_at", _utc_now())
+
+
 MIGRATION_FUNCTIONS = {
     "001_create_missing_tables": _migration_create_missing_tables,
     "002_add_missing_columns": _migration_add_missing_columns,
@@ -1698,6 +1750,7 @@ MIGRATION_FUNCTIONS = {
     "011_create_account_assets": _migration_create_account_assets,
     "012_uuid_row_identity": _migration_uuid_row_identity,
     "013_money_ledger": _migration_money_ledger,
+    "014_activity_feed": _migration_activity_feed,
 }
 
 
@@ -3327,19 +3380,87 @@ def unregister_activity_listener(listener):
         _ACTIVITY_LISTENERS.remove(listener)
 
 
+# Who the entries are attributed to. The 41 places that call log_activity say
+# what happened, not who did it, so the signed-in user is supplied here rather
+# than threaded through every one of them.
+_ACTIVITY_ACTOR = None
+
+# How many entries the table keeps. Long enough to be a useful history, short
+# enough that it never becomes the biggest thing being synchronised.
+ACTIVITY_LOG_LIMIT = 500
+
+
+def set_activity_actor(callback):
+    """Tell the log who is signed in, as a callable returning {id, name}."""
+    global _ACTIVITY_ACTOR
+    _ACTIVITY_ACTOR = callback
+
+
+def _current_actor():
+    if _ACTIVITY_ACTOR is None:
+        return {}
+    try:
+        return dict(_ACTIVITY_ACTOR() or {})
+    except Exception:
+        return {}
+
+
+def _store_activity(item):
+    """Write the entry so the other devices can be told about it.
+
+    Best effort on purpose: an activity entry is a description of something
+    that already happened, and failing to describe it must never undo it.
+    """
+    try:
+        actor = _current_actor()
+        with session_scope() as session:
+            session.add(ActivityLog(
+                id=item["id"],
+                user_id=actor.get("id"),
+                user_name=actor.get("name") or None,
+                device_key=item.get("device_key"),
+                action=item["action"],
+                title=item["title"],
+                message=item["message"],
+                level=item["level"],
+                target=item["target"],
+                badge=item["badge"],
+                created_at=item["created_at"],
+            ))
+            session.flush()
+            stale = session.scalars(
+                select(ActivityLog.id)
+                .order_by(ActivityLog.created_at.desc(), text("rowid DESC"))
+                .offset(ACTIVITY_LOG_LIMIT)
+            ).all()
+            for row_id in stale:
+                row = session.get(ActivityLog, row_id)
+                if row is not None:
+                    session.delete(row)
+        return actor
+    except Exception:
+        return {}
+
+
 def log_activity(action, title, message, level="info", target="products", badge="Mahsulot"):
-    global _ACTIVITY_COUNTER
-    _ACTIVITY_COUNTER += 1
+    device_key = ""
+    try:
+        device_key = get_sync_device_key()
+    except Exception:
+        device_key = ""
     item = {
-        "id": _ACTIVITY_COUNTER,
+        "id": new_row_id(),
         "action": action,
         "title": title,
         "message": message,
         "level": level,
         "target": target,
         "badge": badge,
+        "device_key": device_key,
         "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
+    actor = _store_activity(item)
+    item["user_name"] = actor.get("name")
     _SESSION_ACTIVITIES.insert(0, item)
     if len(_SESSION_ACTIVITIES) > 300:
         _SESSION_ACTIVITIES.pop()
@@ -3351,8 +3472,86 @@ def log_activity(action, title, message, level="info", target="products", badge=
             pass
 
 
+def clear_activity_log():
+    """Empty the feed. Used when a device starts a fresh account."""
+    with session_scope() as session:
+        for row in session.scalars(select(ActivityLog)).all():
+            session.delete(row)
+
+
 def get_recent_activities(limit=50):
-    return [Row(act) for act in _SESSION_ACTIVITIES[:limit]]
+    """The feed, from the table, so it survives a restart and other devices.
+
+    Falls back to what this session did if the table cannot be read -- a
+    database that is mid-migration should still show the person what they just
+    did rather than an empty screen.
+    """
+    try:
+        with session_scope() as session:
+            rows = session.scalars(
+                select(ActivityLog)
+                .order_by(ActivityLog.created_at.desc(), text("rowid DESC"))
+                .limit(limit)
+            ).all()
+            return [Row(dict(
+                id=row.id,
+                action=row.action,
+                title=row.title,
+                message=row.message,
+                level=row.level,
+                target=row.target,
+                badge=row.badge,
+                user_id=row.user_id,
+                user_name=row.user_name,
+                device_key=row.device_key,
+                created_at=row.created_at,
+            )) for row in rows]
+    except Exception:
+        return [Row(act) for act in _SESSION_ACTIVITIES[:limit]]
+
+
+def take_new_remote_activities(limit=5):
+    """What the other devices have done since we last looked.
+
+    Reading them marks them seen, so the same sale is never announced twice --
+    and this device's own work is skipped, because being told what you just did
+    yourself is noise.
+    """
+    try:
+        device_key = get_sync_device_key()
+    except Exception:
+        device_key = ""
+    with _get_engine().begin() as conn:
+        row = conn.exec_driver_sql(
+            "SELECT value FROM sync_state WHERE key='activity_seen_at'"
+        ).fetchone()
+        seen_at = row[0] if row and row[0] else None
+    with session_scope() as session:
+        stmt = select(ActivityLog).order_by(ActivityLog.created_at, text("rowid"))
+        if device_key:
+            stmt = stmt.where(func.coalesce(ActivityLog.device_key, "") != device_key)
+        if seen_at:
+            stmt = stmt.where(ActivityLog.created_at > seen_at)
+        rows = session.scalars(stmt).all()
+        fresh = [Row(dict(
+            id=row.id,
+            title=row.title,
+            message=row.message,
+            level=row.level,
+            target=row.target,
+            user_name=row.user_name,
+            created_at=row.created_at,
+        )) for row in rows]
+    newest = max((row["created_at"] or "" for row in fresh), default=None)
+    if newest:
+        with _get_engine().begin() as conn:
+            _sync_state_set(conn, "activity_seen_at", newest)
+    elif seen_at is None:
+        # First look on a device that has nothing yet: start the marker now so
+        # the whole existing history is not announced later.
+        with _get_engine().begin() as conn:
+            _sync_state_set(conn, "activity_seen_at", _utc_now())
+    return fresh[-limit:] if limit else fresh
 
 
 def add_product(data: dict):
@@ -6736,14 +6935,52 @@ def get_low_stock_products(threshold=5):
 
 
 def mark_notifications_as_read(notification_ids, user_id=None):
+    """Remember what this person has already seen, past the next restart.
+
+    Deliberately not synchronised: what one cashier has read says nothing
+    about what another has, and the table is per-user for the same reason.
+    """
     if not notification_ids:
         return
+    now = _utc_now()
     for nid in notification_ids:
         _SESSION_READ_IDS.add(str(nid))
+    if not user_id:
+        return
+    try:
+        with session_scope() as session:
+            for nid in notification_ids:
+                key = str(nid)
+                existing = session.scalar(
+                    select(NotificationRead).where(
+                        NotificationRead.user_id == user_id,
+                        NotificationRead.notification_id == key,
+                    )
+                )
+                if existing is None:
+                    session.add(NotificationRead(
+                        user_id=user_id, notification_id=key, read_at=now
+                    ))
+    except Exception:
+        # Losing the record only means the badge lights up again later.
+        pass
 
 
 def get_read_notification_ids(user_id=None):
-    return set(_SESSION_READ_IDS)
+    known = set(_SESSION_READ_IDS)
+    if not user_id:
+        return known
+    try:
+        with session_scope() as session:
+            known.update(
+                str(value) for value in session.scalars(
+                    select(NotificationRead.notification_id)
+                    .where(NotificationRead.user_id == user_id)
+                )
+            )
+    except Exception:
+        pass
+    return known
 
 
 def get_unread_notifications_count(user_id=None, threshold=5):
