@@ -269,6 +269,7 @@ TEXTS = {
         "password_required": "Parol kiriting.",
         "sync_clean": "Sinxron", "sync_dirty": "Yuborilmagan o'zgarish bor",
         "sync_push": "Yuborish", "sync_pull": "Olish",
+        "sync_replace_server": "Serverni shu qurilmadagiga almashtirish",
         "sync_done": "Sync tugadi", "sync_error": "Sync xatosi",
         "sync_pending_count": "Yuborilmagan o'zgarishlar",
         "sync_remote": "Serverda yangi o'zgarish bor",
@@ -325,6 +326,7 @@ TEXTS = {
         "password_required": "Enter password.",
         "sync_clean": "Synced", "sync_dirty": "Unsynced changes",
         "sync_push": "Upload", "sync_pull": "Download",
+        "sync_replace_server": "Replace the server with this device",
         "sync_done": "Sync completed", "sync_error": "Sync error",
         "sync_pending_count": "Unsynced changes",
         "sync_remote": "New changes on the server",
@@ -404,6 +406,7 @@ TEXTS["ru"].update({
     "sync_dirty": "Локальные изменения",
     "sync_push": "Отправить",
     "sync_pull": "Получить",
+    "sync_replace_server": "Заменить сервер копией этого устройства",
     "sync_done": "Синхронизация завершена",
     "sync_error": "Ошибка синхронизации",
 })
@@ -927,6 +930,22 @@ class SyncDialog(QDialog):
         btn_row.addWidget(self.push_btn)
         layout.addLayout(btn_row)
 
+        # "Yuborish" only sends what changed, so it can never empty the server:
+        # with nothing to send it does nothing at all, and the next "Olish"
+        # brings everything back. Replacing the server copy wholesale needs its
+        # own action, which is why this is a separate, confirmed button.
+        self.replace_btn = QPushButton(
+            self.labels.get("sync_replace_server", "Serverni shu qurilmadagiga almashtirish")
+        )
+        self.replace_btn.setObjectName("danger_clear_sync")
+        self.replace_btn.setStyleSheet(
+            "QPushButton{background:#fef2f2;color:#b91c1c;border:1px solid #fecaca;"
+            "border-radius:7px;padding:8px 14px;font-size:12px;}"
+            "QPushButton:hover{background:#fee2e2;border-color:#f87171;}"
+        )
+        self.replace_btn.clicked.connect(self._replace_server)
+        layout.addWidget(self.replace_btn)
+
     def refresh(self):
         if not self.parent_window:
             return
@@ -970,6 +989,29 @@ class SyncDialog(QDialog):
         self.accept()
         if self.parent_window:
             self.parent_window._push_to_server(show_message=True)
+
+    def _replace_server(self):
+        if not self.parent_window:
+            return
+        local_records = db.get_sync_status().get("record_count", 0)
+        question = self.labels.get(
+            "sync_replace_server_q",
+            "Serverdagi ma'lumot O'CHIRILADI va shu qurilmadagi nusxa bilan almashtiriladi.\n\n"
+            "Bu account ulangan barcha qurilmalarga tarqaladi.\n\n"
+            "Shu qurilmada hozir {n} ta yozuv bor. Davom etilsinmi?",
+        ).replace("{n}", str(local_records))
+        reply = QMessageBox.question(
+            self,
+            self.labels.get("sync_replace_server", "Serverni almashtirish"),
+            question,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self.accept()
+        # force_upload snapshots the server copy to disk before resetting it.
+        self.parent_window._resolve_conflict("force_upload")
 
 
 class ToastItem(QFrame):
