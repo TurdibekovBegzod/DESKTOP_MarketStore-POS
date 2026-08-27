@@ -128,6 +128,38 @@ UUID_KEYED_TABLES = frozenset(
 )
 
 
+# Money must be written where every device can see it. A sale rung up with no
+# way to reach the server cannot be reconciled with what the other devices did
+# in the meantime, so it is refused rather than written and argued about later.
+# Unset means unrestricted, and "not known to be offline" counts as online.
+_ONLINE_CHECK = None
+
+
+def set_online_check(callback):
+    """Tell the database how to find out whether the server is reachable."""
+    global _ONLINE_CHECK
+    _ONLINE_CHECK = callback
+
+
+def is_online():
+    if _ONLINE_CHECK is None:
+        return True
+    try:
+        return bool(_ONLINE_CHECK())
+    except Exception:
+        return True
+
+
+def require_online(action=None):
+    if is_online():
+        return
+    what = f" ({action})" if action else ""
+    raise AppError(
+        "Internet aloqasi yo'q, shuning uchun bu amalni bajarib bo'lmaydi"
+        f"{what}.\n\nAloqa tiklanganda qayta urinib ko'ring."
+    )
+
+
 class AppError(Exception):
     """User-facing application error."""
 
@@ -2302,12 +2334,19 @@ def _clear_conflicting_unique_rows(conn, table_name, filtered, pk_col):
     return removed
 
 
-def import_sync_records(records):
+# How many rows one import transaction carries. A download of a few thousand
+# rows used to be a single transaction, which held the database and the window
+# for as long as it took; in bounded pieces the app stays answerable and a
+# failure loses one piece rather than the whole download.
+IMPORT_CHUNK_SIZE = 200
+
+
+def import_sync_records(records, chunk_size=IMPORT_CHUNK_SIZE):
     if not records:
         return 0
-    imported = 0
-    skipped_legacy = 0
-    rejected = 0
+    counters = {"imported": 0, "skipped_legacy": 0, "rejected": 0}
+    touched_tables = set()
+    touched_sales = set()
     engine = _get_engine()
     _sync_suspend_token = suspend_sync()
     _sync_suspend_token.__enter__()
@@ -2322,8 +2361,10 @@ def import_sync_records(records):
                 else table_order.get(record.get("table_name"), len(SYNC_TABLES)),
             ),
         )
-        with engine.begin() as conn:
-            for record in ordered_records:
+        size = max(1, int(chunk_size or IMPORT_CHUNK_SIZE))
+        for start in range(0, len(ordered_records), size):
+          with engine.begin() as conn:
+            for record in ordered_records[start:start + size]:
                 table_name = record.get("table_name")
                 if table_name not in SYNC_TABLES or not _has_table(conn, table_name):
                     continue
@@ -2340,7 +2381,7 @@ def import_sync_records(records):
                 if table_name in UUID_KEYED_TABLES:
                     incoming_id = data.get("id", record.get("local_id"))
                     if incoming_id is not None and not is_row_uuid(incoming_id):
-                        skipped_legacy += 1
+                        counters["skipped_legacy"] += 1
                         continue
                 columns = _table_columns(conn, table_name)
                 filtered = {key: value for key, value in data.items() if key in columns}
@@ -2353,7 +2394,10 @@ def import_sync_records(records):
                             f"WHERE {_quote_identifier(pk_col)}=?",
                             (local_id,),
                         )
-                        imported += 1
+                        counters["imported"] += 1
+                        touched_tables.add(table_name)
+                        if table_name in ("sale_items", "sale_returns"):
+                            touched_sales.add(str(record.get("local_id") or ""))
                     continue
                 quoted_table = _quote_identifier(table_name)
                 quoted_columns = ", ".join(_quote_identifier(column) for column in filtered)
@@ -2385,20 +2429,42 @@ def import_sync_records(records):
                             _clear_conflicting_unique_rows(conn, table_name, filtered, pk_col)
                             conn.exec_driver_sql(statement, values)
                     except IntegrityError:
-                        rejected += 1
+                        counters["rejected"] += 1
                         continue
                 if _has_table(conn, "sync_tombstones"):
                     conn.exec_driver_sql(
                         "DELETE FROM sync_tombstones WHERE table_name=? AND local_id=?",
                         (table_name, str(record.get("local_id") or "")),
                     )
-                imported += 1
+                counters["imported"] += 1
+                touched_tables.add(table_name)
+                if table_name in ("sales", "sale_items", "sale_returns"):
+                    sale_key = filtered.get("sale_id") or filtered.get("id")
+                    if sale_key:
+                        touched_sales.add(str(sale_key))
+        # A download can hand us a return without the sale row that quotes it,
+        # so the cached figures are rebuilt from what actually arrived. Still
+        # inside the suspension: this derives, it does not originate.
+        _reconcile_imported_sales(touched_sales)
+        with engine.begin() as conn:
             _sync_state_set(conn, "last_pull_at", _utc_now())
-            _sync_state_set(conn, "last_pull_skipped_legacy", str(skipped_legacy))
-            _sync_state_set(conn, "last_pull_rejected", str(rejected))
+            _sync_state_set(conn, "last_pull_skipped_legacy", str(counters["skipped_legacy"]))
+            _sync_state_set(conn, "last_pull_rejected", str(counters["rejected"]))
+            _sync_state_set(conn, "last_pull_tables", ",".join(sorted(touched_tables)))
     finally:
         _sync_suspend_token.__exit__(None, None, None)
-    return imported
+    return counters["imported"]
+
+
+def _reconcile_imported_sales(sale_ids):
+    for sale_id in sale_ids:
+        if not sale_id:
+            continue
+        try:
+            recalculate_sale_totals(sale_id)
+        except Exception:
+            # One unreadable sale must not abandon the rest of the download.
+            continue
 
 
 def mark_sync_pushed(up_to_seq=None, tombstone_ids=None):
@@ -2592,12 +2658,44 @@ def get_ledger_baseline():
     ))
 
 
+def get_pull_watermark():
+    """How far into the server's history this device has already read.
+
+    The server can hand back only what changed after a given moment, and it
+    always has been able to -- the client simply never asked, so every download
+    was a full copy of the account. This is the moment to ask from.
+    """
+    with _get_engine().begin() as conn:
+        row = conn.exec_driver_sql(
+            "SELECT value FROM sync_state WHERE key='pull_watermark'"
+        ).fetchone()
+    return row[0] if row and row[0] else None
+
+
+def set_pull_watermark(value):
+    """Only ever moved after a download that kept everything it was given."""
+    if not value:
+        return
+    with _get_engine().begin() as conn:
+        _sync_state_set(conn, "pull_watermark", str(value))
+
+
+def clear_pull_watermark():
+    with _get_engine().begin() as conn:
+        _sync_state_set(conn, "pull_watermark", "")
+
+
 def get_last_pull_stats():
     """What the most recent download had to leave behind."""
     with _get_engine().begin() as conn:
+        row = conn.exec_driver_sql(
+            "SELECT value FROM sync_state WHERE key='last_pull_tables'"
+        ).fetchone()
+        tables = [name for name in str((row[0] if row else "") or "").split(",") if name]
         return {
             "skipped_legacy": _sync_state_int(conn, "last_pull_skipped_legacy", 0),
             "rejected": _sync_state_int(conn, "last_pull_rejected", 0),
+            "tables": tables,
         }
 
 
@@ -4103,6 +4201,7 @@ def _next_sale_display_no(session):
 
 
 def create_sale(customer_id, cashier_id, items, total, discount, paid, payment_method, currency_code="UZS", exchange_rate=1, paid_original=None, customer_name=None, customer_phone=None, is_finalized=0):
+    require_online("sotuvni yakunlash")
     if not items:
         raise AppError("Savat bo'sh.")
     if discount < 0 or discount > total:
@@ -4262,6 +4361,7 @@ def get_sale_display_no(sale_id):
 
 
 def finalize_sale(sale_id, cashier_reward=0.0):
+    require_online("sotuvni tasdiqlash")
     sale_ref = None
     with session_scope() as session:
         sale = session.get(Sale, sale_id)
@@ -4936,6 +5036,7 @@ def _return_sale_item_in_session(session, item, quantity, note=""):
 
 
 def return_sale_item(sale_item_id, quantity, note=""):
+    require_online("qaytarish")
     with session_scope() as session:
         item = session.get(SaleItem, sale_item_id)
         if item is None:
@@ -4944,6 +5045,7 @@ def return_sale_item(sale_item_id, quantity, note=""):
 
 
 def delete_sale_item(sale_item_id):
+    require_online("sotuv yozuvini o'chirish")
     with session_scope() as session:
         item = session.get(SaleItem, sale_item_id)
         if item is None:
@@ -5722,6 +5824,7 @@ def delete_supplier(supplier_id):
 
 
 def add_supplier_debt(supplier_id, amount, note=""):
+    require_online("ta'minotchi qarzi")
     if amount <= 0:
         raise AppError("Qarz summasi 0 dan katta bo'lishi kerak.")
     with session_scope() as session:
@@ -5743,6 +5846,7 @@ def add_supplier_debt(supplier_id, amount, note=""):
 
 
 def pay_supplier_debt(supplier_id, amount, note=""):
+    require_online("ta'minotchiga to'lov")
     if amount <= 0:
         raise AppError("To'lov summasi 0 dan katta bo'lishi kerak.")
     with session_scope() as session:
@@ -5885,6 +5989,7 @@ def delete_debtor(debtor_id):
 
 
 def add_debtor_debt(debtor_id, amount, note=""):
+    require_online("qarz berish")
     if amount <= 0:
         raise AppError("Qarz summasi 0 dan katta bo'lishi kerak.")
     with session_scope() as session:
@@ -5906,6 +6011,7 @@ def add_debtor_debt(debtor_id, amount, note=""):
 
 
 def pay_debtor_debt(debtor_id, amount, note=""):
+    require_online("qarz to'lovi")
     if amount <= 0:
         raise AppError("To'lov summasi 0 dan katta bo'lishi kerak.")
     with session_scope() as session:
@@ -6112,6 +6218,7 @@ def _validated_expense_cashier(session, category_id, cashier_id):
 
 
 def add_expense(category_id, amount, currency_code, description, user_id=None, cashier_id=None):
+    require_online("harajat qo'shish")
     if amount <= 0:
         raise AppError("Harajat summasi 0 dan katta bo'lishi kerak.")
     with session_scope() as session:

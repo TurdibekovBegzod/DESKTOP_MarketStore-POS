@@ -7,6 +7,9 @@ app silently merging. Unlike Anki, the losing side is backed up to disk first, s
 a wrong click is recoverable.
 """
 
+import functools
+import threading
+
 import api_client
 import database as db
 
@@ -21,6 +24,20 @@ class SyncConflict(Exception):
     def __init__(self, info):
         super().__init__("Sync conflict")
         self.info = dict(info or {})
+
+
+# Two syncs must never run at once. The automatic engine and the sync button
+# both reach these functions, and overlapping turns would send the same rows
+# twice and race each other over the reading position.
+_SYNC_LOCK = threading.RLock()
+
+
+def _one_at_a_time(function):
+    @functools.wraps(function)
+    def guarded(*args, **kwargs):
+        with _SYNC_LOCK:
+            return function(*args, **kwargs)
+    return guarded
 
 
 def _token_for_user(user):
@@ -110,6 +127,7 @@ def _server_uses_uuid_identity(records):
     return False
 
 
+@_one_at_a_time
 def reconcile_after_upgrade(user):
     """Settle this device against the server once, before any ordinary sync.
 
@@ -153,6 +171,7 @@ def reconcile_after_upgrade(user):
     return result
 
 
+@_one_at_a_time
 def push_local_changes(user, batch_size=1000, incremental=True, force=False):
     if not force:
         settled = reconcile_after_upgrade(user)
@@ -267,7 +286,57 @@ def push_local_changes(user, batch_size=1000, incremental=True, force=False):
     }
 
 
-def pull_server_changes(user, table_name=None):
+@_one_at_a_time
+def auto_sync_turn(user, incremental=True):
+    """One round of automatic synchronisation: take first, then give.
+
+    Downloading before uploading is deliberate. A device that sends its work
+    before seeing the other side's turns an ordinary edit into a conflict, and
+    a conflict is the one thing this whole arrangement exists to avoid.
+
+    Returns what moved, so the open windows can reload exactly what changed
+    instead of everything.
+    """
+    outcome = {
+        "pulled": 0,
+        "pushed": 0,
+        "tables": [],
+        "conflict": False,
+        "settled": False,
+    }
+    settled = reconcile_after_upgrade(user)
+    if settled is not None:
+        outcome["settled"] = True
+        outcome["pulled"] = int(settled.get("imported") or 0)
+        outcome["tables"] = list(db.SYNC_TABLES)
+        return outcome
+
+    pull = pull_server_changes(user, incremental=incremental)
+    outcome["pulled"] = int(pull.get("imported") or 0)
+    outcome["tables"] = db.get_last_pull_stats().get("tables", [])
+
+    status = db.get_sync_status()
+    if int(status.get("pending_change_count") or 0) <= 0:
+        return outcome
+
+    try:
+        push = push_local_changes(user)
+    except SyncConflict:
+        # The server moved while we were preparing to send. Read it once more
+        # and try again; if it still refuses, leave it to the sync button
+        # rather than looping.
+        pull_server_changes(user, incremental=False)
+        try:
+            push = push_local_changes(user)
+        except SyncConflict:
+            outcome["conflict"] = True
+            return outcome
+    outcome["pushed"] = int(push.get("sent") or 0)
+    return outcome
+
+
+@_one_at_a_time
+def pull_server_changes(user, table_name=None, incremental=False):
     if table_name is None:
         settled = reconcile_after_upgrade(user)
         if settled is not None:
@@ -283,8 +352,13 @@ def pull_server_changes(user, table_name=None):
                 "discarded_pending": settled.get("discarded_pending", 0),
             }
     token = _token_for_user(user)
+    # Ask for what changed since we last read, not for the whole account. The
+    # server has always supported this; the client simply never asked, so every
+    # download was a full copy however little had moved.
+    since = db.get_pull_watermark() if (incremental and table_name is None) else None
     result = api_client.pull_sync_records(
         token,
+        since=since,
         table_name=table_name,
         include_deleted=True,
     )
@@ -316,6 +390,10 @@ def pull_server_changes(user, table_name=None):
     if table_name is None:
         db.mark_server_bootstrap_complete()
         _apply_generation(int(result.get("generation") or 0))
+        # Only move the marker past what we actually kept. A row we dropped
+        # would otherwise fall behind it and never be offered again.
+        if not stats["rejected"] and not stats["skipped_legacy"]:
+            db.set_pull_watermark(result.get("server_time"))
     return {
         "received": len(records),
         "imported": imported,
@@ -326,6 +404,7 @@ def pull_server_changes(user, table_name=None):
     }
 
 
+@_one_at_a_time
 def force_download(user):
     """Take the server copy and discard local changes (after backing them up)."""
     token = _token_for_user(user)
@@ -356,6 +435,7 @@ def force_download(user):
     db.mark_server_bootstrap_complete()
     db.mark_server_reseed_complete()
     _apply_generation(int(result.get("generation") or 0))
+    db.set_pull_watermark(result.get("server_time"))
     return {
         "direction": "download",
         "received": len(records),
@@ -365,6 +445,7 @@ def force_download(user):
     }
 
 
+@_one_at_a_time
 def force_upload(user):
     """Overwrite the server with our copy (after backing the server copy up)."""
     token = _token_for_user(user)

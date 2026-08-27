@@ -15,6 +15,7 @@ import api_client
 import database as db
 import sync_service
 from realtime import SyncEventListener
+from sync_engine import SyncEngine
 from updater import is_newer_version
 from version import APP_VERSION
 
@@ -271,6 +272,8 @@ TEXTS = {
         "sync_push": "Yuborish", "sync_pull": "Olish",
         "sync_replace_server": "Serverni shu qurilmadagiga almashtirish",
         "sync_adopt_server": "Shu qurilmani serverdagiga almashtirish",
+        "sync_live_applied": "Boshqa qurilmadagi o'zgarishlar qo'llandi.",
+        "sync_live_title": "Yangilandi",
         "sync_done": "Sync tugadi", "sync_error": "Sync xatosi",
         "sync_pending_count": "Yuborilmagan o'zgarishlar",
         "sync_remote": "Serverda yangi o'zgarish bor",
@@ -331,6 +334,8 @@ TEXTS = {
         "sync_push": "Upload", "sync_pull": "Download",
         "sync_replace_server": "Replace the server with this device",
         "sync_adopt_server": "Replace this device with the server copy",
+        "sync_live_applied": "Changes from another device were applied.",
+        "sync_live_title": "Updated",
         "sync_done": "Sync completed", "sync_error": "Sync error",
         "sync_pending_count": "Unsynced changes",
         "sync_remote": "New changes on the server",
@@ -414,6 +419,8 @@ TEXTS["ru"].update({
     "sync_pull": "Получить",
     "sync_replace_server": "Заменить сервер копией этого устройства",
     "sync_adopt_server": "Заменить это устройство копией сервера",
+    "sync_live_applied": "Изменения с другого устройства применены.",
+    "sync_live_title": "Обновлено",
     "sync_done": "Синхронизация завершена",
     "sync_error": "Ошибка синхронизации",
 })
@@ -1378,6 +1385,8 @@ class MainWindow(QMainWindow):
         db.register_activity_listener(self._on_database_activity)
         self._realtime_thread = None
         self._realtime_worker = None
+        self._engine_thread = None
+        self._engine_worker = None
         # None = not attempted yet, so the tooltip does not accuse the link of
         # being down during the first second of startup.
         self._realtime_online = None
@@ -1390,6 +1399,9 @@ class MainWindow(QMainWindow):
         self._start_clock()
         self._save_user_activity(force=True)
         self._start_realtime_listener()
+        self._start_sync_engine()
+        # Money is only written where every device can see it.
+        db.set_online_check(lambda: self._realtime_online is not False)
         app = QApplication.instance()
         if app:
             app.installEventFilter(self)
@@ -1420,6 +1432,7 @@ class MainWindow(QMainWindow):
         if not self._logging_out:
             self._save_user_activity(force=True)
         self._stop_realtime_listener()
+        self._stop_sync_engine()
         db.unregister_activity_listener(self._on_database_activity)
         app = QApplication.instance()
         if app:
@@ -2184,6 +2197,47 @@ class MainWindow(QMainWindow):
         self._realtime_worker.connection_changed.connect(self._on_realtime_connection)
         self._realtime_thread.start()
 
+    def _start_sync_engine(self):
+        """One worker keeps this device in step; the sync button stays as a fallback."""
+        if self._engine_thread is not None:
+            return
+        self._engine_thread = QThread(self)
+        self._engine_worker = SyncEngine(lambda: self.user if self._sync_available() else None)
+        self._engine_worker.moveToThread(self._engine_thread)
+        self._engine_thread.started.connect(self._engine_worker.start)
+        self._engine_worker.applied.connect(self._on_sync_applied)
+        self._engine_worker.state_changed.connect(self._on_sync_engine_state)
+        self._engine_thread.start()
+
+    def _stop_sync_engine(self):
+        worker, thread = self._engine_worker, self._engine_thread
+        self._engine_worker = None
+        self._engine_thread = None
+        if worker is not None:
+            worker.stop()
+        if thread is not None:
+            thread.quit()
+            thread.wait(4000)
+
+    @pyqtSlot(dict)
+    def _on_sync_applied(self, outcome):
+        # The data on screen just moved underneath the person looking at it,
+        # so the page is reloaded rather than left showing yesterday's figures.
+        self._reload_current_page()
+        self._refresh_sync_status()
+        pulled = int(outcome.get("pulled") or 0)
+        if pulled:
+            self.show_toast(
+                self.labels.get("sync_live_applied", "Boshqa qurilmadagi o'zgarishlar qo'llandi."),
+                title=self.labels.get("sync_live_title", "Yangilandi"),
+                level="info",
+                duration_ms=4000,
+            )
+
+    @pyqtSlot(str)
+    def _on_sync_engine_state(self, _state):
+        self._refresh_sync_status()
+
     def _stop_realtime_listener(self):
         worker = self._realtime_worker
         thread = self._realtime_thread
@@ -2271,12 +2325,9 @@ class MainWindow(QMainWindow):
         if assets_only or repeated:
             return
 
-        self.show_toast(
-            self.labels.get("sync_remote_toast", "Boshqa qurilmada o'zgarish qilindi. Yuklab oling."),
-            title=self.labels.get("sync_remote_title", "Yangi o'zgarish"),
-            level="info",
-            duration_ms=8000,
-        )
+        # Nothing to press: the engine fetches it and the open page reloads.
+        if self._engine_worker is not None:
+            self._engine_worker.request_turn()
 
     # ------------------------------------------------------------------
     # New-release badge on the account button

@@ -11,14 +11,14 @@
 
 ## Holat
 
-**Jami 7 ta bosqich: 0 dan 6 gacha. Uchtasi tugadi, to'rttasi qoldi.**
+**Jami 7 ta bosqich: 0 dan 6 gacha. To'rttasi tugadi, uchtasi qoldi.**
 
 | Bosqich | Mazmuni | Holat | Versiya | Taxminiy vaqt |
 |---|---|---|---|---|
 | **0** | Mavjud hisob-kitob xatolarini tuzatish | ✅ Tugadi, chiqarildi | `v1.1.3` | — |
 | **1** | Yagona identifikator (UUID) | ✅ Tugadi, chiqarildi | `v1.1.5` | — |
 | **2** | Pul raqamlarining asosi (o'zgarmas jurnal) | ✅ Tugadi | commit qilinmagan | — |
-| **3** | Real-time (Telegram kabi) | ⬜ Boshlanmagan | — | ~1–1.5 hafta |
+| **3** | Real-time (Telegram kabi) | ✅ Tugadi | commit qilinmagan | — |
 | **4** | Eskirgan ma'lumotdan himoya | ⬜ Boshlanmagan | — | ~1 hafta |
 | **5** | Qurilmalararo bildirishnoma | ⬜ Boshlanmagan | — | ~3–4 kun |
 | **6** | Sync tugmasini olib tashlash | ⬜ Boshlanmagan | — | ~1 hafta |
@@ -305,57 +305,91 @@ shuning uchun tuzatish ularga o'z-o'zidan yetib bordi.
 
 ---
 
-## 3-bosqich — Real-time ⬜
+## 3-bosqich — Real-time ✅
 
-Shu yerdan "Telegram tuyg'usi" paydo bo'ladi: hech narsa bosmaysiz, ma'lumot
-o'zi keladi.
+Tugma bosish shart emas: boshqa qurilmadagi o'zgarish o'zi kelib qo'llanadi,
+ochiq oyna o'zi yangilanadi.
 
-### Nimasi allaqachon tayyor
+### Nima qilindi
 
-Tekshiruvda ma'lum bo'ldi — ishning yarmi qurilgan, faqat ulanmagan:
+**O'qilgan joy eslab qolinadi** — `sync_state.pull_watermark`. Server
+`?since=` orqali faqat o'zgarganini berish imkoniyatini **doim** qo'llab
+kelgan, mijoz esa undan hech qachon foydalanmagan: har yuklash butun
+accountning nusxasi edi. Endi belgi saqlanadi va `since` sifatida yuboriladi.
+Belgi **faqat hech narsa tashlanmagan bo'lsa** oldinga suriladi — aks holda
+o'tkazib yuborilgan qator belgidan orqada qolib, boshqa hech qachon
+taklif qilinmagan bo'lardi.
 
-- **SSE oqimi bor:** server `/sync/events` endpointi `hello` / `change` /
-  `release` / `ping` hodisalarini yuboradi (`api/app/routers/sync.py`,
-  `api/app/events.py` dagi `SyncEventBroker`)
-- **Mijoz ham eshitadi:** `app/realtime.py` dagi `SyncEventListener`
-  `remote_change` signalini chiqaradi
-- **Lekin hech narsa yuklanmaydi.** `main_window._on_remote_change` faqat
-  bildirishnoma ko'rsatadi va nishonni yoqadi. Yagona istisno —
-  `account_assets` (logo) avtomatik qo'llanadi.
-- **Qismli yuklash serverda bor:** `/sync/pull?since=...` ishlaydi va
-  `api_client.pull_sync_records(since=...)` uni uzatadi — lekin
-  `sync_service.py` dagi **uchta chaqiruvning hech birida `since` berilmaydi**.
-  Ya'ni har safar butun account yuklanadi.
-- `server_time` javobda qaytadi va yuqoriga uzatiladi, lekin **hech qayerda
-  suv belgisi sifatida saqlanmaydi**.
+**Yuklash bo'laklarga bo'lindi** — `IMPORT_CHUNK_SIZE = 200`. Ilgari bir necha
+ming qatorli yuklash bitta tranzaksiya edi va shu vaqt davomida dastur javob
+bermay turardi. Endi har bo'lak alohida, va xato bo'lsa butun yuklash emas,
+bitta bo'lak yo'qoladi.
 
-### Qilinadigan ish
+**Kelgan ma'lumot ustidan hisob-kitob tiklanadi** — yuklash `sale_returns`
+qatorini uni tilga oluvchi `sales` qatorisiz keltirishi mumkin, shuning uchun
+tegilgan sotuvlarning keshlangan raqamlari qayta hisoblanadi
+(`_reconcile_imported_sales`). Bu suspend ichida bo'ladi: hosila qiymat qayta
+serverga ketmaydi.
 
-1. **`change` hodisasi → avtomatik qismli yuklash.** `since` sifatida oxirgi
-   `server_time` ishlatiladi; u `sync_state` ga yoziladi.
-2. **Lokal yozuvdan keyin avtomatik yuborish** — 400–800 ms kutib, shu
-   oraliqdagi o'zgarishlarni birlashtirib. Har tugma bosilishida so'rov
-   ketmasligi uchun.
-3. **Bitta doimiy `SyncEngine` oqimi.** Import 200 qatorlik bo'laklarda —
-   aks holda katta yuklash paytida oyna qotib qoladi. *(Sizning ikkinchi
-   talabingiz: "dastur sekinlashmasin".)*
-4. **Ochiq oyna o'zi yangilanadi** — sizning ettinchi talabingiz:
-   - sotuv tafsiloti oynalari
-   - mahsulotlar: **bor**, **sotilgan**, **jarayonda**
-   - hisobotlar: **umumiy** va **kassirlar hisoboti**
-   - qarzlar
-   - harajatlar (kassirga bog'langani bilan)
-5. **Internet yo'q bo'lsa pul yozuvlari bloklanadi** va aniq xabar beriladi
-   *(to'rtinchi talabingiz)*.
+**Bitta aylanish** — `sync_service.auto_sync_turn()`: **avval oladi, keyin
+beradi**. Ataylab shunday: o'z ishini boshqa tomonnikini ko'rmasdan yuborgan
+qurilma oddiy tahrirni konfliktga aylantiradi. Konflikt chiqsa bir marta
+to'liq o'qib qayta urinadi, keyin tugmaga qoldiradi.
 
-### Ehtiyot nuqtalari
+**Ikkita sinxronizatsiya bir vaqtda ishlamaydi** — `_SYNC_LOCK`. Avtomatik
+dvigatel ham, tugma ham shu funksiyalarga kiradi; ustma-ust tushgan aylanishlar
+bir xil qatorlarni ikki marta yuborardi.
 
-- Import `suspend_sync()` ostida ishlaydi — yuklangan qatorlar navbatga qayta
-  tushmaydi. Bu allaqachon shunday va **shundayligicha qolishi kerak**.
-- Avtomatik yuborish kassir sotuv qilayotgan paytga to'g'ri kelmasligi uchun
-  ish oqimi bitta navbatdan o'tishi kerak.
-- **Sync tugmasi hali qoladi** — zaxira yo'l sifatida. U faqat 6-bosqichda
-  olib tashlanadi.
+**`app/sync_engine.py` — `SyncEngine`.** O'z oqimida ishlaydigan bitta ishchi.
+Uch sababdan biri bo'lsa aylanish qiladi:
+
+| Sabab | Kutish |
+|---|---|
+| Server "o'zgarish bor" dedi (SSE `change`) | darrov |
+| Bu qurilma o'zi nimadir yozdi | 700 ms — bir sotuvning bir nechta yozuvi bitta yuborishga birlashadi |
+| Hech kim hech narsa demadi | 30 s — faqat oqim uzilgan holat uchun himoya |
+
+Xato bo'lsa 15 soniya kutadi va **hech qanday xabar chiqarmaydi** — kassirning
+ekraniga proksi uzilishi haqida yozish keraksiz, holat ko'rsatkichi allaqachon
+aytib turibdi.
+
+**Ochiq oyna o'zi yangilanadi.** `change` hodisasi endi "yuklab oling" degan
+xabar emas, dvigatelga buyruq. Yuklashdan keyin `_reload_current_page()`
+ishlaydi. Kerakli ekranlarning **hammasi** `QStackedWidget` ichidagi sahifa —
+sotuv tafsiloti, mahsulotlar, hisobotlar, moliya, qarzlar, harajatlar — ya'ni
+ko'rinib turgani darhol, qolganlari ochilganda yangilanadi (`_switch_page`
+har safar `load_data()` chaqiradi).
+
+**Internetsiz pul yozib bo'lmaydi.** `db.require_online()` to'qqizta joyda:
+sotuvni yakunlash, tasdiqlash, qaytarish, sotuv yozuvini o'chirish, harajat,
+qarz berish/to'lash, ta'minotchi qarzi/to'lovi. Ko'rish, qidirish, hisobot —
+hammasi ishlayveradi. Aloqa holati noma'lum bo'lsa **onlayn** deb hisoblanadi,
+ya'ni tekshiruv o'zi to'sqinlik qilmaydi.
+
+**Sync tugmasi joyida qoladi** — zaxira yo'l sifatida. U faqat 6-bosqichda
+olib tashlanadi.
+
+### Testlar
+
+`app/tests/test_auto_sync.py` (8 ta) va `app/tests/test_sync_engine.py` (7 ta):
+
+- birinchi yuklash to'liq, keyingisi faqat o'zgarishni so'rashi
+- tashlangan qator bo'lsa belgi oldinga surilmasligi
+- aylanish avval olib keyin berishi
+- yuboradigan narsa bo'lmasa yubormasligi
+- konflikt bir marta qayta o'qib urinishi
+- 450 qator 100 talik bo'laklarda qo'llanishi
+- dvigatel bekorga ishlamasligi, ishlashi kerak bo'lganda ishlashi
+- uzilishda jim qolib kutishi, konfliktni tugmaga topshirishi
+- internetsiz pul yozuvlari rad etilishi, ko'rish ishlayverishi
+
+Jami **169 ta test** o'tyapti.
+
+### Nima qilinmadi
+
+Bu bosqichda ham sinxronizatsiya hali **butun qator** darajasida ishlaydi:
+ikki qurilma bitta qatorni bir vaqtda o'zgartirsa, oxirgisi yutadi. Undan
+himoya — **4-bosqich**.
 
 ---
 
