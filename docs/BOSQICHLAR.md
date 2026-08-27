@@ -568,6 +568,47 @@ Jami **186 ta desktop + 56 ta server testi** o'tyapti.
 
 ## Bosqichlardan tashqari tuzatishlar
 
+### Yuklab olish soat bo'yicha emas, tartib raqami bo'yicha (1.2.3)
+
+**Muammo.** Ikkita qurilma yonma-yon turib, ikkalasi ham "Onlayn" deb ko'rsatib,
+butunlay boshqa mahsulotlar ro'yxatini ko'rsatayotgan edi.
+
+**Sababi.** Yuklab olish serverdan "shu paytdan keyin nima o'zgardi" deb
+so'rardi. Server esa qatorga *tranzaksiya ochilgan* paytni yozadi, lekin qator
+faqat *tranzaksiya yopilganda* ko'rinadi. Shu ikkisining orasida ishlagan yuklab
+olish "hech narsa o'zgarmagan" degan javob oladi va o'z belgisini o'sha paytdan
+oldinga suradi. Natijada o'sha qatorlar belgidan orqada qolib ketadi va ularni
+boshqa hech qachon hech kim so'ramaydi. Jimgina, xatosiz, abadiy.
+
+**Yechim.** Har bir qator endi accountning o'zgarishlar tarixidagi o'z raqamini
+olib yuradi (`user_records.change_seq`). Raqam `generation` bilan bir xil
+qulf ostida beriladi, ya'ni **yopilish tartibida** tarqatiladi: kim kichik
+raqamni olsa, o'sha birinchi yopiladi. Shuning uchun "mening raqamimdan
+yuqorisi" degan savol hech qachon biror qatorni sakrab o'tolmaydi.
+
+- Server: `0010_user_record_change_seq` migratsiyasi, `GET /sync/pull?since_seq=`
+- Mijoz: `sync_state.pull_cursor`; eski serverda soat bo'yicha, lekin 3 daqiqa
+  zapas bilan so'raydi
+- Eski qatorlarning raqami `0`, ya'ni yangilanishdan keyingi birinchi yuklab
+  olish to'liq nusxa bo'ladi — bu aynan kerak bo'lgan narsa
+
+### Har 15 daqiqada to'liq solishtirish
+
+Yuborish navbati "shu yerda nima o'zgardi"ni, kursor "u yerda nima
+o'zgardi"ni olib yuradi. Ikkalasi ham **umuman yozib olinmagan** farqni
+ko'rmaydi: navbat yozuvi krash paytida yo'qolsa, baza zaxiradan tiklansa yoki
+xatoli versiya yozgan bo'lsa — o'sha qator boshqa qurilmalar uchun mavjud emas
+va buni hech narsa sezmaydi.
+
+Shuning uchun `sync_service.reconcile_full()` vaqti-vaqti bilan farqlarni
+tashishni to'xtatib, butun manzarani solishtiradi: serverdagi hammasini oladi,
+keyin lokal jadvallarni aylanib chiqib, server umuman eshitmagan qatorlarni
+navbatga qaytaradi. Ajralib qolgan ikki qurilma shundan keyin o'zi qayta
+birlashadi.
+
+Ishga tushganda birinchi turda, keyin har `FULL_RECONCILE_SECONDS = 900`.
+
+
 ### Sync tugmasi butunlay olib tashlandi
 
 Yuqoridagi tugma o'rniga **bosilmaydigan holat nuqtasi** qoldi: yashil —
