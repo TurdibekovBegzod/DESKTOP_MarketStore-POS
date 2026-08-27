@@ -317,10 +317,28 @@ class UpdaterDialog(QDialog):
             except (OSError, ValueError) as exc:
                 self._on_download_error(str(exc))
                 QMessageBox.warning(self, self._tr("Xatolik"), str(exc))
+            else:
+                # The application does not close itself any more: the installer
+                # does that when it is ready. Say so, and stop the button from
+                # starting a second installer on top of the first.
+                self._show_installer_started()
         elif self.update_data and self.update_data.get("has_update"):
             self._start_download()
         else:
             self._start_check()
+
+    def _show_installer_started(self):
+        opened = self._tr("O\u2019rnatuvchi ochildi")
+        self.status_badge.setText("\u2705 " + opened)
+        self.status_badge.setStyleSheet(
+            "background:#ecfdf5;color:#047857;border:1px solid #a7f3d0;"
+        )
+        self.progress_detail_lbl.setText(self._tr(
+            "Windows ruxsat so\u2019rasa, \u201cHa\u201d deb javob bering. "
+            "Dastur o\u2019rnatish boshlanganda o\u2019zi yopiladi \u2014 uni qo\u2019lda yopmang."
+        ))
+        self.primary_btn.setEnabled(False)
+        self.secondary_btn.setText(self._tr("Yopish"))
 
     def _on_secondary_clicked(self):
         if self.downloader_thread and self.downloader_thread.isRunning():

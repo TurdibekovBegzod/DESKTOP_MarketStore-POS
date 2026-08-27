@@ -11,8 +11,7 @@
 
 ## Holat
 
-**Jami 7 ta bosqich: 0 dan 6 gacha. Beshtasi tugadi, ikkitasi qoldi**
-(4-bosqich hali qilinmagan, 6-bosqich unga bog'liq).
+**Jami 7 ta bosqich: 0 dan 6 gacha. Hammasi tugadi.**
 
 | Bosqich | Mazmuni | Holat | Versiya | Taxminiy vaqt |
 |---|---|---|---|---|
@@ -20,9 +19,9 @@
 | **1** | Yagona identifikator (UUID) | ✅ Tugadi, chiqarildi | `v1.1.5` | — |
 | **2** | Pul raqamlarining asosi (o'zgarmas jurnal) | ✅ Tugadi | commit qilinmagan | — |
 | **3** | Real-time (Telegram kabi) | ✅ Tugadi | commit qilinmagan | — |
-| **4** | Eskirgan ma'lumotdan himoya | ⬜ Boshlanmagan | — | ~1 hafta |
+| **4** | Eskirgan ma'lumotdan himoya | ✅ Tugadi | commit qilinmagan | — |
 | **5** | Qurilmalararo bildirishnoma | ✅ Tugadi | commit qilinmagan | — |
-| **6** | Sync tugmasini olib tashlash | ⬜ Boshlanmagan | — | ~1 hafta |
+| **6** | Sync tugmasini olib tashlash | ✅ Tugadi | commit qilinmagan | — |
 
 Tartib muhim: **avval raqamlarni to'g'ri qilamiz (2), keyin ularni tez
 tarqatamiz (3)**. Teskarisi qilinsa, noto'g'ri raqam bir zumda hamma
@@ -394,55 +393,54 @@ himoya — **4-bosqich**.
 
 ---
 
-## 4-bosqich — Eskirgan ma'lumotdan himoya ⬜
+## 4-bosqich — Eskirgan ma'lumotdan himoya ✅
 
-Sizning talabingiz: *"B qurilma hali xabar olmagan bo'lsa nima bo'ladi"*.
+Ikki kassir bir vaqtda ishlayapti. Biri mahsulotni sotdi. Ikkinchisining
+ekranida hali eski qoldiq turibdi va u mahsulotni tahrirlab yubordi — natijada
+sotuv qoldiqdan **yo'qolardi**.
 
-### Muammo
+### Nima qilindi
 
-Ikki kassir bir vaqtda ishlayapti. A da mahsulot sotildi, qoldiq 3 ga tushdi.
-B hali buni olmagan — unda 5 ko'rinib turibdi. B kassir mahsulotni tahrirlaydi
-va **o'zi ko'rgan holatni** yuboradi → A ning sotuvi qoldiqdan yo'qoladi.
-Hozir bunga hech qanday to'siq yo'q.
+**Qurilma qaysi nusxadan ish qilayotganini aytadi.** Server har yozuv uchun
+`sync_version` ni **doim** saqlab kelgan va uni har `/sync/pull` javobida
+qaytargan — mijoz esa uni bir marta ham o'qimagan. Endi:
 
-### Nimasi allaqachon tayyor
+1. Yuklashda har qatorning versiyasi `sync_versions` jadvaliga yoziladi
+2. O'zgartirish yuborilganda `expected_version` bilan ketadi — *"men ko'rgan
+   nusxani o'zgartiryapman"*
+3. Server solishtiradi: agar qator o'shandan beri o'zgargan bo'lsa — **o'sha
+   bitta qator** rad etiladi
 
-Server har yozuv uchun `user_records.sync_version` saqlaydi: qo'shilganda `1`,
-har o'zgarishda `+1`. U `RecordOut` sxemasida bor, ya'ni **har `/sync/pull`
-javobida qaytadi**. Lekin **mijoz uni umuman o'qimaydi** — `api_client.py`,
-`sync_service.py`, `database.py` da bu so'z bir marta ham uchramaydi.
+**409 emas, qisman muvaffaqiyat.** Butun to'plamni rad etish bitta eskirgan
+mahsulot tahririni **muvaffaqiyatsiz sotuvga** aylantirardi. Endi qolgan
+yozuvlar o'tadi, rad etilgani javobning `rejected` ro'yxatida qaytadi.
 
-### Qilinadigan ish
+**Sotuv hech qachon rad etilmaydi.** Server ko'rmagan qator hech qanday
+versiyaga ega emas, ya'ni u bilan tortishadigan narsa yo'q — shuning uchun
+`expected_version` yuborilmaydi va qator so'zsiz qo'shiladi. Bu qoida
+kodning tuzilishidan kelib chiqadi, alohida shart emas.
 
-1. Mijoz har yozuv uchun "men ko'rgan versiya" ni saqlaydi
-2. O'zgartirish yuborganda uni ham jo'natadi — `expected_version`
-3. Server solishtiradi; o'zinikida yangiroq versiya bo'lsa **o'sha bitta
-   qatorni** rad etadi
-4. **409 emas, qisman muvaffaqiyat** — qolgan yozuvlar o'tadi, rad etilgani
-   javobning `rejected` ro'yxatida qaytadi
-5. Dastur *"Bu mahsulot boshqa qurilmada o'zgardi (sotildi)"* deb ko'rsatadi va
-   o'sha qatorning yangi holatini yuklab oladi
+**Rad etilgandan keyin.** Mijoz darhol yuklab oladi (serverning nusxasi
+o'rnatiladi) va foydalanuvchiga aytadi: *"Bu yozuv boshqa qurilmada o'zgargan
+edi, shuning uchun sizning o'zgartirishingiz saqlanmadi. Yangi holat
+ko'rsatildi."*
 
-### Eng muhim qoida
+**Yuborilgandan keyin eslab qolingan versiya unutiladi** — u endi eskirgan,
+keyingi yuklash yangisini beradi.
 
-**Sotuv va qaytarish hech qachon rad etilmaydi.** Ular yangi qator qo'shish —
-to'qnashadigan narsa yo'q, ayniqsa identifikator UUID bo'lgandan keyin. Faqat
-**tahrirlash** rad etilishi mumkin: narx, qoldiq, kassir ma'lumoti, sozlama.
-Ya'ni kassir sotuv qilayotganda hech qachon "rad etildi" xabarini ko'rmaydi.
+### Testlar
 
-### Fayllar
+`app/tests/test_stale_write_protection.py` (6 ta) va
+`api/tests/test_stale_write_protection.py` (5 ta):
 
-| Fayl | Nima |
-|---|---|
-| `api/app/routers/sync.py` | `sync_version` bo'yicha shartli upsert |
-| `api/app/schemas.py` | `expected_version`, javobda `rejected` |
-| `app/database.py` | ko'rilgan versiyani saqlash |
-| `app/sync_service.py` | versiyani yuborish, rad etilganini qaytarish |
-| `app/ui/main_window.py` | rad etish xabari + o'sha qatorni qayta yuklash |
-
-**Bog'liqlik:** 3-bosqichdan keyin. Real-time bo'lmasa rad etish tez-tez sodir
-bo'ladi va bezovta qiladi; real-time bilan qurilmalar deyarli har doim yangi
-holatda bo'ladi.
+- yuklangan har qatorning versiyasi eslab qolinishi
+- o'zgartirish qaysi versiyadan qilinganini aytishi
+- yangi qator hech qanday versiya da'vo qilmasligi *(sotuv rad etilmasligining sababi)*
+- yuborilgandan keyin versiya unutilishi
+- rad etilgan qator serverning nusxasi bilan almashtirilib, xabar berilishi
+- to'plamning qolgan qismi baribir o'tishi
+- serverda: versiya to'g'ri kelsa yozilishi, eskirgan bo'lsa rad etilishi,
+  versiyasiz qator **doim** yozilishi
 
 ---
 
@@ -517,49 +515,93 @@ Jami **177 ta test** o'tyapti.
 
 ---
 
-## 6-bosqich — Sync tugmasini olib tashlash ⬜
+## 6-bosqich — Sync tugmasini olib tashlash ✅
 
-Sizning beshinchi talabingiz.
+"Olish" va "Yuborish" tugmalari yo'q. O'rniga holat oynasi qoldi.
 
-### Nega eng oxirida
+### Nima qilindi
 
-Hozir "Yuborish/Olish" tugmasi shunchaki qulaylik emas — u **409 konfliktni hal
-qiladigan yagona yo'l**. Server "sizning nusxangiz eskirgan" desa,
-`ConflictDialog` ochiladi va siz qaysi tomon yutishini tanlaysiz. Uni olib
-tashlashdan oldin o'rniga 4-bosqich (qator darajasidagi rad etish) kelishi
-kerak.
+**Butun baza darajasidagi konflikt tekshiruvi olib tashlandi.** Account bo'yicha
+bitta hisoblagich (`generation`) *"men oxirgi qaraganimdan beri umuman nimadir
+o'zgardimi"* deb so'raydi. Bu savol konflikt "ikki nusxadan birini tanlash"
+degani bo'lganda to'g'ri edi. Endi har qatorning UUID si bor va o'zi qo'shiladi
+— **ikki qurilmaning turli qatorlarni yozishi konflikt emas**. Avtomatik
+sinxronizatsiya qator bo'yicha qo'shiladi; hisoblagich faqat qo'lda
+almashtirish amallarida qoladi, chunki ular haqiqatan butun nusxani tanlaydi.
 
-Tartib: **0 → 1 → 3 → 4 → 6**.
+**`ConflictDialog` o'chirildi.** Uning o'rnida — agar baribir konflikt chiqsa —
+xabar chiqadi va holat oynasiga yo'naltiradi.
 
-### Qilinadigan ish
+**`sync_quarantine` jadvali.** Bu eng muhim qism: tugma bo'lmasa,
+sinxronizatsiya **jimgina** to'xtab qolishi mumkin edi. Endi qo'llab
+bo'lmagan yozuv **tashlanmaydi** — chetga olinadi, sababi bilan saqlanadi, har
+yuklashda qayta urinib ko'riladi va holat oynasida ko'rinadi. Sababi bartaraf
+bo'lgan zahoti (masalan uni tilga oluvchi sotuv kelganda) o'zi joyiga tushadi.
 
-1. **`SyncDialog` va `ConflictDialog` o'chiriladi.**
-   ⚠️ Bitta ehtiyot: hozir `SyncDialog` ichida admin uchun *"Serverni shu
-   qurilmadagiga almashtirish"* tugmasi ham bor — unga yangi joy kerak
-   (Sozlamalar ichiga).
-2. **Import qatorma-qator xatoga chidamli bo'ladi** — `sync_quarantine`
-   jadvali. Bu eng muhim qism: tugma bo'lmasa, sinxronizatsiya **jimgina**
-   to'xtab qolishi va siz bilmay qolishingiz mumkin.
+**O'qilgan joy belgisi endi to'xtamaydi.** Ilgari qo'llanmagan bitta yozuv
+belgini muzlatib qo'yardi va undan keyingi hamma yuklash o'shanda tiqilib
+qolardi. Karantin borligi uchun endi hech narsa yo'qolmaydi va belgi oldinga
+suriladi.
 
-   Bu ishning bir qismi **1-bosqichda allaqachon qilindi**: nom bo'yicha
-   to'qnashuv butun yuklashni to'xtatmaydi (`_clear_conflicting_unique_rows`),
-   rad etilgan va tashlangan yozuvlar sanalib `sync_state` ga yoziladi
-   (`last_pull_rejected`, `last_pull_skipped_legacy`). Hali **karantin jadvali
-   yo'q** — ya'ni rad etilgan yozuvni ko'rish yoki qayta urinish imkoni yo'q.
-3. **O'rniga holat ko'rsatkichi:** onlayn / yangilanmoqda / oflayn.
+**Holat oynasi:** sinxron / yuborilmagan o'zgarish bor / offline, yuborilmagan
+sonlar, va karantindagi yozuvlar soni. Admin uchun ikkita tiklash amali
+qoladi — ular sinxronizatsiya emas, ikki nusxadan birini tanlash.
 
-### Nega butunlay olib tashlab bo'lmaydi
+### Nega tugma butunlay yo'qolmadi
 
-Sizning to'rtinchi talabingizdan kelib chiqadi: internetsiz pul yozuvlari
-bloklanadi. Kassir internetsiz qolganini **bilishi kerak**, aks holda "nega
-sotuv qo'shilmayapti" deb turaveradi. Shuning uchun tugma o'rniga bosilmaydigan,
-faqat ko'rsatadigan kichik holat belgisi qoladi.
+Sizning to'rtinchi talabingizdan: internetsiz pul yozuvlari bloklanadi. Kassir
+internetsiz qolganini **bilishi kerak**, aks holda "nega sotuv qo'shilmayapti"
+deb turaveradi. Shuning uchun bosiladigan tugma emas, ko'rsatadigan belgi
+qoldi.
+
+### Testlar
+
+`test_sync_dialog_permissions.py` yangilandi: kassir uchun bosadigan narsa
+qolmagani, adminda ikkita tiklash amali borligi, kassir to'g'ridan-to'g'ri
+chaqirsa ham rad etilishi. `test_auto_sync.py` ga karantin testlari qo'shildi:
+qo'llab bo'lmagan yozuv **yo'qolmasligi**, va sababi bartaraf bo'lganda o'zi
+joyiga tushishi.
+
+Jami **186 ta desktop + 56 ta server testi** o'tyapti.
 
 ---
 
 ## Bosqichlardan tashqari tuzatishlar
 
 Bular reja bosqichi emas — ishlatish paytida chiqqan muammolar.
+
+### Yangilash o'rnatilmay, dastur o'chib qolardi
+
+**Muammo.** Dastur ochiq turganda "Yangilash" bosilsa, yangi versiya yuklanardi,
+keyin dastur o'chib ketardi va **o'rnatish bekor bo'lardi**.
+
+**Sabab ikkita edi:**
+
+1. `apply_and_restart()` o'rnatuvchini ishga tushirib, **o'sha zahoti**
+   `app.quit()` chaqirardi. Lekin o'rnatuvchi administrator huquqini so'raydi
+   (`RequestExecutionLevel admin`), ya'ni Windows ruxsat oynasini ko'rsatishi
+   kerak. O'sha oyna **so'ragan jarayonga** tegishli. Dastur bir necha
+   millisekunddan keyin yopilib, so'rovni o'ldirardi — natijada oyna
+   ko'rinmasdan, o'rnatish boshlanmasdan hammasi tugardi.
+2. `installer.nsi` da `taskkill /F /IM ... /T` — `/T` butun jarayon daraxtini
+   o'ldiradi. Agar o'rnatuvchi qandaydir yo'l bilan dasturning bolasi bo'lib
+   qolsa, u **o'zini ham** o'ldirardi.
+
+**Yechim.** Dastur endi **umuman yopilmaydi**. O'rnatuvchining o'zi birinchi
+qadamda dasturni yopadi — aynan fayllarni almashtirishga tayyor bo'lgan
+paytda. Foydalanuvchi o'rnatuvchini bekor qilsa, dastur joyida qolaveradi
+(ilgari yopilib ketardi va hech narsa o'rnatilmasdi).
+
+`installer.nsi` da: `/T` olib tashlandi; avval **muloyim** `taskkill` (kassir
+sotuvni tugatishi uchun), 1.5 soniya kutish, keyin majburiy `taskkill` va yana
+1 soniya — fayl qulflari bo'shashi uchun.
+
+Oynada endi aniq yozuv chiqadi: *"Windows ruxsat so'rasa, 'Ha' deb javob
+bering. Dastur o'rnatish boshlanganda o'zi yopiladi — uni qo'lda yopmang."*
+Tugma ham o'chiriladi, ikkinchi o'rnatuvchi ochilmasligi uchun.
+
+Testlar: `test_updater.py` — dastur yopilmasligi, o'rnatuvchi hech qachon
+dasturning bolasi bo'lmasligi, buzuq fayl umuman ishga tushirilmasligi.
 
 ### Birinchi ishga tushirishda serverdagi nusxa olinadi
 

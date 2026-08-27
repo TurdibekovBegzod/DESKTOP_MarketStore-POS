@@ -151,6 +151,9 @@ class RecordIn(BaseModel):
     local_updated_at: str | None = Field(default=None, max_length=40)
     deleted_at: str | None = Field(default=None, max_length=40)
     source_device_key: str | None = Field(default=None, max_length=120)
+    # "I am changing the row as I last saw it." Left unset for a row the sender
+    # believes is new, which is why a sale can never be refused.
+    expected_version: int | None = Field(default=None, ge=0)
 
     @field_validator("table_name")
     @classmethod
@@ -210,10 +213,20 @@ class PushRequest(BaseModel):
     applied_purge_generation: int | None = Field(default=None, ge=0)
 
 
+class RejectedRecordOut(BaseModel):
+    """One row the server would not overwrite, and what it holds instead."""
+
+    table_name: str
+    local_id: str
+    expected_version: int | None = None
+    server_version: int | None = None
+
+
 class PushResponse(BaseModel):
     saved: int
     batch_id: int
     generation: int = 0
+    rejected: list[RejectedRecordOut] = Field(default_factory=list)
 
 
 class PullResponse(BaseModel):

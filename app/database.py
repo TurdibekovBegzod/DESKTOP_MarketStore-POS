@@ -2215,6 +2215,20 @@ def get_user_api_token(user_id):
         return row.value if row and row.value else None
 
 
+def _attach_expected_versions(conn, records):
+    """Say which version of each row this device was working from.
+
+    Only for an ordinary incremental push. A full re-upload follows a server
+    reset, where there is no earlier version to disagree with.
+    """
+    known = _known_row_versions(conn)
+    for record in records:
+        record["expected_version"] = known.get(
+            (record.get("table_name"), str(record.get("local_id")))
+        )
+    return records
+
+
 def export_sync_records(incremental=False, with_watermark=False):
     """Collect the records to push.
 
@@ -2286,6 +2300,7 @@ def export_sync_records(incremental=False, with_watermark=False):
                         "deleted_at": tombstone["deleted_at"],
                         "source_device_key": device_key,
                     })
+            _attach_expected_versions(conn, records)
             if with_watermark:
                 return records, {"up_to_seq": max_seq, "tombstone_ids": tombstone_ids}
             return records
@@ -2339,6 +2354,10 @@ def export_sync_records(incremental=False, with_watermark=False):
                     "deleted_at": tombstone["deleted_at"],
                     "source_device_key": device_key,
                 })
+    # A full export follows a server reset, where no earlier version exists to
+    # disagree with, so every row is sent unconditionally.
+    for record in records:
+        record["expected_version"] = None
     # A full export replaces everything, so the whole queue is superseded.
     if with_watermark:
         return records, {"up_to_seq": None, "tombstone_ids": None}
@@ -2394,10 +2413,164 @@ def _clear_conflicting_unique_rows(conn, table_name, filtered, pk_col):
 IMPORT_CHUNK_SIZE = 200
 
 
+def _ensure_sync_versions_table(conn):
+    conn.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS sync_versions (
+            table_name TEXT NOT NULL,
+            local_id TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            PRIMARY KEY (table_name, local_id)
+        )
+    """)
+
+
+def _remember_row_version(conn, table_name, local_id, version):
+    """Note which version of a row this device last saw.
+
+    Sent back with the next change to that row so the server can tell whether
+    we were looking at the current copy. Without it, a product edited from a
+    screen that still showed yesterday's stock would quietly overwrite the
+    sales made in the meantime.
+    """
+    if version is None:
+        return
+    try:
+        version = int(version)
+    except (TypeError, ValueError):
+        return
+    _ensure_sync_versions_table(conn)
+    conn.exec_driver_sql(
+        "INSERT INTO sync_versions (table_name, local_id, version) VALUES (?, ?, ?) "
+        "ON CONFLICT(table_name, local_id) DO UPDATE SET version=excluded.version",
+        (str(table_name), str(local_id), version),
+    )
+
+
+def _forget_row_versions(conn, pairs):
+    """After we send a row, what we saw is out of date until the next download."""
+    if not pairs:
+        return
+    _ensure_sync_versions_table(conn)
+    for table_name, local_id in pairs:
+        conn.exec_driver_sql(
+            "DELETE FROM sync_versions WHERE table_name = ? AND local_id = ?",
+            (str(table_name), str(local_id)),
+        )
+
+
+def _known_row_versions(conn, table_name=None):
+    _ensure_sync_versions_table(conn)
+    rows = conn.exec_driver_sql(
+        "SELECT table_name, local_id, version FROM sync_versions"
+    ).fetchall()
+    return {(row[0], str(row[1])): int(row[2]) for row in rows}
+
+
+def get_known_row_version(table_name, local_id):
+    with _get_engine().begin() as conn:
+        _ensure_sync_versions_table(conn)
+        row = conn.exec_driver_sql(
+            "SELECT version FROM sync_versions WHERE table_name = ? AND local_id = ?",
+            (str(table_name), str(local_id)),
+        ).fetchone()
+    return int(row[0]) if row else None
+
+
+def forget_row_versions(pairs):
+    with _get_engine().begin() as conn:
+        _forget_row_versions(conn, pairs)
+
+
+def _ensure_sync_quarantine_table(conn):
+    conn.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS sync_quarantine (
+            table_name TEXT NOT NULL,
+            local_id TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            first_seen_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY (table_name, local_id)
+        )
+    """)
+
+
+def _quarantine_record(conn, record, reason):
+    """Keep a record we could not apply instead of discarding it.
+
+    Without the sync button there is nobody to notice that a download stopped
+    working, so a record that cannot be applied must not simply vanish: it is
+    set aside, retried on every later download, and shown in the sync panel.
+    """
+    _ensure_sync_quarantine_table(conn)
+    now = _utc_now()
+    table_name = str(record.get("table_name") or "")
+    local_id = str(record.get("local_id") or "")
+    if not table_name or not local_id:
+        return
+    conn.exec_driver_sql(
+        "INSERT INTO sync_quarantine (table_name, local_id, payload, reason, first_seen_at, last_seen_at, attempts) "
+        "VALUES (?, ?, ?, ?, ?, ?, 1) "
+        "ON CONFLICT(table_name, local_id) DO UPDATE SET "
+        "payload=excluded.payload, reason=excluded.reason, last_seen_at=excluded.last_seen_at, "
+        "attempts=sync_quarantine.attempts + 1",
+        (table_name, local_id, json.dumps(record, default=str), str(reason), now, now),
+    )
+
+
+def _release_quarantined_record(conn, table_name, local_id):
+    _ensure_sync_quarantine_table(conn)
+    conn.exec_driver_sql(
+        "DELETE FROM sync_quarantine WHERE table_name = ? AND local_id = ?",
+        (str(table_name), str(local_id)),
+    )
+
+
+def get_sync_quarantine(limit=50):
+    """Records this device could not apply, newest first."""
+    with _get_engine().begin() as conn:
+        _ensure_sync_quarantine_table(conn)
+        rows = conn.exec_driver_sql(
+            "SELECT table_name, local_id, reason, attempts, first_seen_at, last_seen_at "
+            "FROM sync_quarantine ORDER BY last_seen_at DESC LIMIT ?",
+            (int(limit),),
+        ).mappings().all()
+    return [Row(dict(row)) for row in rows]
+
+
+def count_sync_quarantine():
+    with _get_engine().begin() as conn:
+        _ensure_sync_quarantine_table(conn)
+        return int(conn.exec_driver_sql("SELECT COUNT(*) FROM sync_quarantine").scalar() or 0)
+
+
+def _pending_quarantined_records():
+    """What was set aside earlier, to be tried again with the next download."""
+    with _get_engine().begin() as conn:
+        _ensure_sync_quarantine_table(conn)
+        rows = conn.exec_driver_sql("SELECT payload FROM sync_quarantine").fetchall()
+    records = []
+    for (payload,) in rows:
+        try:
+            record = json.loads(payload)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    return records
+
+
 def import_sync_records(records, chunk_size=IMPORT_CHUNK_SIZE):
     if not records:
         return 0
     counters = {"imported": 0, "skipped_legacy": 0, "rejected": 0}
+    held = _pending_quarantined_records()
+    if held:
+        seen = {(r.get("table_name"), str(r.get("local_id"))) for r in records}
+        records = list(records) + [
+            r for r in held if (r.get("table_name"), str(r.get("local_id"))) not in seen
+        ]
     touched_tables = set()
     touched_sales = set()
     engine = _get_engine()
@@ -2435,6 +2608,7 @@ def import_sync_records(records, chunk_size=IMPORT_CHUNK_SIZE):
                     incoming_id = data.get("id", record.get("local_id"))
                     if incoming_id is not None and not is_row_uuid(incoming_id):
                         counters["skipped_legacy"] += 1
+                        _quarantine_record(conn, record, "eski identifikator")
                         continue
                 columns = _table_columns(conn, table_name)
                 filtered = {key: value for key, value in data.items() if key in columns}
@@ -2481,8 +2655,9 @@ def import_sync_records(records, chunk_size=IMPORT_CHUNK_SIZE):
                         with conn.begin_nested():
                             _clear_conflicting_unique_rows(conn, table_name, filtered, pk_col)
                             conn.exec_driver_sql(statement, values)
-                    except IntegrityError:
+                    except IntegrityError as exc:
                         counters["rejected"] += 1
+                        _quarantine_record(conn, record, str(exc.orig or exc)[:200])
                         continue
                 if _has_table(conn, "sync_tombstones"):
                     conn.exec_driver_sql(
@@ -2490,6 +2665,10 @@ def import_sync_records(records, chunk_size=IMPORT_CHUNK_SIZE):
                         (table_name, str(record.get("local_id") or "")),
                     )
                 counters["imported"] += 1
+                _remember_row_version(
+                    conn, table_name, record.get("local_id"), record.get("sync_version")
+                )
+                _release_quarantined_record(conn, table_name, record.get("local_id"))
                 touched_tables.add(table_name)
                 if table_name in ("sales", "sale_items", "sale_returns"):
                     sale_key = filtered.get("sale_id") or filtered.get("id")

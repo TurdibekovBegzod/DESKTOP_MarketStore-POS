@@ -8,7 +8,7 @@
 ; General Definitions
 !define PRODUCT_NAME "MarketStore POS"
 !ifndef PRODUCT_VERSION
-!define PRODUCT_VERSION "1.1.8"
+!define PRODUCT_VERSION "1.1.9"
 !endif
 !define PRODUCT_PUBLISHER "MarketStore Team"
 !define PRODUCT_WEB_SITE "https://marketstore.uz"
@@ -56,9 +56,20 @@ Section "MainSection" SEC01
     SetOutPath "$INSTDIR"
     SetOverwrite on
 
-    ; Close running instance if any
-    DetailPrint "Eski dastur nusxasi tekshirilmoqda..."
-    nsExec::Exec 'taskkill /F /IM "${PRODUCT_EXE}" /T'
+    ; Close the running application.
+    ;
+    ; Ask first, so a cashier mid-sale gets the chance to finish rather than
+    ; losing the window from under them. /T is deliberately absent: it kills
+    ; the whole process tree, and if this installer were ever launched as a
+    ; child of the application it would take itself down with it -- which is
+    ; exactly how the update used to end in "cancelled".
+    DetailPrint "Eski dastur nusxasi yopilmoqda..."
+    nsExec::Exec 'taskkill /IM "${PRODUCT_EXE}"'
+    Sleep 1500
+    ; Anything still holding the files after the polite request has to go, or
+    ; the copy below fails on a locked executable.
+    nsExec::Exec 'taskkill /F /IM "${PRODUCT_EXE}"'
+    Sleep 1000
 
     ; Copy all built files from dist folder
     File /r "..\dist\MarketStore-POS\*.*"
@@ -91,7 +102,7 @@ SectionEnd
 ; -------------------------------------------------------------------------
 Section Uninstall
     ; Terminate running app
-    nsExec::Exec 'taskkill /F /IM "${PRODUCT_EXE}" /T'
+    nsExec::Exec 'taskkill /F /IM "${PRODUCT_EXE}"'
 
     ; Remove Shortcuts
     Delete "$DESKTOP\MarketStore POS.lnk"

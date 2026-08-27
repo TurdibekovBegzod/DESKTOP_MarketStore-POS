@@ -83,14 +83,44 @@ class AutoSyncTest(unittest.TestCase):
         self.assertEqual(seen[0], None)
         self.assertEqual(seen[1], "2026-08-27 10:00:00")
 
-    def test_the_position_does_not_move_past_a_record_that_was_dropped(self):
+    def test_a_record_that_cannot_be_applied_is_set_aside_not_lost(self):
+        """Nobody is watching the sync any more, so nothing may quietly vanish."""
         seen = []
         with self._pull_patch([self._legacy_record()], "2026-08-27 10:00:00", seen), \
              patch.object(api_client, "get_sync_state",
                           return_value={"generation": 3, "purge_generation": 0}):
             sync_service.pull_server_changes(self.owner, incremental=True)
 
-        self.assertIsNone(db.get_pull_watermark())
+        held = db.get_sync_quarantine()
+        self.assertEqual(len(held), 1)
+        self.assertEqual(held[0]["local_id"], "77")
+        # The marker still moves: one unusable row must not stop every later
+        # download behind it.
+        self.assertEqual(db.get_pull_watermark(), "2026-08-27 10:00:00")
+
+    def test_a_record_set_aside_is_tried_again_and_released_when_it_fits(self):
+        blocked = {
+            "table_name": "sale_items",
+            "local_id": db.stable_row_id("sale_items", "orphan"),
+            "data": {
+                "id": db.stable_row_id("sale_items", "orphan"),
+                "sale_id": db.stable_row_id("sales", "later"),
+                "product_id": None, "quantity": 1, "price": 10, "subtotal": 10,
+            },
+        }
+        db.import_sync_records([blocked])
+        self.assertEqual(db.count_sync_quarantine(), 1)
+
+        # The sale it belongs to arrives on the next download; the held row
+        # goes in with it, without anyone asking for it again.
+        sale_id = db.stable_row_id("sales", "later")
+        db.import_sync_records([{
+            "table_name": "sales", "local_id": sale_id,
+            "data": {"id": sale_id, "total": 10, "paid": 10, "discount": 0,
+                     "payment_method": "naqd", "created_at": "2030-01-01 10:00:00"},
+        }])
+
+        self.assertEqual(db.count_sync_quarantine(), 0)
 
     # -- one automatic round ---------------------------------------------
     def test_a_round_takes_before_it_gives(self):

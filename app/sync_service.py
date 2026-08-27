@@ -172,7 +172,7 @@ def reconcile_after_upgrade(user):
 
 
 @_one_at_a_time
-def push_local_changes(user, batch_size=1000, incremental=True, force=False):
+def push_local_changes(user, batch_size=1000, incremental=True, force=False, guard_generation=True):
     if not force:
         settled = reconcile_after_upgrade(user)
         if settled is not None:
@@ -215,7 +215,13 @@ def push_local_changes(user, batch_size=1000, incremental=True, force=False):
         }
     records, watermark = db.export_sync_records(incremental=incremental, with_watermark=True)
     device_key = db.get_sync_device_key()
-    expected = None if force else db.get_sync_generation()
+    # The account-wide counter asks "did anything at all change since I last
+    # looked", which was the right question when a conflict meant choosing one
+    # whole database over the other. Every row now carries a UUID and merges on
+    # its own, so two devices writing different rows is not a conflict at all.
+    # Automatic sync therefore merges per row; the manual replace actions keep
+    # the counter, because those really do decide between whole copies.
+    expected = None if (force or not guard_generation) else db.get_sync_generation()
 
     if not records:
         # Nothing to send. Deliberately do NOT adopt the server's counter here:
@@ -227,6 +233,7 @@ def push_local_changes(user, batch_size=1000, incremental=True, force=False):
 
     total_saved = 0
     last_batch_id = None
+    rejected = []
     # `guard` is the value each chunk asserts against; `seen` is the counter the
     # server reported back. They differ once we start forcing.
     guard = expected
@@ -245,6 +252,13 @@ def push_local_changes(user, batch_size=1000, incremental=True, force=False):
             )
             total_saved += result.get("saved", 0)
             last_batch_id = result.get("batch_id")
+            for row in result.get("rejected") or []:
+                rejected.append(dict(row))
+            # What we sent is no longer what we last saw, so the remembered
+            # version is dropped until the next download restores it.
+            db.forget_row_versions([
+                (record.get("table_name"), record.get("local_id")) for record in chunk
+            ])
             returned = result.get("generation")
             if returned:
                 seen = int(returned)
@@ -282,6 +296,7 @@ def push_local_changes(user, batch_size=1000, incremental=True, force=False):
         "sent": len(records),
         "saved": total_saved,
         "batch_id": last_batch_id,
+        "rejected": rejected,
         "generation": generation if generation is not None else db.get_sync_generation(),
     }
 
@@ -301,6 +316,7 @@ def auto_sync_turn(user, incremental=True):
         "pulled": 0,
         "pushed": 0,
         "tables": [],
+        "rejected": [],
         "conflict": False,
         "settled": False,
     }
@@ -320,18 +336,29 @@ def auto_sync_turn(user, incremental=True):
         return outcome
 
     try:
-        push = push_local_changes(user)
+        push = push_local_changes(user, guard_generation=False)
     except SyncConflict:
         # The server moved while we were preparing to send. Read it once more
         # and try again; if it still refuses, leave it to the sync button
         # rather than looping.
         pull_server_changes(user, incremental=False)
         try:
-            push = push_local_changes(user)
+            push = push_local_changes(user, guard_generation=False)
         except SyncConflict:
             outcome["conflict"] = True
             return outcome
     outcome["pushed"] = int(push.get("sent") or 0)
+    outcome["rejected"] = list(push.get("rejected") or [])
+    if outcome["rejected"]:
+        # Somebody else changed those rows while we were looking at an older
+        # copy. Take their version rather than argue about it, and let the
+        # caller say which of them the person can see on screen.
+        refresh = pull_server_changes(user, incremental=True)
+        outcome["pulled"] += int(refresh.get("imported") or 0)
+        for row in outcome["rejected"]:
+            table = row.get("table_name")
+            if table and table not in outcome["tables"]:
+                outcome["tables"].append(table)
     return outcome
 
 
@@ -392,8 +419,10 @@ def pull_server_changes(user, table_name=None, incremental=False):
         _apply_generation(int(result.get("generation") or 0))
         # Only move the marker past what we actually kept. A row we dropped
         # would otherwise fall behind it and never be offered again.
-        if not stats["rejected"] and not stats["skipped_legacy"]:
-            db.set_pull_watermark(result.get("server_time"))
+        # Anything that could not be applied is set aside and retried, not
+        # dropped, so the marker can move on without losing it. Freezing it
+        # instead would stop every later download behind one bad row.
+        db.set_pull_watermark(result.get("server_time"))
     return {
         "received": len(records),
         "imported": imported,

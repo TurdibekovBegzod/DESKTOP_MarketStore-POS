@@ -275,6 +275,11 @@ TEXTS = {
         "sync_live_applied": "Boshqa qurilmadagi o'zgarishlar qo'llandi.",
         "sync_live_title": "Yangilandi",
         "sync_other_device": "Boshqa qurilma",
+        "sync_quarantine": "{n} ta yozuv qo'llanmadi va chetga olindi. Ular har yuklashda qayta urinib ko'riladi.",
+        "sync_status_title": "Sinxronizatsiya holati",
+        "sync_conflict_toast": "Sinxronizatsiyani yakunlab bo'lmadi. Sinxronizatsiya holati oynasini oching.",
+        "sync_rejected_title": "O'zgartirish saqlanmadi",
+        "sync_rejected_toast": "Bu yozuv boshqa qurilmada o'zgargan edi, shuning uchun sizning o'zgartirishingiz saqlanmadi. Yangi holat ko'rsatildi: {what}",
         "sync_done": "Sync tugadi", "sync_error": "Sync xatosi",
         "sync_pending_count": "Yuborilmagan o'zgarishlar",
         "sync_remote": "Serverda yangi o'zgarish bor",
@@ -338,6 +343,11 @@ TEXTS = {
         "sync_live_applied": "Changes from another device were applied.",
         "sync_live_title": "Updated",
         "sync_other_device": "Another device",
+        "sync_quarantine": "{n} record(s) could not be applied and were set aside. They are retried on every download.",
+        "sync_status_title": "Sync status",
+        "sync_conflict_toast": "Synchronisation could not finish. Open the sync status panel.",
+        "sync_rejected_title": "Change not saved",
+        "sync_rejected_toast": "Another device had already changed this, so your edit was not saved. The current version is shown: {what}",
         "sync_done": "Sync completed", "sync_error": "Sync error",
         "sync_pending_count": "Unsynced changes",
         "sync_remote": "New changes on the server",
@@ -424,6 +434,11 @@ TEXTS["ru"].update({
     "sync_live_applied": "Изменения с другого устройства применены.",
     "sync_live_title": "Обновлено",
     "sync_other_device": "Другое устройство",
+    "sync_quarantine": "{n} записей не удалось применить, они отложены и повторяются при каждой загрузке.",
+    "sync_status_title": "Состояние синхронизации",
+    "sync_conflict_toast": "Синхронизация не завершена. Откройте окно состояния синхронизации.",
+    "sync_rejected_title": "Изменение не сохранено",
+    "sync_rejected_toast": "Эта запись уже была изменена на другом устройстве, поэтому ваше изменение не сохранено. Показана текущая версия: {what}",
     "sync_done": "Синхронизация завершена",
     "sync_error": "Ошибка синхронизации",
 })
@@ -724,18 +739,13 @@ class SyncWorker(QObject):
 
     def run(self):
         try:
+            # No whole-database conflict check any more. Every row carries a
+            # UUID and merges on its own, so two devices writing different rows
+            # is not a disagreement about which copy is right.
             if self.action == "push":
-                info = sync_service.describe_sync(self.user)
-                if info["conflict"]:
-                    self.conflict.emit(info)
-                    return
-                res = sync_service.push_local_changes(self.user)
+                res = sync_service.push_local_changes(self.user, guard_generation=False)
             elif self.action == "pull":
-                info = sync_service.describe_sync(self.user)
-                if info["conflict"]:
-                    self.conflict.emit(info)
-                    return
-                res = sync_service.pull_server_changes(self.user)
+                res = sync_service.pull_server_changes(self.user, incremental=True)
             elif self.action == "assets":
                 res = sync_service.refresh_account_assets(self.user)
             elif self.action == "force_download":
@@ -755,147 +765,13 @@ class SyncWorker(QObject):
             self.failed.emit(str(exc))
 
 
-class ConflictDialog(QDialog):
-    """Anki-style "pick one side" prompt, with the losing side backed up.
-
-    Anki asks the same question but simply throws the other copy away. A POS
-    database holds real sales, so both branches snapshot what they are about to
-    overwrite before anything is destroyed.
-    """
-
-    DOWNLOAD = "download"
-    UPLOAD = "upload"
-
-    def __init__(self, info, parent=None):
-        super().__init__(parent)
-        self.info = dict(info or {})
-        self.choice = None
-        self.labels = getattr(parent, "labels", TEXTS["uz"])
-        self.theme = THEMES.get(getattr(parent, "settings", {}).get("theme"), THEMES["dark_blue"])
-        self.setWindowTitle(self.labels.get("conflict_title", "Sinxronizatsiya to'qnashuvi"))
-        self.setModal(True)
-        self.setFixedWidth(460)
-        self._build_ui()
-
-    def _build_ui(self):
-        theme = self.theme
-        local_pending = int(self.info.get("local_pending") or 0)
-        server_records = int(self.info.get("server_records") or 0)
-
-        self.setStyleSheet(f"""
-            QDialog {{ background: {theme['topbar']}; }}
-            QLabel {{ color: {theme['title']}; font-size: 13px; }}
-            QLabel#conflictHead {{ font-size: 15px; font-weight: bold; }}
-            QLabel#conflictWarn {{
-                background: #fef3c7; color: #92400e;
-                border-radius: 8px; padding: 10px 12px;
-            }}
-            QLabel#conflictHint {{ color: #64748b; font-size: 11px; }}
-            QFrame#conflictCard {{
-                background: rgba(148, 163, 184, 0.12);
-                border: 1px solid #cbd5e1; border-radius: 8px;
-            }}
-            QPushButton {{
-                border: 1px solid #cbd5e1; border-radius: 7px;
-                padding: 9px 14px; font-size: 13px;
-                background: {theme['topbar']}; color: {theme['title']};
-            }}
-            QPushButton#downloadChoice {{
-                background: #3b82f6; color: white; border: none; font-weight: bold;
-            }}
-            QPushButton#uploadChoice {{
-                background: #f97316; color: white; border: none; font-weight: bold;
-            }}
-            QPushButton:disabled {{ background: #e2e8f0; color: #94a3b8; }}
-        """)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(12)
-
-        head = QLabel(self.labels.get("conflict_head", ""))
-        head.setObjectName("conflictHead")
-        head.setWordWrap(True)
-        layout.addWidget(head)
-
-        warn = QLabel(self.labels.get("conflict_explain", ""))
-        warn.setObjectName("conflictWarn")
-        warn.setWordWrap(True)
-        layout.addWidget(warn)
-
-        card = QFrame()
-        card.setObjectName("conflictCard")
-        card_lay = QVBoxLayout(card)
-        card_lay.setContentsMargins(14, 12, 14, 12)
-        card_lay.setSpacing(6)
-        rows = [
-            (self.labels.get("conflict_local_line", ""), str(local_pending)),
-            (self.labels.get("conflict_server_line", ""), str(server_records)),
-        ]
-        device_key = self.info.get("server_device_key")
-        if device_key:
-            rows.append((self.labels.get("conflict_server_device", ""), str(device_key)))
-        changed_at = self.info.get("server_changed_at")
-        if changed_at:
-            rows.append((self.labels.get("conflict_server_at", ""), str(changed_at)[:19].replace("T", " ")))
-        for title, value in rows:
-            row = QHBoxLayout()
-            row.setContentsMargins(0, 0, 0, 0)
-            left = QLabel(f"{title}:")
-            right = QLabel(f"<b>{value}</b>")
-            right.setTextFormat(Qt.TextFormat.RichText)
-            row.addWidget(left)
-            row.addStretch()
-            row.addWidget(right)
-            card_lay.addLayout(row)
-        layout.addWidget(card)
-
-        self.download_btn = QPushButton(self.labels.get("conflict_download", "Serverdan yuklab olish"))
-        self.download_btn.setObjectName("downloadChoice")
-        self.download_btn.setFixedHeight(38)
-        self.download_btn.clicked.connect(lambda: self._choose(self.DOWNLOAD))
-        layout.addWidget(self.download_btn)
-        download_hint = QLabel(
-            self.labels.get("conflict_download_hint", "").replace("{n}", str(local_pending))
-        )
-        download_hint.setObjectName("conflictHint")
-        download_hint.setWordWrap(True)
-        layout.addWidget(download_hint)
-
-        self.upload_btn = QPushButton(self.labels.get("conflict_upload", "O'zimnikini yuborish"))
-        self.upload_btn.setObjectName("uploadChoice")
-        self.upload_btn.setFixedHeight(38)
-        self.upload_btn.clicked.connect(lambda: self._choose(self.UPLOAD))
-        layout.addWidget(self.upload_btn)
-        upload_hint = QLabel(
-            self.labels.get("conflict_upload_hint", "").replace("{n}", str(server_records))
-        )
-        upload_hint.setObjectName("conflictHint")
-        upload_hint.setWordWrap(True)
-        layout.addWidget(upload_hint)
-
-        btns = QHBoxLayout()
-        btns.addStretch()
-        self.cancel_btn = QPushButton(self.labels.get("conflict_cancel", "Hozir emas"))
-        self.cancel_btn.clicked.connect(self.reject)
-        btns.addWidget(self.cancel_btn)
-        layout.addLayout(btns)
-
-    def _choose(self, choice):
-        self.choice = choice
-        self.download_btn.setEnabled(False)
-        self.upload_btn.setEnabled(False)
-        self.cancel_btn.setEnabled(False)
-        self.accept()
-
-
 class SyncDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.parent_window = parent
         self.labels = getattr(parent, "labels", TEXTS["uz"])
         self.theme = THEMES.get(getattr(parent, "settings", {}).get("theme"), THEMES["dark_blue"])
-        self.setWindowTitle("Sync")
+        self.setWindowTitle(self.labels.get("sync_status_title", "Sinxronizatsiya holati"))
         self.setFixedWidth(360)
         self._build_ui()
         self.refresh()
@@ -940,23 +816,18 @@ class SyncDialog(QDialog):
         self.info_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.info_lbl)
 
-        btn_row = QHBoxLayout()
-        self.pull_btn = QPushButton(self.labels.get("sync_pull", "Olish"))
-        self.pull_btn.clicked.connect(self._pull)
-        self.push_btn = QPushButton(self.labels.get("sync_push", "Yuborish"))
-        self.push_btn.clicked.connect(self._push)
-        btn_row.addWidget(self.pull_btn)
-        btn_row.addWidget(self.push_btn)
-        layout.addLayout(btn_row)
+        # There is no Send and no Download any more: the data moves by itself.
+        # What is left here is a report of where this device stands, and the
+        # two recovery actions - which are not synchronisation, they are a
+        # choice between two whole copies.
+        self.quarantine_lbl = QLabel("")
+        self.quarantine_lbl.setWordWrap(True)
+        self.quarantine_lbl.setStyleSheet("color:#b45309;font-size:12px;")
+        layout.addWidget(self.quarantine_lbl)
 
-        # "Yuborish" only sends what changed, so it can never empty the server:
-        # with nothing to send it does nothing at all, and the next "Olish"
-        # brings everything back. Replacing the server copy wholesale needs its
-        # own action, which is why this is a separate, confirmed button.
-        #
-        # Admin only. The sync button sits in the top bar for every role, and
-        # this action wipes the account on every device - not something a
-        # cashier should be one misclick away from.
+        # Admin only. The status indicator sits in the top bar for every role,
+        # but these two replace a whole copy - not something a cashier should
+        # be one misclick away from.
         self.replace_btn = None
         self.adopt_btn = None
         if (getattr(self.parent_window, "user", {}) or {}).get("role") != "admin":
@@ -996,8 +867,6 @@ class SyncDialog(QDialog):
         if not self.parent_window._sync_available():
             self.status_lbl.setText("Offline")
             self.status_lbl.setStyleSheet("background:#f1f5f9;color:#64748b;")
-            self.pull_btn.setEnabled(False)
-            self.push_btn.setEnabled(False)
             return
         pending = status["pending"]
         pending_count = int(status.get("pending_change_count") or 0)
@@ -1020,18 +889,21 @@ class SyncDialog(QDialog):
             lines.append(f"{remote_title}: {tables}")
         self.info_lbl.setText("\n".join(lines))
         self.status_lbl.setStyleSheet(style)
-        self.pull_btn.setEnabled(True)
-        self.push_btn.setEnabled(True)
-
-    def _pull(self):
-        self.accept()
-        if self.parent_window:
-            self.parent_window._pull_from_server(show_message=True)
-
-    def _push(self):
-        self.accept()
-        if self.parent_window:
-            self.parent_window._push_to_server(show_message=True)
+        # Anything that could not be applied is shown rather than counted
+        # silently: with no button to press, this is the only place a stuck
+        # record would ever be noticed.
+        try:
+            held = db.count_sync_quarantine()
+        except Exception:
+            held = 0
+        if held:
+            template = self.labels.get(
+                "sync_quarantine",
+                "{n} ta yozuv qo'llanmadi va chetga olindi. Ular har yuklashda qayta urinib ko'riladi.",
+            )
+            self.quarantine_lbl.setText(template.replace("{n}", str(held)))
+        else:
+            self.quarantine_lbl.setText("")
 
     def _replace_server(self):
         if not self.parent_window:
@@ -2118,22 +1990,24 @@ class MainWindow(QMainWindow):
     # Conflict resolution (Anki-style, with a backup of the discarded side)
     # ------------------------------------------------------------------
 
-    def _on_sync_conflict(self, info):
+    def _on_sync_conflict(self, _info):
+        """The last resort, which normal use no longer reaches.
+
+        Choosing one whole copy over the other used to be an everyday dialog.
+        It is now a repair: the person is told, and the two actions live in the
+        sync status panel where an admin can reach them deliberately.
+        """
         self._cleanup_sync_thread()
         self._refresh_sync_status()
-        if self._conflict_dialog_open:
-            return
-        self._conflict_dialog_open = True
-        try:
-            dialog = ConflictDialog(info, self)
-            accepted = dialog.exec()
-            choice = dialog.choice if accepted else None
-        finally:
-            self._conflict_dialog_open = False
-        if choice == ConflictDialog.DOWNLOAD:
-            self._resolve_conflict("force_download")
-        elif choice == ConflictDialog.UPLOAD:
-            self._resolve_conflict("force_upload")
+        self.show_toast(
+            self.labels.get(
+                "sync_conflict_toast",
+                "Sinxronizatsiyani yakunlab bo'lmadi. Sinxronizatsiya holati oynasini oching.",
+            ),
+            title=self.labels.get("conflict_title", "Sinxronizatsiya"),
+            level="warning",
+            duration_ms=9000,
+        )
 
     def _resolve_conflict(self, action):
         self.show_toast(
@@ -2234,6 +2108,27 @@ class MainWindow(QMainWindow):
         # so the page is reloaded rather than left showing yesterday's figures.
         self._reload_current_page()
         self._refresh_sync_status()
+        refused = outcome.get("rejected") or []
+        if refused:
+            # Somebody else changed those rows first. Their version is already
+            # on screen by now; say why the edit did not stick.
+            names = []
+            for row in refused:
+                label = self.labels.get(row.get("table_name") or "", row.get("table_name") or "")
+                if label and label not in names:
+                    names.append(label)
+            template = self.labels.get(
+                "sync_rejected_toast",
+                "Bu yozuv boshqa qurilmada o'zgargan edi, shuning uchun sizning "
+                "o'zgartirishingiz saqlanmadi. Yangi holat ko'rsatildi: {what}",
+            )
+            self.show_toast(
+                template.replace("{what}", ", ".join(names) or "-"),
+                title=self.labels.get("sync_rejected_title", "O'zgartirish saqlanmadi"),
+                level="warning",
+                duration_ms=9000,
+            )
+
         pulled = int(outcome.get("pulled") or 0)
         if not pulled:
             return

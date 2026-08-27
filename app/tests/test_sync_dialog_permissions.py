@@ -82,10 +82,27 @@ class SyncDialogPermissionTest(unittest.TestCase):
 
         self.assertEqual(parent.resolved, [], "kassir uchun bajarilmasligi kerak")
 
-    def test_the_ordinary_sync_actions_stay_available_to_a_cashier(self):
+    def test_there_is_nothing_left_for_a_cashier_to_press(self):
+        """The panel reports; it no longer moves data."""
         _, dialog = self._dialog_for("cashier")
-        self.assertIsNotNone(dialog.pull_btn)
-        self.assertIsNotNone(dialog.push_btn)
+
+        self.assertFalse(hasattr(dialog, "pull_btn"))
+        self.assertFalse(hasattr(dialog, "push_btn"))
+        self.assertIsNone(dialog.replace_btn)
+        self.assertIsNone(dialog.adopt_btn)
+
+    def test_an_admin_still_has_the_two_recovery_actions(self):
+        _, dialog = self._dialog_for("admin")
+
+        self.assertIsNotNone(dialog.replace_btn)
+        self.assertIsNotNone(dialog.adopt_btn)
+
+    def test_a_cashier_calling_the_mirror_action_directly_is_refused(self):
+        parent, dialog = self._dialog_for("cashier")
+
+        dialog._adopt_server()
+
+        self.assertEqual(parent.resolved, [])
 
 
 if __name__ == "__main__":

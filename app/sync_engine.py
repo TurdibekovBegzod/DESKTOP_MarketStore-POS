@@ -53,9 +53,13 @@ class SyncEngine(QObject):
 
     @pyqtSlot()
     def stop(self):
+        """Safe to call from the GUI thread.
+
+        Only the flag is set here: the timer belongs to this worker's own
+        thread, and Qt refuses to stop a timer from a different one. The next
+        tick sees the flag and stops it from the right side.
+        """
         self._stopping.set()
-        if self._timer is not None:
-            self._timer.stop()
 
     @pyqtSlot()
     def request_turn(self):
@@ -65,6 +69,8 @@ class SyncEngine(QObject):
     # -- the loop --------------------------------------------------------
     def _tick(self):
         if self._stopping.is_set():
+            if self._timer is not None:
+                self._timer.stop()
             return
         user = None
         try:

@@ -414,7 +414,21 @@ def validate_update_package(file_path: str, platform_name: str | None = None) ->
     if not valid:
         raise ValueError("Yuklangan fayl haqiqiy o'rnatish paketi emas.")
 def apply_and_restart(file_path: str):
-    """Execute installer or update package and close current app."""
+    """Hand the update over to the installer and let it take it from there.
+
+    This used to start the installer and quit the application in the same
+    breath, which is why the update kept failing on Windows. The installer is
+    marked as requiring administrator rights, so Windows has to show a consent
+    prompt first -- and that prompt belongs to the process that asked for it.
+    Quitting a few milliseconds later killed the request before the person
+    could answer it, so the app closed and nothing was installed.
+
+    The installer closes the running application itself, as its first step, at
+    the moment it is actually ready to replace the files. So this no longer
+    quits at all: it starts the installer and stands aside. If the person
+    cancels the installer, the application is simply still there -- which is
+    what should have happened all along.
+    """
     platform_name = get_client_platform()
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"Update fayli topilmadi: {file_path}")
@@ -430,15 +444,17 @@ def apply_and_restart(file_path: str):
     validate_update_package(file_path, platform_name)
 
     if platform_name == "windows":
-        # Launch installer in separate process
+        # os.startfile goes through ShellExecute, which is the only launcher
+        # that can raise the consent prompt an admin-manifested installer
+        # needs. A plain Popen fails outright with "requires elevation", so it
+        # is a last resort rather than the first choice.
         try:
-            # Use os.startfile for Windows native launch or subprocess
             if hasattr(os, "startfile"):
                 os.startfile(file_path)
             else:
-                subprocess.Popen([file_path], start_new_session=True)
+                subprocess.Popen([file_path], close_fds=True)
         except OSError:
-            subprocess.Popen([file_path], start_new_session=True)
+            subprocess.Popen([file_path], close_fds=True)
     elif platform_name == "linux":
         try:
             os.chmod(file_path, 0o755)
@@ -448,13 +464,7 @@ def apply_and_restart(file_path: str):
     elif platform_name == "macos":
         subprocess.Popen(["open", file_path], start_new_session=True)
 
-    # Exit application cleanly
-    from PyQt6.QtWidgets import QApplication
-    app = QApplication.instance()
-    if app:
-        # Returning from the Qt slot before quitting avoids an uncaught
-        # SystemExit crossing the PyQt signal boundary (a native crash on some
-        # packaged macOS/Windows builds).
-        from PyQt6.QtCore import QTimer
-        QTimer.singleShot(0, app.quit)
+    # Deliberately no quit here. See the docstring: the installer closes this
+    # application when it is ready to, and closing first is what broke the
+    # update.
     return True

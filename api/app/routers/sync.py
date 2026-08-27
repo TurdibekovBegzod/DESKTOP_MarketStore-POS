@@ -15,6 +15,7 @@ from app.events import broker
 from app.models import Device, SyncBatch, SyncMeta, User, UserRecord
 from app.releases import release_payload
 from app.schemas import (
+    RejectedRecordOut,
     ALLOWED_SYNC_TABLES,
     DeviceIn,
     PullResponse,
@@ -145,7 +146,19 @@ def _assert_generation(db: Session, user: User, expected: int | None) -> None:
         )
 
 
-def _upsert_record(db: Session, user: User, record: RecordIn):
+def _upsert_record(db: Session, user: User, record: RecordIn) -> bool:
+    """Store one row. Returns False when the sender was working from a stale copy.
+
+    A device that sends ``expected_version`` is saying "I am changing the row
+    as I last saw it". If the stored row has moved on since, the change is
+    refused rather than applied over whatever happened in between -- a product
+    edited from a screen that still showed yesterday's stock would otherwise
+    undo the sales made in the meantime.
+
+    A row the server has never seen carries no version to disagree with, so it
+    is always inserted. That is why a sale can never be rejected: it is a new
+    row, not a change to an existing one.
+    """
     stmt = insert(UserRecord).values(
         user_id=user.id,
         user_uid=user.uid,
@@ -157,20 +170,41 @@ def _upsert_record(db: Session, user: User, record: RecordIn):
         source_device_key=record.source_device_key,
         sync_version=1,
     )
-    stmt = stmt.on_conflict_do_update(
+    updates = {
+        "user_id": user.id,
+        "user_uid": user.uid,
+        "data": stmt.excluded.data,
+        "local_updated_at": stmt.excluded.local_updated_at,
+        "deleted_at": stmt.excluded.deleted_at,
+        "source_device_key": stmt.excluded.source_device_key,
+        "sync_version": UserRecord.sync_version + 1,
+        "updated_at": func.now(),
+    }
+    if record.expected_version is None:
+        db.execute(stmt.on_conflict_do_update(
+            constraint="uq_user_records_user_uid_table_local",
+            set_=updates,
+        ))
+        return True
+    # The condition sits on the DO UPDATE, so a row that has moved on is
+    # neither inserted nor updated and RETURNING gives back nothing.
+    guarded = stmt.on_conflict_do_update(
         constraint="uq_user_records_user_uid_table_local",
-        set_={
-            "user_id": user.id,
-            "user_uid": user.uid,
-            "data": stmt.excluded.data,
-            "local_updated_at": stmt.excluded.local_updated_at,
-            "deleted_at": stmt.excluded.deleted_at,
-            "source_device_key": stmt.excluded.source_device_key,
-            "sync_version": UserRecord.sync_version + 1,
-            "updated_at": func.now(),
-        },
+        set_=updates,
+        where=UserRecord.sync_version == record.expected_version,
     )
-    db.execute(stmt)
+    written = db.execute(guarded.returning(UserRecord.id)).first()
+    return written is not None
+
+
+def _record_version(db: Session, user: User, record: RecordIn) -> int | None:
+    return db.scalar(
+        select(UserRecord.sync_version).where(
+            UserRecord.user_uid == user.uid,
+            UserRecord.table_name == record.table_name,
+            UserRecord.local_id == record.local_id,
+        )
+    )
 
 
 @router.post("/push", response_model=PushResponse)
@@ -178,14 +212,27 @@ def push(payload: PushRequest, current_user: User = Depends(get_current_user), d
     _assert_purge_generation(db, current_user, payload.applied_purge_generation)
     _assert_generation(db, current_user, payload.expected_generation)
     device = _touch_device(db, current_user, payload.device)
+    rejected: list[RejectedRecordOut] = []
+    accepted: list[RecordIn] = []
     for record in payload.records:
-        _upsert_record(db, current_user, record)
+        if _upsert_record(db, current_user, record):
+            accepted.append(record)
+            continue
+        # Partial success rather than a 409: the rest of the batch is perfectly
+        # good, and refusing all of it would turn one stale row into a failed
+        # sale.
+        rejected.append(RejectedRecordOut(
+            table_name=record.table_name,
+            local_id=record.local_id,
+            expected_version=record.expected_version,
+            server_version=_record_version(db, current_user, record),
+        ))
     batch = SyncBatch(
         user_id=current_user.id,
         user_uid=current_user.uid,
         device_id=device.id if device else None,
         direction="push",
-        records_count=len(payload.records),
+        records_count=len(accepted),
         note=payload.note,
     )
     db.add(batch)
@@ -194,12 +241,17 @@ def push(payload: PushRequest, current_user: User = Depends(get_current_user), d
         db,
         current_user,
         device_key,
-        {record.table_name for record in payload.records},
+        {record.table_name for record in accepted},
     )
     db.commit()
     db.refresh(batch)
     _publish(current_user.uid, event)
-    return PushResponse(saved=len(payload.records), batch_id=batch.id, generation=event["generation"])
+    return PushResponse(
+        saved=len(accepted),
+        batch_id=batch.id,
+        generation=event["generation"],
+        rejected=rejected,
+    )
 
 
 @router.put("/tables/{table_name}/rows", response_model=PushResponse)

@@ -75,7 +75,15 @@ class TestUpdaterModule(unittest.TestCase):
         self.assertEqual(_asset_sha256({"digest": f"sha256:{checksum}"}), checksum)
         self.assertEqual(_asset_sha256({"digest": "md5:bad"}), "")
 
-    def test_apply_update_returns_through_qt_slot_instead_of_raising_system_exit(self):
+    def test_the_app_stays_open_until_the_installer_closes_it(self):
+        """Closing first is what made the update fail.
+
+        The installer asks Windows for administrator rights, and the consent
+        prompt belongs to whoever asked. Quitting a moment later killed the
+        request before the person could answer, so the app disappeared and
+        nothing was installed. The installer closes the app itself when it is
+        ready to replace the files.
+        """
         handle, path = tempfile.mkstemp(suffix=".exe")
         os.close(handle)
         try:
@@ -86,7 +94,40 @@ class TestUpdaterModule(unittest.TestCase):
                  patch("PyQt6.QtCore.QTimer.singleShot") as single_shot:
                 self.assertTrue(apply_and_restart(path))
             startfile.assert_called_once_with(path)
-            single_shot.assert_called_once()
+            single_shot.assert_not_called()
+
+            from PyQt6.QtWidgets import QApplication
+            self.assertIsNotNone(QApplication.instance(), "the app must still be running")
+        finally:
+            os.remove(path)
+
+    def test_the_installer_is_never_started_as_a_child_of_the_app(self):
+        """A child would be taken down by the installer's own taskkill."""
+        handle, path = tempfile.mkstemp(suffix=".exe")
+        os.close(handle)
+        try:
+            with open(path, "wb") as package:
+                package.write(b"MZ" + b"\0" * 2048)
+            with patch("updater.get_client_platform", return_value="windows"), \
+                 patch.object(os, "startfile", create=True, side_effect=OSError("no shell")), \
+                 patch("updater.subprocess.Popen") as popen:
+                self.assertTrue(apply_and_restart(path))
+            popen.assert_called_once()
+            self.assertNotIn("start_new_session", popen.call_args.kwargs)
+        finally:
+            os.remove(path)
+
+    def test_a_package_that_is_not_an_installer_never_reaches_the_shell(self):
+        handle, path = tempfile.mkstemp(suffix=".exe")
+        os.close(handle)
+        try:
+            with open(path, "wb") as package:
+                package.write(b"<html>gateway error</html>" * 100)
+            with patch("updater.get_client_platform", return_value="windows"), \
+                 patch.object(os, "startfile", create=True) as startfile:
+                with self.assertRaises(ValueError):
+                    apply_and_restart(path)
+            startfile.assert_not_called()
         finally:
             os.remove(path)
 
