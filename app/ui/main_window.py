@@ -280,6 +280,7 @@ TEXTS = {
         "sync_conflict_toast": "Sinxronizatsiyani yakunlab bo'lmadi. Sinxronizatsiya holati oynasini oching.",
         "sync_rejected_title": "O'zgartirish saqlanmadi",
         "sync_offline_note": "Aloqa tiklanganda ular o'zi yuboriladi.",
+        "sync_offline_tip": "Aloqa yo'q \u2014 pul yozuvlari vaqtincha to'xtatilgan",
         "sync_rejected_toast": "Bu yozuv boshqa qurilmada o'zgargan edi, shuning uchun sizning o'zgartirishingiz saqlanmadi. Yangi holat ko'rsatildi: {what}",
         "sync_done": "Sync tugadi", "sync_error": "Sync xatosi",
         "sync_pending_count": "Yuborilmagan o'zgarishlar",
@@ -349,6 +350,7 @@ TEXTS = {
         "sync_conflict_toast": "Synchronisation could not finish. Open the sync status panel.",
         "sync_rejected_title": "Change not saved",
         "sync_offline_note": "They are sent by themselves once the connection is back.",
+        "sync_offline_tip": "No connection \u2014 money entries are paused",
         "sync_rejected_toast": "Another device had already changed this, so your edit was not saved. The current version is shown: {what}",
         "sync_done": "Sync completed", "sync_error": "Sync error",
         "sync_pending_count": "Unsynced changes",
@@ -441,6 +443,7 @@ TEXTS["ru"].update({
     "sync_conflict_toast": "Синхронизация не завершена. Откройте окно состояния синхронизации.",
     "sync_rejected_title": "Изменение не сохранено",
     "sync_offline_note": "Они отправятся сами, когда связь восстановится.",
+    "sync_offline_tip": "Нет связи \u2014 денежные записи приостановлены",
     "sync_rejected_toast": "Эта запись уже была изменена на другом устройстве, поэтому ваше изменение не сохранено. Показана текущая версия: {what}",
     "sync_done": "Синхронизация завершена",
     "sync_error": "Ошибка синхронизации",
@@ -549,6 +552,19 @@ class SettingsDialog(QDialog):
             form.addRow(labels["app_logo"] + ":", logo_row)
         layout.addLayout(form)
 
+        # The sync panel used to hang off the top bar button. There is no
+        # button any more, so the two recovery actions live here -- reachable
+        # on purpose rather than by a stray click.
+        if self.user_role == "admin":
+            self.sync_panel_btn = QPushButton(labels.get("sync_status_title", "Sinxronizatsiya holati"))
+            self.sync_panel_btn.setStyleSheet(
+                "QPushButton{background:#f8fafc;color:#334155;border:1px solid #cbd5e1;"
+                "border-radius:7px;padding:8px 14px;font-size:12px;}"
+                "QPushButton:hover{border-color:#3b82f6;}"
+            )
+            self.sync_panel_btn.clicked.connect(self._open_sync_panel)
+            layout.addWidget(self.sync_panel_btn)
+
         btns = QHBoxLayout()
         cancel_btn = QPushButton(labels["cancel"])
         cancel_btn.clicked.connect(self.reject)
@@ -559,6 +575,11 @@ class SettingsDialog(QDialog):
         btns.addWidget(cancel_btn)
         btns.addWidget(save_btn)
         layout.addLayout(btns)
+
+    def _open_sync_panel(self):
+        window = self.parent()
+        if window is not None and hasattr(window, "_open_sync_dialog"):
+            window._open_sync_dialog()
 
     def _update_settings_logo_preview(self):
         pix = load_custom_logo_pixmap()
@@ -1523,29 +1544,22 @@ class MainWindow(QMainWindow):
         self.clock_lbl = QLabel()
         topbar_lay.addWidget(self.page_title_lbl)
         topbar_lay.addStretch()
+        # Nothing to press. The data moves by itself; this only says whether
+        # the device can currently reach the others, which the cashier has to
+        # know because money cannot be written while it cannot.
         self.sync_wrap = QWidget()
         self.sync_wrap.setFixedSize(40, 36)
-        self.sync_btn = QPushButton(self.sync_wrap)
-        self.sync_btn.setObjectName("syncIconButton")
+        self.sync_btn = QLabel(self.sync_wrap)
+        self.sync_btn.setObjectName("syncStateDot")
         self.sync_btn.setFixedSize(32, 32)
         self.sync_btn.move(0, 2)
-        self.sync_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.sync_btn.setToolTip("Sync")
-        self.sync_btn.clicked.connect(self._open_sync_dialog)
+        self.sync_btn.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.sync_btn.setText("\u25cf")
         self.sync_badge_lbl = QLabel(self.sync_wrap)
         self.sync_badge_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.sync_badge_lbl.setFixedSize(16, 16)
         self.sync_badge_lbl.move(24, 0)
         self.sync_badge_lbl.hide()
-        sync_pixmap = QPixmap(SYNC_ICON_PATH)
-        if not sync_pixmap.isNull():
-            self.sync_btn.setIcon(QIcon(sync_pixmap))
-            self.sync_btn.setIconSize(sync_pixmap.scaled(
-                16,
-                16,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            ).size())
         topbar_lay.addWidget(self.sync_wrap)
         topbar_lay.addWidget(self.clock_lbl)
         content_layout.addWidget(self.topbar)
@@ -1778,8 +1792,7 @@ class MainWindow(QMainWindow):
             return
         status = db.get_sync_status()
         if not self._sync_available():
-            self.sync_btn.setToolTip("Offline")
-            self.sync_btn.setEnabled(False)
+            self.sync_btn.setToolTip(self.labels.get("sync_offline_tip", "Offline"))
             self._apply_sync_card_state("offline")
             self._update_sync_badge(0, remote_pending=False)
             return
@@ -1801,7 +1814,6 @@ class MainWindow(QMainWindow):
             offline_note = self.labels.get("sync_offline_stream", "Realtime aloqa uzildi")
             text = f"{text} - {offline_note}"
         self.sync_btn.setToolTip(text)
-        self.sync_btn.setEnabled(True)
         self._apply_sync_card_state(state)
         self._update_sync_badge(pending_count, remote_pending=remote_pending)
 
@@ -1839,17 +1851,12 @@ class MainWindow(QMainWindow):
             "offline": {"bg": "#f1f5f9", "border": "#cbd5e1", "text": "#64748b"},
         }.get(state, {"bg": "#f8fafc", "border": "#cbd5e1", "text": "#334155"})
         self.sync_btn.setStyleSheet(f"""
-            QPushButton#syncIconButton {{
+            QLabel#syncStateDot {{
                 background: {palette['bg']};
                 border: 1px solid {palette['border']};
                 border-radius: 8px;
-            }}
-            QPushButton#syncIconButton:hover {{
-                border: 2px solid {palette['border']};
-            }}
-            QPushButton#syncIconButton:disabled {{
-                background: #f1f5f9;
-                border-color: #cbd5e1;
+                color: {palette['text']};
+                font-size: 13px;
             }}
         """)
 
@@ -2102,6 +2109,9 @@ class MainWindow(QMainWindow):
         self._engine_thread.started.connect(self._engine_worker.start)
         self._engine_worker.applied.connect(self._on_sync_applied)
         self._engine_worker.state_changed.connect(self._on_sync_engine_state)
+        # A sale, an expense, a debt: the moment it is written here, the other
+        # devices should be hearing about it.
+        db.add_change_listener(self._engine_worker.notify_local_change)
         self._engine_thread.start()
 
     def _stop_sync_engine(self):
@@ -2109,6 +2119,7 @@ class MainWindow(QMainWindow):
         self._engine_worker = None
         self._engine_thread = None
         if worker is not None:
+            db.remove_change_listener(worker.notify_local_change)
             worker.stop()
         if thread is not None:
             thread.quit()

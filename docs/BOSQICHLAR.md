@@ -568,6 +568,43 @@ Jami **186 ta desktop + 56 ta server testi** o'tyapti.
 
 ## Bosqichlardan tashqari tuzatishlar
 
+### Sync tugmasi butunlay olib tashlandi
+
+Yuqoridagi tugma o'rniga **bosilmaydigan holat nuqtasi** qoldi: yashil —
+sinxron, sariq — yuborilmagan bor, ko'k — serverda yangilik, kulrang — aloqa
+yo'q. Tugma yo'q, ya'ni bosadigan narsa ham yo'q.
+
+Ikkita tiklash amali (serverni almashtirish / shu qurilmani almashtirish)
+**Sozlamalar** ichiga ko'chdi — admin uchun, ataylab bosiladigan joyda.
+
+**Yozuv o'sha zahoti ketadi.** Ilgari dvigatel bo'sh paytda 30 soniyada bir
+marta qarardi, ya'ni tinch paytda qilingan sotuv 30 soniyagacha kutishi
+mumkin edi. Endi:
+
+- `database.add_change_listener()` — bazaga yozilgan zahoti dvigatel
+  uyg'otiladi (`_flush_session_outbox` dan)
+- bo'sh paytdagi tekshiruv 30 soniyadan **2 soniyaga** tushdi
+
+Ya'ni sotuv, harajat, qarz — nima yozilsa, ~0.7 soniyada serverga chiqadi,
+boshqa qurilma SSE orqali darhol xabar oladi va o'z sahifasini yangilaydi.
+
+### Yuklab olish yuborilmagan o'zgarishni o'chirib yuborardi
+
+Buni test topdi. Aylanish "avval ol, keyin ber" tartibida ishlaydi. Agar
+foydalanuvchi biror narsani o'zgartirgan-u, u hali yuborilmagan bo'lsa,
+serverdan kelgan **eskiroq** nusxa uning ustiga tushib, o'zgarishni izsiz
+yo'q qilardi.
+
+Endi outboxda turgan qator yuklab olishda **himoyalangan**: u o'z navbatida
+yuboriladi va qaysi biri to'g'riligini 4-bosqichdagi versiya tekshiruvi hal
+qiladi — ikki xabarning kelish tartibi emas.
+
+Bitta istisno: **o'chirish o'tkaziladi**. O'chirishni to'sib qo'ysak, u qayta
+va qayta qaytib keladi — bu eng ko'p uchraydigan nosozlik. Tahrirning
+o'chirishga yutqazishi esa kam uchraydi va ko'rinadi.
+
+
+
 Bular reja bosqichi emas — ishlatish paytida chiqqan muammolar.
 
 ### Yangilash o'rnatilmay, dastur o'chib qolardi

@@ -20,9 +20,11 @@ import sync_service
 # How long to wait after a local write before sending. A sale writes several
 # rows in a burst; waiting a moment turns that burst into one upload.
 LOCAL_SETTLE_MS = 700
-# How often to look for work when nothing has told us to. The change stream is
-# the real trigger; this only covers the case where it is down.
-IDLE_INTERVAL_MS = 30_000
+# How often to look for work when nothing has told us to. Kept short: a sale
+# rung up during a quiet spell must reach the other devices in a moment, not
+# whenever the next long timer happens to come round. The check itself is one
+# small read of one row.
+IDLE_INTERVAL_MS = 2_000
 # After a failed turn, wait before trying again rather than hammering a server
 # that is already unhappy.
 RETRY_INTERVAL_MS = 15_000
@@ -63,7 +65,15 @@ class SyncEngine(QObject):
 
     @pyqtSlot()
     def request_turn(self):
-        """The server told us something changed; act on the next tick."""
+        """Something changed -- here or on another device -- so act at once."""
+        self._pull_requested.set()
+
+    def notify_local_change(self):
+        """Called from whichever thread just wrote to the database.
+
+        Only a flag is set, which is safe from any thread; the work itself
+        happens on this worker's own next tick.
+        """
         self._pull_requested.set()
 
     # -- the loop --------------------------------------------------------

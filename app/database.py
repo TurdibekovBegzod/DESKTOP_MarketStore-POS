@@ -136,6 +136,31 @@ UUID_KEYED_TABLES = frozenset(
 _ONLINE_CHECK = None
 
 
+# Who wants to know the moment this device writes something. The automatic
+# sync listens here so a sale reaches the other devices straight away instead
+# of waiting for the next time somebody looks.
+_CHANGE_LISTENERS = []
+
+
+def add_change_listener(callback):
+    if callback is not None and callback not in _CHANGE_LISTENERS:
+        _CHANGE_LISTENERS.append(callback)
+
+
+def remove_change_listener(callback):
+    if callback in _CHANGE_LISTENERS:
+        _CHANGE_LISTENERS.remove(callback)
+
+
+def _announce_local_change():
+    for listener in list(_CHANGE_LISTENERS):
+        try:
+            listener()
+        except Exception:
+            # Telling somebody about a write must never undo the write.
+            continue
+
+
 def set_online_check(callback):
     """Tell the database how to find out whether the server is reachable."""
     global _ONLINE_CHECK
@@ -2179,6 +2204,9 @@ def _flush_session_outbox(session):
         str(_sync_state_int(connection, "pending_change_count") + len(entries)),
     )
     session.info["sync_outbox_entries"] = set()
+    # Anything written here has to reach the other devices, so say so at once
+    # rather than waiting for the next time somebody looks.
+    _announce_local_change()
 
 
 def get_sync_status():
@@ -2545,6 +2573,14 @@ def count_sync_quarantine():
         return int(conn.exec_driver_sql("SELECT COUNT(*) FROM sync_quarantine").scalar() or 0)
 
 
+def _pending_outbox_keys():
+    """Rows changed here that the server has not been told about yet."""
+    with _get_engine().begin() as conn:
+        _ensure_sync_outbox_table(conn)
+        rows = conn.exec_driver_sql("SELECT table_name, local_id FROM sync_outbox").fetchall()
+    return {(row[0], str(row[1])) for row in rows}
+
+
 def _pending_quarantined_records():
     """What was set aside earlier, to be tried again with the next download."""
     with _get_engine().begin() as conn:
@@ -2564,7 +2600,13 @@ def _pending_quarantined_records():
 def import_sync_records(records, chunk_size=IMPORT_CHUNK_SIZE):
     if not records:
         return 0
-    counters = {"imported": 0, "skipped_legacy": 0, "rejected": 0}
+    counters = {"imported": 0, "skipped_legacy": 0, "rejected": 0, "kept_local": 0}
+    # Rows this device has changed but not yet sent. An incoming copy of one of
+    # them is, by definition, from before our change: writing it over the top
+    # would throw away something the person just did, without a trace. Ours is
+    # left alone and goes out with the next push -- where the version guard
+    # decides it, rather than the order two messages happened to arrive in.
+    unsent = _pending_outbox_keys()
     held = _pending_quarantined_records()
     if held:
         seen = {(r.get("table_name"), str(r.get("local_id"))) for r in records}
@@ -2610,6 +2652,15 @@ def import_sync_records(records, chunk_size=IMPORT_CHUNK_SIZE):
                         counters["skipped_legacy"] += 1
                         _quarantine_record(conn, record, "eski identifikator")
                         continue
+                # Only an ordinary change is held back. A deletion is let
+                # through even over an unsent edit: an edit that loses to a
+                # deletion is visible and rare, while a deletion that loses
+                # comes back again and again, which is the failure everyone
+                # actually meets.
+                is_tombstone = bool(record.get("deleted_at")) and not data
+                if not is_tombstone and (table_name, str(record.get("local_id") or "")) in unsent:
+                    counters["kept_local"] += 1
+                    continue
                 columns = _table_columns(conn, table_name)
                 filtered = {key: value for key, value in data.items() if key in columns}
                 if not filtered:
@@ -2683,6 +2734,7 @@ def import_sync_records(records, chunk_size=IMPORT_CHUNK_SIZE):
             _sync_state_set(conn, "last_pull_skipped_legacy", str(counters["skipped_legacy"]))
             _sync_state_set(conn, "last_pull_rejected", str(counters["rejected"]))
             _sync_state_set(conn, "last_pull_tables", ",".join(sorted(touched_tables)))
+            _sync_state_set(conn, "last_pull_kept_local", str(counters["kept_local"]))
     finally:
         _sync_suspend_token.__exit__(None, None, None)
     return counters["imported"]
@@ -2927,6 +2979,7 @@ def get_last_pull_stats():
         return {
             "skipped_legacy": _sync_state_int(conn, "last_pull_skipped_legacy", 0),
             "rejected": _sync_state_int(conn, "last_pull_rejected", 0),
+            "kept_local": _sync_state_int(conn, "last_pull_kept_local", 0),
             "tables": tables,
         }
 
