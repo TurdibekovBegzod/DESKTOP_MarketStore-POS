@@ -101,6 +101,9 @@ class UpdaterDialog(QDialog):
         self.progress_detail_lbl = QLabel("")
         self.progress_detail_lbl.setStyleSheet("font-size: 12px; color: #64748b;")
         self.progress_detail_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # The dialog has a fixed width, so anything longer than the download
+        # counter this used to hold is cut off at both ends without this.
+        self.progress_detail_lbl.setWordWrap(True)
         self.progress_detail_lbl.setVisible(False)
         layout.addWidget(self.progress_detail_lbl)
 
@@ -334,10 +337,22 @@ class UpdaterDialog(QDialog):
             "background:#ecfdf5;color:#047857;border:1px solid #a7f3d0;"
         )
         self.progress_detail_lbl.setText(self._tr(
-            "Windows ruxsat so\u2019rasa, \u201cHa\u201d deb javob bering. "
-            "Dastur o\u2019rnatish boshlanganda o\u2019zi yopiladi \u2014 uni qo\u2019lda yopmang."
+            "Windows ruxsat so\u2019rasa \u201cHa\u201d deng.\n"
+            "Dastur o\u2019zi yopiladi \u2014 qo\u2019lda yopmang."
         ))
+        # The instruction is the whole point of this state, so it is shown
+        # whether or not a download made the row visible earlier.
+        self.progress_detail_lbl.setVisible(True)
+        self.progress_bar.setVisible(False)
+        # A disabled button keeps its stylesheet, so without a grey one of its
+        # own it still looks pressable and invites a second installer.
+        self.primary_btn.setText(self._tr("O\u2019rnatuvchi ochildi"))
         self.primary_btn.setEnabled(False)
+        self.primary_btn.setStyleSheet("""
+            QPushButton { background: #e2e8f0; color: #94a3b8; border: none;
+                          border-radius: 10px; padding: 12px 20px;
+                          font-size: 14px; font-weight: 600; }
+        """)
         self.secondary_btn.setText(self._tr("Yopish"))
 
     def _on_secondary_clicked(self):

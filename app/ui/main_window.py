@@ -279,6 +279,7 @@ TEXTS = {
         "sync_status_title": "Sinxronizatsiya holati",
         "sync_conflict_toast": "Sinxronizatsiyani yakunlab bo'lmadi. Sinxronizatsiya holati oynasini oching.",
         "sync_rejected_title": "O'zgartirish saqlanmadi",
+        "sync_offline_note": "Aloqa tiklanganda ular o'zi yuboriladi.",
         "sync_rejected_toast": "Bu yozuv boshqa qurilmada o'zgargan edi, shuning uchun sizning o'zgartirishingiz saqlanmadi. Yangi holat ko'rsatildi: {what}",
         "sync_done": "Sync tugadi", "sync_error": "Sync xatosi",
         "sync_pending_count": "Yuborilmagan o'zgarishlar",
@@ -347,6 +348,7 @@ TEXTS = {
         "sync_status_title": "Sync status",
         "sync_conflict_toast": "Synchronisation could not finish. Open the sync status panel.",
         "sync_rejected_title": "Change not saved",
+        "sync_offline_note": "They are sent by themselves once the connection is back.",
         "sync_rejected_toast": "Another device had already changed this, so your edit was not saved. The current version is shown: {what}",
         "sync_done": "Sync completed", "sync_error": "Sync error",
         "sync_pending_count": "Unsynced changes",
@@ -438,6 +440,7 @@ TEXTS["ru"].update({
     "sync_status_title": "Состояние синхронизации",
     "sync_conflict_toast": "Синхронизация не завершена. Откройте окно состояния синхронизации.",
     "sync_rejected_title": "Изменение не сохранено",
+    "sync_offline_note": "Они отправятся сами, когда связь восстановится.",
     "sync_rejected_toast": "Эта запись уже была изменена на другом устройстве, поэтому ваше изменение не сохранено. Показана текущая версия: {what}",
     "sync_done": "Синхронизация завершена",
     "sync_error": "Ошибка синхронизации",
@@ -867,6 +870,15 @@ class SyncDialog(QDialog):
         if not self.parent_window._sync_available():
             self.status_lbl.setText("Offline")
             self.status_lbl.setStyleSheet("background:#f1f5f9;color:#64748b;")
+            pending_label = self.labels.get("sync_pending_count", "Yuborilmagan o'zgarishlar")
+            waiting = int(status.get("pending_change_count") or 0)
+            self.info_lbl.setText(
+                f"{pending_label}: {waiting}\n"
+                + self.labels.get(
+                    "sync_offline_note",
+                    "Aloqa tiklanganda ular o'zi yuboriladi.",
+                )
+            )
             return
         pending = status["pending"]
         pending_count = int(status.get("pending_change_count") or 0)
@@ -1885,7 +1897,7 @@ class MainWindow(QMainWindow):
                 level="success",
                 duration_ms=4000,
             )
-            data = db.get_notifications_data(threshold=5)
+            data = db.get_notifications_data()
             summary = data.get("summary", {})
             low_stock = summary.get("low_stock_count", 0)
             if low_stock > 0:

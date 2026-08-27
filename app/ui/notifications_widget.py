@@ -180,13 +180,15 @@ class NotificationsWidget(QWidget):
         summary_grid = QGridLayout()
         summary_grid.setSpacing(14)
 
+        # No low-stock card: the stock figure belongs on the products page, and
+        # a shop with a hundred slow-moving lines had nothing else in here.
         self.card_act = self._create_summary_card("📦 Mahsulot harakatlari", "0 ta amal", "#0ea5e9", "#f0f9ff", "#e0f2fe")
-        self.card_stock = self._create_summary_card("⚠️ Kam qolgan tovarlar", "0 ta mahsulot", "#f59e0b", "#fffbeb", "#fef3c7")
+        self.card_sales = self._create_summary_card("🛒 Sotuv harakatlari", "0 ta amal", "#10b981", "#ecfdf5", "#d1fae5")
         self.card_debts = self._create_summary_card("💰 Qarzdorliklar", "0 ta mijoz", "#ef4444", "#fef2f2", "#fee2e2")
         self.card_total = self._create_summary_card("🔔 Jami bildirishnomalar", "0 ta", "#6366f1", "#eef2ff", "#e0e7ff")
 
         summary_grid.addWidget(self.card_act, 0, 0)
-        summary_grid.addWidget(self.card_stock, 0, 1)
+        summary_grid.addWidget(self.card_sales, 0, 1)
         summary_grid.addWidget(self.card_debts, 0, 2)
         summary_grid.addWidget(self.card_total, 0, 3)
         root.addLayout(summary_grid)
@@ -229,24 +231,6 @@ class NotificationsWidget(QWidget):
         self.search_edit.textChanged.connect(self._apply_filters)
         toolbar.addWidget(self.search_edit)
 
-        threshold_lbl = QLabel("Chegara:")
-        threshold_lbl.setStyleSheet("color: #64748b; font-size: 13px;")
-        toolbar.addWidget(threshold_lbl)
-
-        self.threshold_combo = QComboBox()
-        self.threshold_combo.setFixedHeight(36)
-        self.threshold_combo.addItems(["≤ 3 dona", "≤ 5 dona", "≤ 10 dona", "≤ 20 dona"])
-        self.threshold_combo.setCurrentIndex(1)
-        self.threshold_combo.setStyleSheet("""
-            QComboBox {
-                background: white; border: 1px solid #cbd5e1;
-                border-radius: 6px; padding: 4px 10px; font-size: 13px;
-            }
-            QComboBox:focus { border-color: #3b82f6; }
-        """)
-        self.threshold_combo.currentIndexChanged.connect(self.load_data)
-        toolbar.addWidget(self.threshold_combo)
-
         refresh_btn = QPushButton("🔄 Yangilash")
         refresh_btn.setFixedHeight(36)
         refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -284,7 +268,6 @@ class NotificationsWidget(QWidget):
             ("📌 Barchasi", "all", unread_total),
             ("🛒 Sotuvlar", "sales", unread_by_type.get("sales", 0)),
             ("📦 Mahsulotlar", "products", unread_by_type.get("products", 0)),
-            ("📊 Qoldiq", "stock", unread_by_type.get("stock", 0)),
             ("🔍 Checking", "checking", unread_by_type.get("checking", 0)),
             ("💰 Qarzlar", "supplier_debts", unread_by_type.get("supplier_debts", 0)),
             ("💸 Xarajatlar", "expenses", unread_by_type.get("expenses", 0)),
@@ -366,23 +349,14 @@ class NotificationsWidget(QWidget):
         self.active_filter = self.filter_combo.currentData() or "all"
         self._apply_filters()
 
-    def _get_threshold(self):
-        txt = self.threshold_combo.currentText()
-        if "3" in txt:
-            return 3
-        if "10" in txt:
-            return 10
-        if "20" in txt:
-            return 20
-        return 5
-
     def load_data(self):
-        threshold = self._get_threshold()
+        # The stock threshold picker went with the low-stock notifications it
+        # existed for.
         uid = self.user.get("id")
         if self.isVisible():
-            self._async_loader.start(lambda: db.get_notifications_data(threshold=threshold, user_id=uid), self._apply_loaded_data)
+            self._async_loader.start(lambda: db.get_notifications_data(user_id=uid), self._apply_loaded_data)
             return
-        self._apply_loaded_data(db.get_notifications_data(threshold=threshold, user_id=uid))
+        self._apply_loaded_data(db.get_notifications_data(user_id=uid))
 
     def _apply_loaded_data(self, data):
         summary = data.get("summary", {})
@@ -391,7 +365,7 @@ class NotificationsWidget(QWidget):
         # Update Summary Cards
         act_total = summary.get('product_activity_count', 0) + summary.get('sales_activity_count', 0)
         self.card_act.findChild(QLabel, "val_label").setText(f"{act_total} ta amal")
-        self.card_stock.findChild(QLabel, "val_label").setText(f"{summary.get('low_stock_count', 0)} ta mahsulot")
+        self.card_sales.findChild(QLabel, "val_label").setText(f"{summary.get('sales_activity_count', 0)} ta amal")
         self.card_debts.findChild(QLabel, "val_label").setText(f"{summary.get('debtors_count', 0)} ta mijoz")
         self.card_total.findChild(QLabel, "val_label").setText(f"{summary.get('total', 0)} ta")
 

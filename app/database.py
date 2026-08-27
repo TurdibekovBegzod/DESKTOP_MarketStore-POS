@@ -7162,14 +7162,15 @@ def get_read_notification_ids(user_id=None):
     return known
 
 
-def get_unread_notifications_count(user_id=None, threshold=5):
-    data = get_notifications_data(threshold=threshold, user_id=user_id)
+def get_unread_notifications_count(user_id=None, threshold=None):
+    # threshold is accepted and ignored: it only ever selected which products
+    # counted as low on stock, and those are no longer announced.
+    data = get_notifications_data(user_id=user_id)
     return data.get("summary", {}).get("unread_total", 0)
 
 
-def get_notifications_data(threshold=5, user_id=None):
+def get_notifications_data(threshold=None, user_id=None):
     read_ids = get_read_notification_ids(user_id=user_id)
-    low_stock = get_low_stock_products(threshold=threshold)
     debtors = get_all_debtors()
     debtors_with_debt = [d for d in debtors if (d.get("balance") or 0) > 0]
     sync_status = get_sync_status()
@@ -7204,25 +7205,9 @@ def get_notifications_data(threshold=5, user_id=None):
             "is_read": is_read,
         })
 
-    # 2. Low stock
-    for p in low_stock:
-        is_empty = (p.get("stock") or 0) <= 0
-        nid = f"stock_{p['id']}"
-        is_read = nid in read_ids
-        if not is_read:
-            unread_by_type["stock"] = unread_by_type.get("stock", 0) + 1
-
-        notifications.append({
-            "id": nid,
-            "type": "stock",
-            "level": "danger" if is_empty else "warning",
-            "title": f"Tugadi: {p['name']}" if is_empty else f"Kam qoldi: {p['name']}",
-            "message": f"Shtrix-kod: {p.get('barcode') or '-'} | Qoldiq: {p.get('stock', 0)} {p.get('unit', 'dona')} | Sotish narxi: {p.get('price', 0):,.0f} {p.get('price_currency', 'UZS')}",
-            "target": "products",
-            "created_at": p.get("created_at") or "",
-            "badge": "Tugagan" if is_empty else "Kam qolgan",
-            "is_read": is_read,
-        })
+    # Low stock used to be announced here. It is not news -- the stock figure
+    # is on the products page, and a shop with a hundred slow-moving lines had
+    # a notification list that was nothing else.
 
     # 3. Debtors
     for d in debtors_with_debt:
@@ -7272,7 +7257,6 @@ def get_notifications_data(threshold=5, user_id=None):
             "unread_by_type": unread_by_type,
             "product_activity_count": product_act_count,
             "sales_activity_count": sales_act_count,
-            "low_stock_count": len(low_stock),
             "debtors_count": len(debtors_with_debt),
             "pending_sync_count": pending,
         },
