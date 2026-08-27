@@ -25,6 +25,7 @@ class _FakeServer:
         self.generation = 0
 
     def push(self, _token, records, **_kwargs):
+        next_generation = self.generation + 1
         saved = 0
         for record in records:
             key = (record["table_name"], str(record["local_id"]))
@@ -34,10 +35,11 @@ class _FakeServer:
                     continue
             stored = dict(record)
             stored["sync_version"] = (existing["sync_version"] + 1) if existing else 1
-            stored["stored_at"] = f"t{self.generation + 1}"
+            stored["stored_at"] = f"t{next_generation}"
+            stored["change_seq"] = next_generation
             self.rows[key] = stored
             saved += 1
-        self.generation += 1
+        self.generation = next_generation
         return {"saved": saved, "batch_id": "b", "generation": self.generation, "rejected": []}
 
     def pull(self, _token, since=None, since_seq=None, table_name=None, include_deleted=True, timeout=30):
@@ -49,9 +51,13 @@ class _FakeServer:
                 continue
             if since is not None and row["stored_at"] <= since:
                 continue
+            if since_seq is not None and row["change_seq"] <= since_seq:
+                continue
             records.append({k: v for k, v in row.items() if k != "stored_at"})
         return {"records": records, "server_time": f"t{self.generation}",
-                "generation": self.generation}
+                "generation": self.generation,
+                "cursor": max((row["change_seq"] for row in records), default=0),
+                "cursor_supported": True}
 
     def state(self, *_args, **_kwargs):
         return {"generation": self.generation, "purge_generation": 0}
@@ -184,6 +190,32 @@ class LiveUpdatesTest(unittest.TestCase):
 
         self.assertIsNotNone(db.get_product_by_barcode("FROM-A"))
         self.assertIsNotNone(db.get_product_by_barcode("FROM-B"))
+
+    def test_an_offline_device_catches_every_missed_change_when_it_returns(self):
+        owner_a = self._use("a")
+        db.add_product({"barcode": "BEFORE", "name": "Avval", "price": 1,
+                        "cost": 1, "stock": 1, "unit": "dona"})
+        self._settle(owner_a)
+
+        owner_b = self._use("b")
+        self._settle(owner_b)
+        self.assertIsNotNone(db.get_product_by_barcode("BEFORE"))
+
+        # Device B is now offline. Several independent generations are written
+        # while it has no event stream and runs no sync turns.
+        self._use("a")
+        for barcode in ("MISSED-1", "MISSED-2", "MISSED-3"):
+            db.add_product({"barcode": barcode, "name": barcode, "price": 1,
+                            "cost": 1, "stock": 1, "unit": "dona"})
+            self._settle(owner_a)
+
+        # Reconnect/catch-up is one incremental turn. The durable cursor, not
+        # the number of live notifications B happened to hear, decides what it
+        # downloads.
+        self._use("b")
+        self._settle(owner_b)
+        for barcode in ("MISSED-1", "MISSED-2", "MISSED-3"):
+            self.assertIsNotNone(db.get_product_by_barcode(barcode))
 
     # -- a deletion travels too ---------------------------------------------
     def test_a_deletion_does_not_come_back_from_the_other_device(self):

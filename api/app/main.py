@@ -72,9 +72,10 @@ async def _release_poll_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    # Sync endpoints run in a threadpool; give the broker a handle on the serving
-    # loop so they can publish change events back into the SSE streams.
-    broker.bind_loop(asyncio.get_running_loop())
+    # The request that commits a change and the account's open SSE stream may be
+    # served by different workers. Redis carries the wake-up across processes;
+    # PostgreSQL generation polling remains the recovery path.
+    await broker.start(settings.sync_events_redis_url)
     poller = asyncio.create_task(_release_poll_loop())
     try:
         yield
@@ -82,6 +83,7 @@ async def lifespan(_app: FastAPI):
         poller.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await poller
+        await broker.stop()
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)

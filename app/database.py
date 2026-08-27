@@ -564,6 +564,7 @@ def _session_factory():
 @contextmanager
 def session_scope():
     session = _session_factory()()
+    announce_change = False
     try:
         yield session
         if session.new or session.dirty or session.deleted or session.info.get("has_writes"):
@@ -571,8 +572,12 @@ def session_scope():
             # then write the outbox on the same connection, then commit once.
             # Data and queue now land together or not at all.
             session.flush()
-            _flush_session_outbox(session)
+            announce_change = _flush_session_outbox(session)
             session.commit()
+            if announce_change:
+                # Wake sync only after both the data and its outbox entry are
+                # durable. The worker can now read exactly what committed.
+                _announce_local_change()
         else:
             session.rollback()
     except OperationalError as exc:
@@ -2194,7 +2199,7 @@ def _flush_session_outbox(session):
     """
     entries = session.info.get("sync_outbox_entries")
     if not entries or _is_sync_suspended():
-        return
+        return False
     connection = session.connection()
     _write_outbox_entries(connection, entries)
     _sync_state_set(connection, "last_dirty_at", _utc_now())
@@ -2204,9 +2209,7 @@ def _flush_session_outbox(session):
         str(_sync_state_int(connection, "pending_change_count") + len(entries)),
     )
     session.info["sync_outbox_entries"] = set()
-    # Anything written here has to reach the other devices, so say so at once
-    # rather than waiting for the next time somebody looks.
-    _announce_local_change()
+    return True
 
 
 def get_sync_status():

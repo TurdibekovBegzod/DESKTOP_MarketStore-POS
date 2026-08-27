@@ -22,7 +22,9 @@ class SuperadminAvailabilityTest(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app)
         self.previous = os.environ.get("SUPERADMIN_PASSWORD")
-        os.environ.pop("SUPERADMIN_PASSWORD", None)
+        # An explicit empty value overrides a developer's real api/.env. Tests
+        # must never inherit control-panel credentials from the host machine.
+        os.environ["SUPERADMIN_PASSWORD"] = ""
         get_settings.cache_clear()
 
     def tearDown(self):

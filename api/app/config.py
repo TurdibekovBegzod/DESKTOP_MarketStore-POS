@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     password_reset_cooldown_seconds: int = 60
     celery_broker_url: str = "redis://localhost:6379/0"
     celery_result_backend: str = "redis://localhost:6379/1"
+    # PostgreSQL stores sync data; Redis wakes SSE clients across API workers.
+    sync_events_redis_url: str | None = "redis://localhost:6379/2"
     github_repo: str = "TurdibekovBegzod/DESKTOP_MarketStore-POS"
     github_token: str | None = None
     # Shared secret the release workflow presents when it tells us a new build

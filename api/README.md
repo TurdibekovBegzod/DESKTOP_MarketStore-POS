@@ -57,7 +57,7 @@ Repo ichidagi test proxy alohida profile sifatida mavjud: `docker compose --prof
 Docker compose quyidagilarni ko'taradi:
 
 - `postgres` - asosiy PostgreSQL baza
-- `redis` - Celery broker/result backend
+- `redis` - Celery queue va barcha API workerlar orasidagi realtime event bus
 - `api` - FastAPI service
 - `worker` - email yuboradigan Celery worker
 - `ngrok` - `tunnel` profilidagi HTTPS tunnel
@@ -103,9 +103,15 @@ Oqim ulanganda bir marta `hello` yuboradi, har 20 soniyada `ping` yuboradi (prox
 yopib qo'ymasligi uchun). Qurilma uzilib qayta ulansa `?since_generation=N` bilan keladi va
 o'tkazib yuborilgan o'zgarish `resumed: true` bilan qaytariladi.
 
-Xabar tarqatish process ichidagi broker orqali darhol boradi; bir nechta uvicorn worker
-ishlatilganda esa oqim `sync_meta` ni 2 soniyada bir tekshirib turadi, shuning uchun
-hech qanday qo'shimcha infratuzilma (Redis va h.k.) talab qilinmaydi.
+Commitdan keyin xabar `SYNC_EVENTS_REDIS_URL` (`redis://redis:6379/2`) orqali barcha
+API workerlarga tarqaladi. Shu sabab push so'rovi bir workerda, device SSE ulanishi
+boshqa workerda bo'lsa ham signal darhol yetadi. Redis vaqtincha ishlamasa ma'lumot
+yo'qolmaydi: PostgreSQL asosiy manba bo'lib qoladi va har bir SSE oqimi
+`sync_meta.generation` ni 2 soniyada bir tekshirib, o'tkazib yuborilgan signalni tiklaydi.
+
+Desktop signalni olgach `change_seq` cursoridan keyingi satrlarni incremental pull
+qiladi. Offline qurilma qayta ulanganda `since_generation` orqali catch-up boshlanadi;
+foydalanuvchi `Yuborish` yoki `Olish` tugmasini bosishi shart emas.
 
 Nginx orqali ishlatilganda `/api/v1/sync/events` uchun `proxy_buffering off` kerak -
 u `nginx/default.conf` da sozlangan.

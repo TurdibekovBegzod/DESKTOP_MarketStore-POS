@@ -114,6 +114,14 @@ class SyncEngineTest(unittest.TestCase):
             self.engine._tick()
         again.assert_not_called()
 
+    def test_a_change_rearms_an_idle_worker_immediately(self):
+        self.engine._timer.setInterval(sync_engine.IDLE_INTERVAL_MS)
+
+        self.engine.request_turn()
+
+        self.assertEqual(self.engine._timer.interval(), 1)
+        self.assertTrue(self.engine._pull_requested.is_set())
+
     def test_a_turn_that_changed_nothing_says_nothing(self):
         self.engine.request_turn()
         with patch.object(sync_engine.sync_service, "reconcile_full", return_value={}), \

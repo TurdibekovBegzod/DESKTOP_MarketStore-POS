@@ -53,6 +53,7 @@ class SyncEngine(QObject):
     applied = pyqtSignal(dict)
     state_changed = pyqtSignal(str)
     conflict = pyqtSignal()
+    wake_requested = pyqtSignal()
 
     def __init__(self, user_provider, parent=None):
         super().__init__(parent)
@@ -65,6 +66,10 @@ class SyncEngine(QObject):
         self._last_turn_at = 0.0
         # Never reconciled in this run, so the first turn is a full one.
         self._last_full_at = None
+        # Emitting this signal is safe from the GUI thread, a database callback
+        # or any future background writer. Qt runs the slot in this object's
+        # worker thread, where changing its timer is legal.
+        self.wake_requested.connect(self._wake_now)
 
     # -- lifecycle -------------------------------------------------------
     @pyqtSlot()
@@ -88,6 +93,7 @@ class SyncEngine(QObject):
     def request_turn(self):
         """Something changed -- here or on another device -- so act at once."""
         self._pull_requested.set()
+        self.wake_requested.emit()
 
     def notify_local_change(self):
         """Called from whichever thread just wrote to the database.
@@ -96,6 +102,16 @@ class SyncEngine(QObject):
         happens on this worker's own next tick.
         """
         self._pull_requested.set()
+        self.wake_requested.emit()
+
+    @pyqtSlot()
+    def _wake_now(self):
+        """Re-arm an idle worker immediately, from inside its own Qt thread."""
+        if self._stopping.is_set():
+            return
+        self._pull_requested.set()
+        if self._timer is not None and self._timer.interval() != 1:
+            self._timer.setInterval(1)
 
     # -- the loop --------------------------------------------------------
     def _tick(self):

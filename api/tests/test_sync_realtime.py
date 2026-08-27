@@ -76,6 +76,49 @@ class SyncEventBrokerTest(unittest.TestCase):
         broker = SyncEventBroker()
         broker.publish("acct-a", {"generation": 1})  # must not raise
 
+    def test_a_message_from_another_api_worker_reaches_only_its_account(self):
+        async def scenario():
+            broker = SyncEventBroker()
+            broker.bind_loop(asyncio.get_running_loop())
+            wanted = broker.subscribe("acct-a")
+            other = broker.subscribe("acct-b")
+            broker._accept_redis_message(json.dumps({
+                "source": "worker-2",
+                "target": "acct-a",
+                "payload": {"type": "change", "generation": 12},
+            }))
+            self.assertEqual((await wanted.get())["generation"], 12)
+            self.assertTrue(other.empty())
+
+        asyncio.run(scenario())
+
+    def test_a_fleet_message_from_redis_reaches_every_open_stream(self):
+        async def scenario():
+            broker = SyncEventBroker()
+            broker.bind_loop(asyncio.get_running_loop())
+            first = broker.subscribe("acct-a")
+            second = broker.subscribe("acct-b")
+            broker._accept_redis_message(json.dumps({
+                "source": "worker-2",
+                "target": "*",
+                "payload": {"type": "release", "tag": "v2.0.0"},
+            }))
+            self.assertEqual((await first.get())["tag"], "v2.0.0")
+            self.assertEqual((await second.get())["tag"], "v2.0.0")
+
+        asyncio.run(scenario())
+
+    def test_a_malformed_redis_message_is_ignored(self):
+        async def scenario():
+            broker = SyncEventBroker()
+            broker.bind_loop(asyncio.get_running_loop())
+            queue = broker.subscribe("acct-a")
+            broker._accept_redis_message(b"not-json")
+            broker._accept_redis_message(json.dumps({"target": "acct-a", "payload": []}))
+            self.assertTrue(queue.empty())
+
+        asyncio.run(scenario())
+
 
 class SseFramingTest(unittest.TestCase):
     def test_frame_is_well_formed(self):
