@@ -77,7 +77,7 @@ def _apply_generation(generation):
 
 def push_local_changes(user, batch_size=1000, incremental=True, force=False):
     token = _token_for_user(user)
-    records = db.export_sync_records(incremental=incremental)
+    records, watermark = db.export_sync_records(incremental=incremental, with_watermark=True)
     device_key = db.get_sync_device_key()
     expected = None if force else db.get_sync_generation()
 
@@ -85,7 +85,7 @@ def push_local_changes(user, batch_size=1000, incremental=True, force=False):
         # Nothing to send. Deliberately do NOT adopt the server's counter here:
         # we have not seen its data yet, and pretending otherwise would hide a
         # pending download.
-        db.mark_sync_pushed()
+        db.mark_sync_pushed(**watermark)
         db.mark_server_reseed_complete()
         return {"sent": 0, "saved": 0, "batch_id": None, "generation": db.get_sync_generation()}
 
@@ -124,7 +124,9 @@ def push_local_changes(user, batch_size=1000, incremental=True, force=False):
             generation = int(api_client.get_sync_state(token).get("generation") or 0)
         except api_client.ApiClientError:
             generation = None
-    db.mark_sync_pushed()
+    # Clear only what this push carried: anything queued while it was in flight
+    # has a higher seq and survives for the next round.
+    db.mark_sync_pushed(**watermark)
     db.mark_server_reseed_complete()
     if generation is not None:
         _apply_generation(generation)

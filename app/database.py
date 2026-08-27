@@ -7,7 +7,8 @@ import secrets
 import shutil
 import sqlite3
 import sys
-from contextlib import contextmanager
+import threading
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import (
@@ -69,7 +70,25 @@ Base = declarative_base()
 _ENGINE = None
 _ENGINE_PATH = None
 _SessionLocal = None
-_SYNC_SUSPENDED = False
+# Sync suppression is per-thread, not per-process. The sync worker imports on
+# its own thread while the GUI thread commits sales; a shared flag made those
+# concurrent sales invisible to the outbox, so they were never pushed.
+_SYNC_LOCAL = threading.local()
+
+
+def _is_sync_suspended():
+    return getattr(_SYNC_LOCAL, "suspended", False)
+
+
+@contextmanager
+def suspend_sync():
+    """Stop THIS thread's writes from entering the sync outbox."""
+    previous = getattr(_SYNC_LOCAL, "suspended", False)
+    _SYNC_LOCAL.suspended = True
+    try:
+        yield
+    finally:
+        _SYNC_LOCAL.suspended = previous
 _ACTIVE_ACCOUNT_UID = None
 
 SYNC_TABLES = (
@@ -120,7 +139,7 @@ class Row(dict):
 
 @event.listens_for(Session, "before_flush")
 def _mark_session_deletes(session, _flush_context, _instances):
-    if _SYNC_SUSPENDED:
+    if _is_sync_suspended():
         return
     try:
         entries = session.info.setdefault("sync_outbox_entries", set())
@@ -143,7 +162,7 @@ def _mark_session_deletes(session, _flush_context, _instances):
 @event.listens_for(Session, "after_flush")
 def _mark_session_writes(session, _flush_context):
     session.info["has_writes"] = True
-    if _SYNC_SUSPENDED:
+    if _is_sync_suspended():
         return
     try:
         entries = session.info.setdefault("sync_outbox_entries", set())
@@ -477,12 +496,12 @@ def session_scope():
     try:
         yield session
         if session.new or session.dirty or session.deleted or session.info.get("has_writes"):
+            # Flush first so the after_flush listener has collected everything,
+            # then write the outbox on the same connection, then commit once.
+            # Data and queue now land together or not at all.
+            session.flush()
+            _flush_session_outbox(session)
             session.commit()
-            entries = session.info.get("sync_outbox_entries")
-            if not _SYNC_SUSPENDED:
-                if entries:
-                    _record_sync_outbox_entries(entries)
-                _mark_sync_dirty()
         else:
             session.rollback()
     except OperationalError as exc:
@@ -1278,22 +1297,36 @@ def _default_product_section_id(session):
     return section.id
 
 
+# Every synced column that points at a user. Missing one here means a merged
+# account leaves rows attributed to a user id that no longer exists - which is
+# how cashier salary and cashier-charged expenses silently lose their owner.
+_USER_REFERENCE_COLUMNS = (
+    (Sale, "cashier_id"),
+    (Expense, "user_id"),
+    (Expense, "cashier_id"),
+    (Product, "created_by_user_id"),
+    (Debtor, "user_id"),
+    (InventoryCheckSession, "started_by"),
+)
+
+
 def _reassign_user_references(session, source_user_id, target_user_id):
     if source_user_id == target_user_id:
         return
+    # Deliberately ORM loops, not bulk UPDATEs: a bulk statement never reaches
+    # the flush listeners, so the rewritten rows would stay in the local file
+    # and never be pushed. Other devices would keep the old attribution.
+    for model, column_name in _USER_REFERENCE_COLUMNS:
+        column = getattr(model, column_name)
+        for row in session.scalars(select(model).where(column == source_user_id)):
+            setattr(row, column_name, target_user_id)
+
+    # login_logs is device-local history, not synced - a bulk update is fine.
     session.execute(update(LoginLog).where(LoginLog.user_id == source_user_id).values(user_id=target_user_id))
-    session.execute(update(Expense).where(Expense.user_id == source_user_id).values(user_id=target_user_id))
-    session.execute(update(Sale).where(Sale.cashier_id == source_user_id).values(cashier_id=target_user_id))
-    session.execute(
-        update(InventoryCheckSession)
-        .where(InventoryCheckSession.started_by == source_user_id)
-        .values(started_by=target_user_id)
-    )
     session.query(UserSetting).filter(UserSetting.user_id == source_user_id).delete(synchronize_session=False)
 
 
 def init_db(account_owner=None, seed_defaults=True):
-    global _SYNC_SUSPENDED
     clear_session_notifications()
     engine = _get_engine()
     try:
@@ -1310,9 +1343,9 @@ def init_db(account_owner=None, seed_defaults=True):
             account_owner.get("email"),
         )
 
-    previous_sync_state = _SYNC_SUSPENDED
-    if account_owner:
-        _SYNC_SUSPENDED = True
+    # Seeding an account's own rows must not look like a user edit.
+    _sync_suspend_token = suspend_sync() if account_owner else nullcontext()
+    _sync_suspend_token.__enter__()
     try:
         with session_scope() as session:
             if account_owner:
@@ -1426,7 +1459,7 @@ def init_db(account_owner=None, seed_defaults=True):
             conn.exec_driver_sql("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_email ON users(email)")
         migrate_finance_manual_json()
     finally:
-        _SYNC_SUSPENDED = previous_sync_state
+        _sync_suspend_token.__exit__(None, None, None)
 
 
 def _quote_identifier(name):
@@ -1502,15 +1535,6 @@ def _sync_state_int(conn, key, default=0):
         return default
 
 
-def _mark_sync_dirty():
-    try:
-        with _get_engine().begin() as conn:
-            _sync_state_set(conn, "last_dirty_at", _utc_now())
-            _sync_state_set(conn, "pending_change_count", str(_sync_state_int(conn, "pending_change_count") + 1))
-    except Exception:
-        pass
-
-
 def get_sync_device_key():
     with _get_engine().begin() as conn:
         key = _sync_state_get(conn, "device_key")
@@ -1521,35 +1545,80 @@ def get_sync_device_key():
 
 
 def _ensure_sync_outbox_table(conn):
+    # `seq` is what lets a push clear exactly what it uploaded. Without it, a
+    # sale rung up while the upload was in flight got deleted from the queue
+    # along with the rows that were actually sent, and never reached the server.
     conn.exec_driver_sql("""
         CREATE TABLE IF NOT EXISTS sync_outbox (
+            seq INTEGER PRIMARY KEY AUTOINCREMENT,
             table_name TEXT NOT NULL,
             local_id TEXT NOT NULL,
             action TEXT NOT NULL DEFAULT 'upsert',
             updated_at TEXT NOT NULL,
-            PRIMARY KEY (table_name, local_id)
+            UNIQUE (table_name, local_id)
         )
     """)
+    columns = {
+        row[1] for row in conn.exec_driver_sql("PRAGMA table_info(sync_outbox)").fetchall()
+    }
+    if "seq" in columns:
+        return
+    # Older builds created the table without `seq`. Rebuild it, keeping every
+    # queued change - these are edits that have not reached the server yet.
+    conn.exec_driver_sql("ALTER TABLE sync_outbox RENAME TO sync_outbox_legacy")
+    conn.exec_driver_sql("""
+        CREATE TABLE sync_outbox (
+            seq INTEGER PRIMARY KEY AUTOINCREMENT,
+            table_name TEXT NOT NULL,
+            local_id TEXT NOT NULL,
+            action TEXT NOT NULL DEFAULT 'upsert',
+            updated_at TEXT NOT NULL,
+            UNIQUE (table_name, local_id)
+        )
+    """)
+    conn.exec_driver_sql("""
+        INSERT INTO sync_outbox (table_name, local_id, action, updated_at)
+        SELECT table_name, local_id, action, updated_at FROM sync_outbox_legacy
+    """)
+    conn.exec_driver_sql("DROP TABLE sync_outbox_legacy")
 
 
 def _sync_primary_key_column(table_name):
     return "key" if table_name == "app_settings" else "id"
 
 
-def _record_sync_outbox_entries(entries):
+def _write_outbox_entries(conn, entries):
     if not entries:
         return
     now = _utc_now()
-    try:
-        with _get_engine().begin() as conn:
-            _ensure_sync_outbox_table(conn)
-            for table_name, local_id, action in entries:
-                conn.exec_driver_sql(
-                    "INSERT OR REPLACE INTO sync_outbox (table_name, local_id, action, updated_at) VALUES (?, ?, ?, ?)",
-                    (table_name, str(local_id), action, now),
-                )
-    except Exception:
-        pass
+    _ensure_sync_outbox_table(conn)
+    for table_name, local_id, action in entries:
+        conn.exec_driver_sql(
+            "INSERT OR REPLACE INTO sync_outbox (table_name, local_id, action, updated_at) VALUES (?, ?, ?, ?)",
+            (table_name, str(local_id), action, now),
+        )
+
+
+def _flush_session_outbox(session):
+    """Persist this session's queued changes on the session's own connection.
+
+    Writing them here rather than in a separate transaction after commit is the
+    whole point: previously a crash, a lock, or the bare `except` between the
+    two transactions dropped the change permanently, and the row was never
+    pushed again because the data commit had already succeeded.
+    """
+    entries = session.info.get("sync_outbox_entries")
+    if not entries or _is_sync_suspended():
+        return
+    connection = session.connection()
+    _write_outbox_entries(connection, entries)
+    _sync_state_set(connection, "last_dirty_at", _utc_now())
+    _sync_state_set(
+        connection,
+        "pending_change_count",
+        str(_sync_state_int(connection, "pending_change_count") + len(entries)),
+    )
+    session.info["sync_outbox_entries"] = set()
 
 
 def get_sync_status():
@@ -1586,19 +1655,30 @@ def get_user_api_token(user_id):
         return row.value if row and row.value else None
 
 
-def export_sync_records(incremental=False):
+def export_sync_records(incremental=False, with_watermark=False):
+    """Collect the records to push.
+
+    With ``with_watermark`` the caller also gets the highest outbox row and the
+    tombstones included, so a successful push can clear exactly what it sent and
+    leave anything queued in the meantime for the next round.
+    """
     now = _utc_now()
     device_key = get_sync_device_key()
     records = []
+    max_seq = None
+    tombstone_ids = []
     with _get_engine().begin() as conn:
         _ensure_sync_outbox_table(conn)
 
         # Incremental mode: only export records that were created, modified or deleted
         if incremental and not is_server_reseed_required():
             outbox_rows = conn.exec_driver_sql(
-                "SELECT table_name, local_id, action, updated_at FROM sync_outbox"
+                "SELECT seq, table_name, local_id, action, updated_at FROM sync_outbox ORDER BY seq"
             ).mappings().all()
             for item in outbox_rows:
+                seq = item["seq"]
+                if max_seq is None or seq > max_seq:
+                    max_seq = seq
                 table_name = item["table_name"]
                 local_id = item["local_id"]
                 action = item["action"]
@@ -1637,6 +1717,7 @@ def export_sync_records(incremental=False):
                 for tombstone in tombstones:
                     if tombstone["table_name"] not in SYNC_TABLES:
                         continue
+                    tombstone_ids.append((tombstone["table_name"], str(tombstone["local_id"])))
                     records.append({
                         "table_name": tombstone["table_name"],
                         "local_id": str(tombstone["local_id"]),
@@ -1645,6 +1726,8 @@ def export_sync_records(incremental=False):
                         "deleted_at": tombstone["deleted_at"],
                         "source_device_key": device_key,
                     })
+            if with_watermark:
+                return records, {"up_to_seq": max_seq, "tombstone_ids": tombstone_ids}
             return records
 
         # Full export (when server reseed is required or explicitly requested)
@@ -1696,17 +1779,19 @@ def export_sync_records(incremental=False):
                     "deleted_at": tombstone["deleted_at"],
                     "source_device_key": device_key,
                 })
+    # A full export replaces everything, so the whole queue is superseded.
+    if with_watermark:
+        return records, {"up_to_seq": None, "tombstone_ids": None}
     return records
 
 
 def import_sync_records(records):
-    global _SYNC_SUSPENDED
     if not records:
         return 0
     imported = 0
     engine = _get_engine()
-    previous = _SYNC_SUSPENDED
-    _SYNC_SUSPENDED = True
+    _sync_suspend_token = suspend_sync()
+    _sync_suspend_token.__enter__()
     try:
         table_order = {table_name: index for index, table_name in enumerate(SYNC_TABLES)}
         ordered_records = sorted(
@@ -1767,20 +1852,39 @@ def import_sync_records(records):
                 imported += 1
             _sync_state_set(conn, "last_pull_at", _utc_now())
     finally:
-        _SYNC_SUSPENDED = previous
+        _sync_suspend_token.__exit__(None, None, None)
     return imported
 
 
-def mark_sync_pushed():
+def mark_sync_pushed(up_to_seq=None, tombstone_ids=None):
+    """Clear the queue after a successful push.
+
+    ``up_to_seq`` is the highest outbox row the push actually carried. Anything
+    queued after that - a sale rung up while the upload was in flight - stays
+    queued for the next push instead of being deleted unsent.
+    """
     with _get_engine().begin() as conn:
         now = _utc_now()
         _ensure_sync_outbox_table(conn)
-        _sync_state_set(conn, "last_push_at", now)
-        _sync_state_set(conn, "last_dirty_at", "")
-        _sync_state_set(conn, "pending_change_count", "0")
-        conn.exec_driver_sql("DELETE FROM sync_outbox")
+        if up_to_seq is None:
+            conn.exec_driver_sql("DELETE FROM sync_outbox")
+        else:
+            conn.exec_driver_sql("DELETE FROM sync_outbox WHERE seq <= ?", (int(up_to_seq),))
         if _has_table(conn, "sync_tombstones"):
-            conn.exec_driver_sql("DELETE FROM sync_tombstones")
+            if tombstone_ids is None:
+                conn.exec_driver_sql("DELETE FROM sync_tombstones")
+            elif tombstone_ids:
+                for table_name, local_id in tombstone_ids:
+                    conn.exec_driver_sql(
+                        "DELETE FROM sync_tombstones WHERE table_name = ? AND local_id = ?",
+                        (table_name, str(local_id)),
+                    )
+        remaining = conn.exec_driver_sql("SELECT COUNT(*) FROM sync_outbox").scalar() or 0
+        if _has_table(conn, "sync_tombstones"):
+            remaining += conn.exec_driver_sql("SELECT COUNT(*) FROM sync_tombstones").scalar() or 0
+        _sync_state_set(conn, "last_push_at", now)
+        _sync_state_set(conn, "last_dirty_at", "" if not remaining else now)
+        _sync_state_set(conn, "pending_change_count", str(remaining))
 
 
 def get_app_settings(user_id=None):
@@ -2065,9 +2169,8 @@ def wipe_sync_tables():
     Deleting that row would take its ``user_settings`` (including the API token)
     with it via the cascade and lock the user out of their own account.
     """
-    global _SYNC_SUSPENDED
-    previous = _SYNC_SUSPENDED
-    _SYNC_SUSPENDED = True
+    _sync_suspend_token = suspend_sync()
+    _sync_suspend_token.__enter__()
     try:
         with _get_engine().begin() as conn:
             protected = _protected_user_ids(conn)
@@ -2089,7 +2192,7 @@ def wipe_sync_tables():
             _ensure_sync_outbox_table(conn)
             conn.exec_driver_sql("DELETE FROM sync_outbox")
     finally:
-        _SYNC_SUSPENDED = previous
+        _sync_suspend_token.__exit__(None, None, None)
 
 
 def replace_local_from_records(records):
@@ -2497,6 +2600,16 @@ def add_product(data: dict):
             product = Product(**{k: v for k, v in data.items() if k in fields and k != "id"})
             session.add(product)
             session.flush()
+            # Opening balance. Without it the ledger has no starting point and
+            # `stock` can never be recomputed from `stock_movements`.
+            opening = int(product.stock or 0)
+            if opening:
+                session.add(StockMovement(
+                    product_id=product.id,
+                    type="boshlangich",
+                    quantity=opening,
+                    note="Mahsulot qo'shildi",
+                ))
             p_id = product.id
             p_name = product.name
             p_barcode = product.barcode or "-"
@@ -2523,10 +2636,22 @@ def update_product(product_id, data: dict):
             product = session.get(Product, product_id)
             if not product:
                 return
+            # A stock edit is an inventory correction, not a plain field write:
+            # route it through the ledger so the change is explainable later.
+            requested_stock = data.pop("stock", None)
             for key, value in data.items():
                 if hasattr(product, key) and key != "id":
                     setattr(product, key, value)
             session.flush()
+            if requested_stock is not None:
+                delta = int(requested_stock) - int(product.stock or 0)
+                if delta:
+                    _apply_stock_delta(
+                        session, product.id, delta,
+                        movement_type="korrektirovka",
+                        note="Mahsulot tahrirlashda qo'lda tuzatildi",
+                    )
+                    session.refresh(product)
             p_name = product.name
             p_barcode = product.barcode or "-"
             p_price = float(product.price or 0)
@@ -2544,6 +2669,44 @@ def update_product(product_id, data: dict):
         raise AppError("Bu shtrix-kod allaqachon mavjud.") from exc
 
 
+def _apply_stock_delta(session, product_id, delta, movement_type, note=""):
+    """Move stock and log the movement, always together.
+
+    Every path that changes `products.stock` goes through here. A stock column
+    that moves without a matching `stock_movements` row is a discrepancy nobody
+    can explain afterwards, and it makes the balance impossible to recompute
+    from the ledger.
+    """
+    delta = int(delta or 0)
+    if delta == 0 or not product_id:
+        return 0
+    session.execute(
+        update(Product)
+        .where(Product.id == product_id)
+        .values(stock=func.coalesce(Product.stock, 0) + delta)
+    )
+    # The bulk UPDATE above is invisible to the ORM flush listeners, so the row
+    # has to be queued for sync by hand - same as create_sale does.
+    session.info.setdefault("sync_outbox_entries", set()).add(
+        ("products", str(product_id), "upsert")
+    )
+    session.add(StockMovement(
+        product_id=product_id,
+        type=movement_type,
+        quantity=delta,
+        note=note or None,
+    ))
+    return delta
+
+
+def _restore_product_stock(session, product_id, quantity, movement_type, note=""):
+    """Give stock back after a sale line is cancelled or returned."""
+    quantity = int(quantity or 0)
+    if quantity <= 0:
+        return 0
+    return _apply_stock_delta(session, product_id, quantity, movement_type, note)
+
+
 def _cleanup_unfinalized_sales_for_product(session, product_id):
     items = session.execute(
         select(SaleItem)
@@ -2553,6 +2716,19 @@ def _cleanup_unfinalized_sales_for_product(session, product_id):
     affected_sale_ids = set()
     for item in items:
         affected_sale_ids.add(item.sale_id)
+        # create_sale already took this quantity out of stock and logged a
+        # negative "sotuv" movement. Deleting the item without putting it back
+        # leaks inventory permanently and leaves an orphaned movement whose
+        # parent no longer exists, so post the reversal here.
+        outstanding = max(0, (item.quantity or 0) - (item.returned_quantity or 0))
+        if outstanding and item.product_id:
+            _restore_product_stock(
+                session,
+                item.product_id,
+                outstanding,
+                movement_type="bekor",
+                note=f"Yakunlanmagan sotuv bekor qilindi (#{item.sale_id})",
+            )
         session.merge(SyncTombstone(
             table_name="sale_items",
             local_id=item.id,
@@ -3154,23 +3330,80 @@ def mark_inventory_product_checked(session_id, barcode, quantity=1, section_id=N
         return _row_from_model(item)
 
 
-def finish_inventory_check(session_id):
+def get_inventory_check_discrepancies(session_id):
+    """Products counted short during a stocktake, with the missing quantity.
+
+    Read-only: it reports what a correction *would* change, so the operator can
+    see the write-off before agreeing to it.
+    """
+    with session_scope() as session:
+        rows = session.execute(
+            select(InventoryCheckItem, Product.name, Product.unit)
+            .outerjoin(Product, Product.id == InventoryCheckItem.product_id)
+            .where(InventoryCheckItem.session_id == session_id)
+        ).all()
+        result = []
+        for item, product_name, unit in rows:
+            expected = int(item.expected_stock or 0)
+            counted = int(item.checked_quantity or 0)
+            # Only items somebody actually scanned. An untouched row means "not
+            # counted", not "counted as zero" - writing those off would destroy
+            # the stock of every product the operator never reached.
+            if not item.checked_at and counted == 0:
+                continue
+            if counted == expected:
+                continue
+            result.append(Row(dict(
+                product_id=item.product_id,
+                product_name=product_name or "-",
+                unit=unit or "dona",
+                expected_stock=expected,
+                counted_quantity=counted,
+                delta=counted - expected,
+            )))
+        return result
+
+
+def finish_inventory_check(session_id, apply_corrections=False):
+    """Close a stocktake, optionally writing the counted quantities into stock.
+
+    ``apply_corrections`` defaults to False: a stocktake that silently wrote
+    inventory off would destroy stock value without anyone agreeing to it. When
+    it is on, every adjustment goes through the ledger like any other movement,
+    so the write-off is explainable afterwards.
+    """
     counts = get_inventory_check_counts(session_id)
+    discrepancies = get_inventory_check_discrepancies(session_id) if apply_corrections else []
+    corrected = 0
     with session_scope() as session:
         check = session.get(InventoryCheckSession, session_id)
         if not check or check.status != "active":
             raise AppError("Aktiv checking jarayoni topilmadi.")
+        for row in discrepancies:
+            if _apply_stock_delta(
+                session,
+                row["product_id"],
+                row["delta"],
+                movement_type="inventarizatsiya",
+                note=f"Tekshiruv #{session_id}: {row['expected_stock']} -> {row['counted_quantity']}",
+            ):
+                corrected += 1
         check.status = "finished"
         check.finished_at = _now()
+    detail = f"Tekshirildi: {counts.get('checked_count', 0)} ta | Qolgan: {counts.get('unchecked_count', 0)} ta"
+    if corrected:
+        detail += f" | Qoldiq tuzatildi: {corrected} ta"
     log_activity(
         "checking_finished",
         "Tekshiruv (Checking) yakunlandi",
-        f"Tekshirildi: {counts.get('checked_count', 0)} ta | Qolgan: {counts.get('unchecked_count', 0)} ta",
+        detail,
         level="success",
         target="checking",
         badge="Tugallandi",
     )
-    return counts
+    counts = dict(counts)
+    counts["corrected_count"] = corrected
+    return Row(counts)
 
 
 def create_sale(customer_id, cashier_id, items, total, discount, paid, payment_method, currency_code="UZS", exchange_rate=1, paid_original=None, customer_name=None, customer_phone=None, is_finalized=0):
@@ -5079,9 +5312,8 @@ def sync_online_user(email, display_name=None, role="admin", access_token=None, 
     safe_uid = _safe_account_uid(user_uid) if user_uid else None
     if safe_uid and _ACTIVE_ACCOUNT_UID and safe_uid != _ACTIVE_ACCOUNT_UID:
         raise AppError("Account bazasi boshqa userga tegishli.")
-    global _SYNC_SUSPENDED
-    previous = _SYNC_SUSPENDED
-    _SYNC_SUSPENDED = True
+    _sync_suspend_token = suspend_sync()
+    _sync_suspend_token.__enter__()
     try:
         with session_scope() as session:
             user = session.scalar(select(User).where(User.email == email))
@@ -5111,18 +5343,17 @@ def sync_online_user(email, display_name=None, role="admin", access_token=None, 
                 session.merge(uid_row)
             return _row_from_model(user)
     finally:
-        _SYNC_SUSPENDED = previous
+        _sync_suspend_token.__exit__(None, None, None)
 
 
 def log_login(user):
-    global _SYNC_SUSPENDED
-    previous = _SYNC_SUSPENDED
-    _SYNC_SUSPENDED = True
+    _sync_suspend_token = suspend_sync()
+    _sync_suspend_token.__enter__()
     try:
         with session_scope() as session:
             session.add(LoginLog(user_id=user["id"], username=user.get("email") or user["username"], role=user["role"], logged_at=_utc_now()))
     finally:
-        _SYNC_SUSPENDED = previous
+        _sync_suspend_token.__exit__(None, None, None)
     u_name = user.get("email") or user.get("username")
     u_role = str(user.get("role", "cashier")).title()
     log_activity(
@@ -5138,9 +5369,8 @@ def log_login(user):
 def touch_user_activity(user_id):
     if not user_id:
         return
-    global _SYNC_SUSPENDED
-    previous = _SYNC_SUSPENDED
-    _SYNC_SUSPENDED = True
+    _sync_suspend_token = suspend_sync()
+    _sync_suspend_token.__enter__()
     try:
         with session_scope() as session:
             user = session.get(User, user_id)
@@ -5150,31 +5380,29 @@ def touch_user_activity(user_id):
             row.value = _utc_now()
             session.merge(row)
     finally:
-        _SYNC_SUSPENDED = previous
+        _sync_suspend_token.__exit__(None, None, None)
     _touch_account_session(active=True)
 
 
 def clear_user_activity(user_id):
     if not user_id:
         return
-    global _SYNC_SUSPENDED
-    previous = _SYNC_SUSPENDED
-    _SYNC_SUSPENDED = True
+    _sync_suspend_token = suspend_sync()
+    _sync_suspend_token.__enter__()
     try:
         with session_scope() as session:
             row = session.get(UserSetting, {"user_id": user_id, "key": "last_activity_utc"})
             if row:
                 session.delete(row)
     finally:
-        _SYNC_SUSPENDED = previous
+        _sync_suspend_token.__exit__(None, None, None)
     _touch_account_session(active=False)
 
 
 def remove_foreign_online_accounts(owner_user_id, account_uid):
     safe_uid = _safe_account_uid(account_uid)
-    global _SYNC_SUSPENDED
-    previous = _SYNC_SUSPENDED
-    _SYNC_SUSPENDED = True
+    _sync_suspend_token = suspend_sync()
+    _sync_suspend_token.__enter__()
     try:
         with session_scope() as session:
             token_rows = session.execute(
@@ -5192,7 +5420,7 @@ def remove_foreign_online_accounts(owner_user_id, account_uid):
                 _reassign_user_references(session, foreign_id, owner_user_id)
                 session.delete(foreign_user)
     finally:
-        _SYNC_SUSPENDED = previous
+        _sync_suspend_token.__exit__(None, None, None)
 
 
 def restore_recent_account_user(max_days=7, max_minutes=None):
