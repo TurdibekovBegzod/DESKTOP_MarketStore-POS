@@ -2942,6 +2942,69 @@ def get_ledger_baseline():
     ))
 
 
+def count_pending_sync_rows():
+    """How many rows are actually queued to go out.
+
+    Read from the queue rather than the counter kept beside it. The counter is
+    a convenience; if the two ever drift apart, the queue is the one that
+    holds real work, and trusting the counter would leave that work unsent
+    with nothing to show for it.
+    """
+    with _get_engine().begin() as conn:
+        _ensure_sync_outbox_table(conn)
+        total = conn.exec_driver_sql("SELECT COUNT(*) FROM sync_outbox").scalar() or 0
+        if _has_table(conn, "sync_tombstones"):
+            total += conn.exec_driver_sql("SELECT COUNT(*) FROM sync_tombstones").scalar() or 0
+    return int(total)
+
+
+def record_sync_failure(error):
+    """Keep the last thing that went wrong where a person can find it.
+
+    Automatic sync has no button and says nothing when it works, so a failure
+    that leaves no trace is indistinguishable from the feature being switched
+    off -- which is precisely how a broken sync went unnoticed.
+    """
+    try:
+        with _get_engine().begin() as conn:
+            _sync_state_set(conn, "last_sync_error", f"{type(error).__name__}: {error}"[:400])
+            _sync_state_set(conn, "last_sync_error_at", _utc_now())
+    except Exception:
+        pass
+
+
+def record_sync_success(outcome=None):
+    try:
+        summary = ""
+        if outcome:
+            summary = (
+                f"olindi={int(outcome.get('pulled') or 0)} "
+                f"yuborildi={int(outcome.get('pushed') or 0)}"
+            )
+        with _get_engine().begin() as conn:
+            _sync_state_set(conn, "last_sync_ok_at", _utc_now())
+            _sync_state_set(conn, "last_sync_summary", summary)
+            _sync_state_set(conn, "last_sync_error", "")
+    except Exception:
+        pass
+
+
+def get_sync_health():
+    """What the automatic sync has been doing, for the status panel."""
+    with _get_engine().begin() as conn:
+        def value(key):
+            row = conn.exec_driver_sql(
+                "SELECT value FROM sync_state WHERE key=?", (key,)
+            ).fetchone()
+            return row[0] if row and row[0] else ""
+        return Row(dict(
+            last_ok_at=value("last_sync_ok_at"),
+            last_summary=value("last_sync_summary"),
+            last_error=value("last_sync_error"),
+            last_error_at=value("last_sync_error_at"),
+        ))
+
+
 def get_pull_watermark():
     """How far into the server's history this device has already read.
 

@@ -10,6 +10,7 @@ button or another turn.
 """
 
 import threading
+import time
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal, pyqtSlot
 
@@ -20,11 +21,17 @@ import sync_service
 # How long to wait after a local write before sending. A sale writes several
 # rows in a burst; waiting a moment turns that burst into one upload.
 LOCAL_SETTLE_MS = 700
-# How often to look for work when nothing has told us to. Kept short: a sale
-# rung up during a quiet spell must reach the other devices in a moment, not
-# whenever the next long timer happens to come round. The check itself is one
-# small read of one row.
+# How often the worker wakes up at all.
 IDLE_INTERVAL_MS = 2_000
+# How long a device may go without asking the server for news.
+#
+# This is not a nicety. The change stream is what normally says "something
+# moved", but it rides a long-lived HTTP connection through a tunnel and a
+# proxy, and it does go quiet. A device that is only listening -- not selling,
+# not editing -- would then sit there forever, and to the person looking at it
+# the whole arrangement appears dead. So even with nothing to send and nobody
+# asking, it checks in on this interval.
+IDLE_PULL_SECONDS = 5
 # After a failed turn, wait before trying again rather than hammering a server
 # that is already unhappy.
 RETRY_INTERVAL_MS = 15_000
@@ -44,6 +51,8 @@ class SyncEngine(QObject):
         self._stopping = threading.Event()
         self._pull_requested = threading.Event()
         self._state = "idle"
+        # Far enough in the past that the first tick checks in immediately.
+        self._last_turn_at = 0.0
 
     # -- lifecycle -------------------------------------------------------
     @pyqtSlot()
@@ -93,32 +102,37 @@ class SyncEngine(QObject):
         wanted = self._pull_requested.is_set()
         pending = 0
         try:
-            pending = int(db.get_sync_status().get("pending_change_count") or 0)
+            # The queue itself, not the cached counter beside it: if the two
+            # ever disagree, the queue is the one holding real work.
+            pending = int(db.count_pending_sync_rows())
         except Exception:
             pending = 0
-        if not wanted and pending <= 0:
-            # Nothing asked for and nothing of ours to send: check in rarely,
-            # only so a device whose stream is down still catches up.
+        due = (time.monotonic() - self._last_turn_at) >= IDLE_PULL_SECONDS
+        if not wanted and pending <= 0 and not due:
             self._set_interval(IDLE_INTERVAL_MS)
             return
 
         self._pull_requested.clear()
+        self._last_turn_at = time.monotonic()
         self._set_state("syncing")
         try:
             outcome = sync_service.auto_sync_turn(user)
-        except sync_service.SyncConflict:
+        except sync_service.SyncConflict as exc:
+            db.record_sync_failure(exc)
             self._set_state("idle")
             self.conflict.emit()
             self._set_interval(RETRY_INTERVAL_MS)
             return
-        except Exception:
-            # Offline, a proxy hiccup, an expired token: none of these are
-            # worth a message on the cashier's screen. The status indicator
-            # already says the connection is down.
+        except Exception as exc:
+            # Not worth interrupting a cashier over -- but it must not vanish
+            # either. Sync that fails quietly is indistinguishable from sync
+            # that is switched off, which is exactly how this went unnoticed.
+            db.record_sync_failure(exc)
             self._set_state("offline")
             self._set_interval(RETRY_INTERVAL_MS)
             return
 
+        db.record_sync_success(outcome)
         self._set_state("idle")
         self._set_interval(LOCAL_SETTLE_MS)
         if outcome.get("conflict"):

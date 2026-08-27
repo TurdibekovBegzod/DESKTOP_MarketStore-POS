@@ -14,6 +14,11 @@ import sys
 import api_client
 import database as db
 import sync_service
+
+# How long a successful exchange keeps counting as "we can reach the others"
+# while the event stream is reconnecting. Long enough to ride out a proxy
+# hiccup, short enough that a real outage is noticed before the next sale.
+ONLINE_GRACE_SECONDS = 20
 from realtime import SyncEventListener
 from sync_engine import SyncEngine
 from updater import is_newer_version
@@ -281,6 +286,11 @@ TEXTS = {
         "sync_rejected_title": "O'zgartirish saqlanmadi",
         "sync_offline_note": "Aloqa tiklanganda ular o'zi yuboriladi.",
         "sync_offline_tip": "Aloqa yo'q \u2014 pul yozuvlari vaqtincha to'xtatilgan",
+        "sync_last_ok": "Oxirgi muvaffaqiyatli almashinuv",
+        "sync_online": "Onlayn",
+        "sync_offline": "Offline",
+        "sync_working": "Yangilanmoqda",
+        "sync_last_error": "Oxirgi xatolik",
         "sync_rejected_toast": "Bu yozuv boshqa qurilmada o'zgargan edi, shuning uchun sizning o'zgartirishingiz saqlanmadi. Yangi holat ko'rsatildi: {what}",
         "sync_done": "Sync tugadi", "sync_error": "Sync xatosi",
         "sync_pending_count": "Yuborilmagan o'zgarishlar",
@@ -351,6 +361,11 @@ TEXTS = {
         "sync_rejected_title": "Change not saved",
         "sync_offline_note": "They are sent by themselves once the connection is back.",
         "sync_offline_tip": "No connection \u2014 money entries are paused",
+        "sync_last_ok": "Last successful exchange",
+        "sync_online": "Online",
+        "sync_offline": "Offline",
+        "sync_working": "Updating",
+        "sync_last_error": "Last error",
         "sync_rejected_toast": "Another device had already changed this, so your edit was not saved. The current version is shown: {what}",
         "sync_done": "Sync completed", "sync_error": "Sync error",
         "sync_pending_count": "Unsynced changes",
@@ -444,6 +459,11 @@ TEXTS["ru"].update({
     "sync_rejected_title": "Изменение не сохранено",
     "sync_offline_note": "Они отправятся сами, когда связь восстановится.",
     "sync_offline_tip": "Нет связи \u2014 денежные записи приостановлены",
+    "sync_last_ok": "Последний успешный обмен",
+    "sync_online": "Онлайн",
+    "sync_offline": "Офлайн",
+    "sync_working": "Обновление",
+    "sync_last_error": "Последняя ошибка",
     "sync_rejected_toast": "Эта запись уже была изменена на другом устройстве, поэтому ваше изменение не сохранено. Показана текущая версия: {what}",
     "sync_done": "Синхронизация завершена",
     "sync_error": "Ошибка синхронизации",
@@ -929,14 +949,26 @@ class SyncDialog(QDialog):
             held = db.count_sync_quarantine()
         except Exception:
             held = 0
+        lines = []
         if held:
             template = self.labels.get(
                 "sync_quarantine",
                 "{n} ta yozuv qo'llanmadi va chetga olindi. Ular har yuklashda qayta urinib ko'riladi.",
             )
-            self.quarantine_lbl.setText(template.replace("{n}", str(held)))
-        else:
-            self.quarantine_lbl.setText("")
+            lines.append(template.replace("{n}", str(held)))
+        # Automatic sync is silent when it works, so this is the only place a
+        # person can find out that it has not been working.
+        try:
+            health = db.get_sync_health()
+        except Exception:
+            health = {}
+        if health.get("last_ok_at"):
+            ok_label = self.labels.get("sync_last_ok", "Oxirgi muvaffaqiyatli almashinuv")
+            lines.append(f"{ok_label}: {health['last_ok_at']} {health.get('last_summary') or ''}".strip())
+        if health.get("last_error"):
+            err_label = self.labels.get("sync_last_error", "Oxirgi xatolik")
+            lines.append(f"{err_label}: {health['last_error_at']}\n{health['last_error']}")
+        self.quarantine_lbl.setText("\n\n".join(lines))
 
     def _replace_server(self):
         if not self.parent_window:
@@ -1295,6 +1327,7 @@ class MainWindow(QMainWindow):
         self._realtime_worker = None
         self._engine_thread = None
         self._engine_worker = None
+        self._engine_state = "idle"
         # None = not attempted yet, so the tooltip does not accuse the link of
         # being down during the first second of startup.
         self._realtime_online = None
@@ -1309,7 +1342,7 @@ class MainWindow(QMainWindow):
         self._start_realtime_listener()
         self._start_sync_engine()
         # Money is only written where every device can see it.
-        db.set_online_check(lambda: self._realtime_online is not False)
+        db.set_online_check(self._is_online)
         # Every entry in the activity log carries who made it, so the other
         # devices can say "Sardor sold ..." rather than "something changed".
         db.set_activity_actor(lambda: {
@@ -1548,17 +1581,17 @@ class MainWindow(QMainWindow):
         # the device can currently reach the others, which the cashier has to
         # know because money cannot be written while it cannot.
         self.sync_wrap = QWidget()
-        self.sync_wrap.setFixedSize(40, 36)
+        self.sync_wrap.setFixedSize(112, 36)
         self.sync_btn = QLabel(self.sync_wrap)
         self.sync_btn.setObjectName("syncStateDot")
-        self.sync_btn.setFixedSize(32, 32)
-        self.sync_btn.move(0, 2)
+        self.sync_btn.setFixedSize(108, 26)
+        self.sync_btn.move(0, 5)
         self.sync_btn.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.sync_btn.setText("\u25cf")
+        self.sync_btn.setText(self.labels.get("sync_online", "Onlayn"))
         self.sync_badge_lbl = QLabel(self.sync_wrap)
         self.sync_badge_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.sync_badge_lbl.setFixedSize(16, 16)
-        self.sync_badge_lbl.move(24, 0)
+        self.sync_badge_lbl.move(96, 0)
         self.sync_badge_lbl.hide()
         topbar_lay.addWidget(self.sync_wrap)
         topbar_lay.addWidget(self.clock_lbl)
@@ -1792,6 +1825,7 @@ class MainWindow(QMainWindow):
             return
         status = db.get_sync_status()
         if not self._sync_available():
+            self.sync_btn.setText(self.labels.get("sync_offline", "Offline"))
             self.sync_btn.setToolTip(self.labels.get("sync_offline_tip", "Offline"))
             self._apply_sync_card_state("offline")
             self._update_sync_badge(0, remote_pending=False)
@@ -1808,40 +1842,33 @@ class MainWindow(QMainWindow):
         else:
             state = "clean"
             text = self.labels.get("sync_clean", "Sinxron")
-        if remote_pending and pending_count:
-            text = f"{text} ({pending_count})"
+        if pending_count:
+            waiting = self.labels.get("sync_pending_count", "Yuborilmagan o'zgarishlar")
+            text = f"{text} - {waiting}: {pending_count}"
         if self._realtime_online is False:
             offline_note = self.labels.get("sync_offline_stream", "Realtime aloqa uzildi")
             text = f"{text} - {offline_note}"
+        if not self._is_online():
+            state = "offline"
+            self.sync_btn.setText(self.labels.get("sync_offline", "Offline"))
+        elif self._engine_state == "syncing":
+            self.sync_btn.setText(self.labels.get("sync_working", "Yangilanmoqda"))
+        else:
+            self.sync_btn.setText(self.labels.get("sync_online", "Onlayn"))
         self.sync_btn.setToolTip(text)
         self._apply_sync_card_state(state)
         self._update_sync_badge(pending_count, remote_pending=remote_pending)
 
-    def _update_sync_badge(self, count, remote_pending=False):
-        if not hasattr(self, "sync_badge_lbl"):
-            return
-        try:
-            count = int(count)
-        except (TypeError, ValueError):
-            count = 0
-        if count <= 0 and not remote_pending:
+    def _update_sync_badge(self, _count=0, remote_pending=False):
+        """No number here any more.
+
+        A count of unsent changes was worth showing while somebody had to press
+        a button to send them. Nobody does now: the number appears and clears
+        by itself within a second or two, which reads as something going wrong
+        rather than as something working.
+        """
+        if hasattr(self, "sync_badge_lbl"):
             self.sync_badge_lbl.hide()
-            return
-        if count > 0:
-            # Local work waiting to go out keeps priority on the badge.
-            text = "99+" if count > 99 else str(count)
-            width = 22 if count > 99 else 16
-            background = "#ef4444"
-        else:
-            text = "\u2193"
-            width = 16
-            background = "#3b82f6"
-        self.sync_badge_lbl.setFixedSize(width, 16)
-        self.sync_badge_lbl.move(40 - width, 0)
-        self.sync_badge_lbl.setText(text)
-        self.sync_badge_lbl.setStyleSheet(self._counter_badge_style(background))
-        self.sync_badge_lbl.show()
-        self.sync_badge_lbl.raise_()
 
     def _apply_sync_card_state(self, state):
         palette = {
@@ -1854,9 +1881,10 @@ class MainWindow(QMainWindow):
             QLabel#syncStateDot {{
                 background: {palette['bg']};
                 border: 1px solid {palette['border']};
-                border-radius: 8px;
+                border-radius: 13px;
                 color: {palette['text']};
-                font-size: 13px;
+                font-size: 12px;
+                font-weight: bold;
             }}
         """)
 
@@ -2184,8 +2212,36 @@ class MainWindow(QMainWindow):
         )
 
     @pyqtSlot(str)
-    def _on_sync_engine_state(self, _state):
+    def _on_sync_engine_state(self, state):
+        self._engine_state = state
         self._refresh_sync_status()
+
+    def _is_online(self):
+        """Whether this device can reach the others right now.
+
+        The live event stream is the honest answer: it is a connection that is
+        either up or is not, which is why a chat application can show the same
+        thing. A recent successful exchange counts too, so a stream that is
+        merely reconnecting does not stop a sale that would in fact go
+        through. Anything else -- including "not known yet" -- is offline,
+        because writing money on a guess is what has to be avoided.
+        """
+        if self._realtime_online is True:
+            return True
+        if self._engine_state == "offline":
+            return False
+        try:
+            health = db.get_sync_health()
+        except Exception:
+            return False
+        last_ok = health.get("last_ok_at")
+        if not last_ok:
+            return False
+        try:
+            seen = datetime.strptime(str(last_ok), "%Y-%m-%d %H:%M:%S")
+        except (TypeError, ValueError):
+            return False
+        return (datetime.utcnow() - seen).total_seconds() <= ONLINE_GRACE_SECONDS
 
     def _stop_realtime_listener(self):
         worker = self._realtime_worker
@@ -2239,12 +2295,19 @@ class MainWindow(QMainWindow):
         device_key = str(payload.get("device_key") or "")
 
         if device_key and device_key == db.get_sync_device_key():
-            # Our own write echoed back through the stream - just move our marker
-            # forward so the badge does not light up for our own change.
+            # Our own write echoed back through the stream: move the marker on
+            # so nothing lights up for what we just did ourselves.
             db.set_sync_generation(generation)
             db.clear_remote_change()
             self._refresh_sync_status()
             return
+
+        # Fetch first, decide about the announcement afterwards. The old order
+        # had several ways out above this point, and each of them left a device
+        # that had heard the news doing nothing about it -- the surest way to
+        # look broken from the other side of the shop.
+        if self._engine_worker is not None:
+            self._engine_worker.request_turn()
 
         if generation <= db.get_sync_generation():
             return
@@ -2271,12 +2334,8 @@ class MainWindow(QMainWindow):
             # marker is only set once the refresh actually succeeds, so a failed
             # attempt is retried on the next reconnect.
             self._apply_remote_assets(generation if assets_only else None, checked_generation=generation)
-        if assets_only or repeated:
-            return
-
-        # Nothing to press: the engine fetches it and the open page reloads.
-        if self._engine_worker is not None:
-            self._engine_worker.request_turn()
+        # The fetch was already asked for above; there is nothing else to do
+        # here, because there is nothing for anyone to press.
 
     # ------------------------------------------------------------------
     # New-release badge on the account button
