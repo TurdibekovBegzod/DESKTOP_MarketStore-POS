@@ -522,6 +522,17 @@ class SalesWidget(QWidget):
             [dict(user) for user in db.get_users()],
         ))
 
+    def refresh_from_sync(self, changed_tables=()):
+        relevant = {
+            "users", "currencies", "products", "product_attributes",
+            "product_sections", "sales", "sale_items", "sale_returns",
+            "stock_movements",
+        }
+        changed = set(changed_tables or ())
+        if changed and changed.isdisjoint(relevant):
+            return
+        self.load_data()
+
     def _apply_loaded_data(self, data):
         products, currencies, users = data
         self._load_products(products=products)

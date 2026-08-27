@@ -10,7 +10,7 @@ from ssl_support import create_ssl_context
 DEFAULT_API_URL = "https://drinking-relight-trailside.ngrok-free.dev/api/v1"
 
 # Auth runs over a tunnel that can be cold-starting: give it a real budget
-# instead of the 10s default used by the small sync polls.
+# instead of the shorter timeout used by event-triggered sync requests.
 AUTH_TIMEOUT = 25
 AUTH_RETRIES = 2
 _RETRY_BACKOFF_SECONDS = (1.0, 2.5)

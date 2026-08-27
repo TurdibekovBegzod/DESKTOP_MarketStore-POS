@@ -50,7 +50,11 @@ class AsyncDataLoader(QObject):
 
     @pyqtSlot(object)
     def _apply_result(self, result):
-        if self.apply_fn:
+        # A sync may request a fresh read while an older query is still in
+        # flight. In that case the pending query is the only snapshot worth
+        # painting; briefly applying the old one can leave an open product
+        # table looking stale until the next interaction.
+        if self.apply_fn and self.pending is None:
             self.apply_fn(result)
         self._complete_thread()
 

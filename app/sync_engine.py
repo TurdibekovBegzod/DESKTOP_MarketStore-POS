@@ -1,8 +1,9 @@
 """Keeps this device in step with the others without anyone pressing a button.
 
-One worker owns all automatic synchronisation. It runs a turn when the server
-says something changed, shortly after this device writes something itself, and
-every so often as a safety net in case the change stream is down.
+One worker owns all automatic synchronisation. It runs a turn only when the
+server says something changed or shortly after this device writes something
+itself. Reconnecting the event stream performs the catch-up; an idle desktop
+does not poll the API.
 
 Everything runs on a background thread and every turn goes through
 ``sync_service``, which serialises them, so a turn can never overlap the sync
@@ -21,17 +22,10 @@ import sync_service
 # How long to wait after a local write before sending. A sale writes several
 # rows in a burst; waiting a moment turns that burst into one upload.
 LOCAL_SETTLE_MS = 700
-# How often the worker wakes up at all.
+# How often the worker checks the local SQLite outbox. This timer never contacts
+# the server by itself; it only recovers a committed local write whose wake-up
+# signal was missed (for example because the app closed immediately afterwards).
 IDLE_INTERVAL_MS = 2_000
-# How long a device may go without asking the server for news.
-#
-# This is not a nicety. The change stream is what normally says "something
-# moved", but it rides a long-lived HTTP connection through a tunnel and a
-# proxy, and it does go quiet. A device that is only listening -- not selling,
-# not editing -- would then sit there forever, and to the person looking at it
-# the whole arrangement appears dead. So even with nothing to send and nobody
-# asking, it checks in on this interval.
-IDLE_PULL_SECONDS = 5
 # After a failed turn, wait before trying again rather than hammering a server
 # that is already unhappy.
 RETRY_INTERVAL_MS = 15_000
@@ -62,8 +56,6 @@ class SyncEngine(QObject):
         self._stopping = threading.Event()
         self._pull_requested = threading.Event()
         self._state = "idle"
-        # Far enough in the past that the first tick checks in immediately.
-        self._last_turn_at = 0.0
         # Never reconciled in this run, so the first turn is a full one.
         self._last_full_at = None
         # Emitting this signal is safe from the GUI thread, a database callback
@@ -135,13 +127,11 @@ class SyncEngine(QObject):
             pending = int(db.count_pending_sync_rows())
         except Exception:
             pending = 0
-        due = (time.monotonic() - self._last_turn_at) >= IDLE_PULL_SECONDS
-        if not wanted and pending <= 0 and not due:
+        if not wanted and pending <= 0:
             self._set_interval(IDLE_INTERVAL_MS)
             return
 
         self._pull_requested.clear()
-        self._last_turn_at = time.monotonic()
         self._set_state("syncing")
         full_due = (
             self._last_full_at is None
@@ -169,6 +159,9 @@ class SyncEngine(QObject):
             # either. Sync that fails quietly is indistinguishable from sync
             # that is switched off, which is exactly how this went unnoticed.
             db.record_sync_failure(exc)
+            # This turn was triggered by a real local/remote change. Keep that
+            # request until it succeeds rather than falling back to polling.
+            self._pull_requested.set()
             self._set_state("offline")
             self._set_interval(RETRY_INTERVAL_MS)
             return

@@ -1,10 +1,8 @@
 """The worker that syncs without being asked.
 
-It has to be conservative about when it runs: a turn on every tick would hammer
-the server, and a turn that never runs leaves the device stale. These pin the
-three reasons it acts -- the server said something changed, this device wrote
-something, or nothing has been checked in a long while -- and the reasons it
-stays quiet.
+It has to be conservative about when it runs: an idle desktop must never poll
+the API. These pin the two reasons it acts -- the server said something changed
+or this device wrote something -- plus retry behaviour when a real turn fails.
 """
 
 import unittest
@@ -44,35 +42,15 @@ class SyncEngineTest(unittest.TestCase):
     def _status(pending):
         return {"pending_change_count": pending}
 
-    def test_it_stays_quiet_between_check_ins(self):
-        self.engine._last_turn_at = sync_engine.time.monotonic()
+    def test_an_idle_device_never_polls_the_server(self):
         with patch.object(sync_engine.sync_service, "reconcile_full", return_value={}), \
              patch.object(db, "count_pending_sync_rows", return_value=0), \
              patch.object(sync_engine.sync_service, "auto_sync_turn") as turn:
-            self.engine._tick()
+            for _ in range(20):
+                self.engine._tick()
 
         turn.assert_not_called()
         self.assertEqual(self.recorder.applied, [])
-
-    def test_a_listening_device_still_asks_the_server_for_news(self):
-        """The change stream goes quiet; a device that only listens must not.
-
-        With nothing of its own to send and no event to act on, a device used
-        to do nothing at all -- so work done elsewhere never arrived and the
-        whole arrangement looked dead from that desk.
-        """
-        self.engine._last_turn_at = (
-            sync_engine.time.monotonic() - sync_engine.IDLE_PULL_SECONDS - 1
-        )
-        with patch.object(sync_engine.sync_service, "reconcile_full", return_value={}), \
-             patch.object(db, "count_pending_sync_rows", return_value=0), \
-             patch.object(db, "record_sync_success"), \
-             patch.object(sync_engine.sync_service, "auto_sync_turn",
-                          return_value={"pulled": 1, "pushed": 0, "tables": ["sales"]}) as turn:
-            self.engine._tick()
-
-        turn.assert_called_once()
-        self.assertEqual(self.recorder.applied[0]["pulled"], 1)
 
     def test_a_failure_is_written_down_rather_than_swallowed(self):
         self.engine.request_turn()
@@ -84,6 +62,7 @@ class SyncEngineTest(unittest.TestCase):
             self.engine._tick()
 
         noted.assert_called_once()
+        self.assertTrue(self.engine._pull_requested.is_set())
 
     def test_a_local_write_is_enough_to_make_it_run(self):
         with patch.object(sync_engine.sync_service, "reconcile_full", return_value={}), \

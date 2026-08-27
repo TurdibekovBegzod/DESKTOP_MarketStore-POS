@@ -1636,7 +1636,6 @@ class MainWindow(QMainWindow):
         self.sync_status_timer.timeout.connect(self._refresh_sync_status)
         self.sync_status_timer.timeout.connect(self._refresh_notif_badge)
         self.sync_status_timer.start(1000)
-        QTimer.singleShot(1200, self._auto_pull_from_server)
         QTimer.singleShot(1500, self._show_startup_notifications)
 
     def _nav_btn_style(self):
@@ -1893,9 +1892,12 @@ class MainWindow(QMainWindow):
         dlg.exec()
         self._refresh_sync_status()
 
-    def _reload_current_page(self):
+    def _reload_current_page(self, changed_tables=None):
         current_page = self.stack.currentWidget()
-        if hasattr(current_page, "load_data"):
+        refresh = getattr(current_page, "refresh_from_sync", None)
+        if callable(refresh):
+            refresh(changed_tables or ())
+        elif hasattr(current_page, "load_data"):
             current_page.load_data()
 
     def _auto_pull_from_server(self):
@@ -2157,7 +2159,7 @@ class MainWindow(QMainWindow):
     def _on_sync_applied(self, outcome):
         # The data on screen just moved underneath the person looking at it,
         # so the page is reloaded rather than left showing yesterday's figures.
-        self._reload_current_page()
+        self._reload_current_page(outcome.get("tables") or ())
         self._refresh_sync_status()
         refused = outcome.get("rejected") or []
         if refused:
@@ -2294,22 +2296,21 @@ class MainWindow(QMainWindow):
         tables = [str(name) for name in (payload.get("tables") or [])]
         device_key = str(payload.get("device_key") or "")
 
-        if device_key and device_key == db.get_sync_device_key():
-            # Our own write echoed back through the stream: move the marker on
-            # so nothing lights up for what we just did ourselves.
-            db.set_sync_generation(generation)
+        local_generation = db.get_sync_generation()
+        if (
+            device_key
+            and device_key == db.get_sync_device_key()
+            and generation <= local_generation
+        ):
+            # Our own already-applied write echoed back through the stream.
+            # Compare the generation too: a copied/restored SQLite database may
+            # carry another machine's device key, and must still download work
+            # that is newer than its local data.
             db.clear_remote_change()
             self._refresh_sync_status()
             return
 
-        # Fetch first, decide about the announcement afterwards. The old order
-        # had several ways out above this point, and each of them left a device
-        # that had heard the news doing nothing about it -- the surest way to
-        # look broken from the other side of the shop.
-        if self._engine_worker is not None:
-            self._engine_worker.request_turn()
-
-        if generation <= db.get_sync_generation():
+        if generation <= local_generation:
             return
 
         # "hello" on every reconnect and the resumed "change" that follows both
@@ -2319,6 +2320,11 @@ class MainWindow(QMainWindow):
 
         db.mark_remote_change(generation, tables=tables, device_key=device_key, changed_at=payload.get("server_time"))
         self._refresh_sync_status()
+
+        # The server has committed a newer generation. This is the only normal
+        # remote trigger for a download; idle devices never poll for changes.
+        if self._engine_worker is not None:
+            self._engine_worker.request_turn()
 
         assets_only = bool(tables) and set(tables) <= {"account_assets"}
         # A catch-up only names the tables of the *latest* push. If the logo was

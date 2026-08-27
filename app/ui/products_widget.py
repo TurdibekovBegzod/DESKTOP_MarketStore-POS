@@ -1882,6 +1882,18 @@ class ProductsWidget(QWidget):
     def _on_tab_changed(self):
         self.load_data()
 
+    def refresh_from_sync(self, changed_tables=()):
+        relevant = {
+            "users", "currencies", "product_sections", "suppliers",
+            "product_templates", "product_template_fields", "products",
+            "product_attributes", "sales", "sale_items", "sale_returns",
+            "stock_movements",
+        }
+        changed = set(changed_tables or ())
+        if changed and changed.isdisjoint(relevant):
+            return
+        self.load_data()
+
     def _queue_search(self, *_args):
         self._search_timer.start()
 
