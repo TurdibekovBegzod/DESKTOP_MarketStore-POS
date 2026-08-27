@@ -373,20 +373,32 @@ def iter_sse_events(response):
             data_lines.append(value)
 
 
-def pull_sync_records(token, since=None, table_name=None, include_deleted=True, timeout=30):
+def pull_sync_records(token, since=None, since_seq=None, table_name=None, include_deleted=True, timeout=30):
+    """Download the account's records, optionally only what is new to us.
+
+    ``since_seq`` is a position in the account's change history and is the only
+    safe way to ask for "what is new": it moves in commit order. ``since`` is a
+    clock reading and is kept for servers that have not been updated yet -- it
+    can silently step over rows written by a push that had not committed when
+    the reading was taken.
+    """
     offset = 0
     records = []
     server_time = None
     generation = 0
     purge_generation = 0
     purge_requested_at = None
+    cursor = 0
+    cursor_supported = False
     while True:
         query = {
             "include_deleted": "true" if include_deleted else "false",
             "limit": 1000,
             "offset": offset,
         }
-        if since:
+        if since_seq is not None:
+            query["since_seq"] = int(since_seq)
+        elif since:
             query["since"] = since
         if table_name:
             query["table_name"] = table_name
@@ -396,6 +408,9 @@ def pull_sync_records(token, since=None, table_name=None, include_deleted=True, 
         generation = result.get("generation") or generation
         purge_generation = result.get("purge_generation") or purge_generation
         purge_requested_at = result.get("purge_requested_at") or purge_requested_at
+        if result.get("cursor_supported"):
+            cursor_supported = True
+            cursor = max(cursor, int(result.get("cursor") or 0))
         if not result.get("has_more"):
             return {
                 "records": records,
@@ -403,6 +418,8 @@ def pull_sync_records(token, since=None, table_name=None, include_deleted=True, 
                 "generation": generation,
                 "purge_generation": purge_generation,
                 "purge_requested_at": purge_requested_at,
+                "cursor": cursor,
+                "cursor_supported": cursor_supported,
             }
         next_offset = result.get("next_offset")
         if next_offset is None or int(next_offset) <= offset:

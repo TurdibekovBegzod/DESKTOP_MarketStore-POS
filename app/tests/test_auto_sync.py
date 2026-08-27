@@ -65,14 +65,48 @@ class AutoSyncTest(unittest.TestCase):
                      "cost": 1, "stock": 1, "unit": "dona"},
         }
 
-    def _pull_patch(self, records, server_time, seen):
-        def fake_pull(_token, since=None, table_name=None, include_deleted=True, timeout=30):
-            seen.append(since)
-            return {"records": records, "server_time": server_time, "generation": 3}
+    def _pull_patch(self, records, server_time, seen, cursor=0):
+        def fake_pull(_token, since=None, since_seq=None, table_name=None, include_deleted=True, timeout=30):
+            seen.append(since if since_seq is None else since_seq)
+            answer = {"records": records, "server_time": server_time, "generation": 3}
+            if cursor:
+                answer["cursor"] = cursor
+                answer["cursor_supported"] = True
+            return answer
         return patch.object(api_client, "pull_sync_records", side_effect=fake_pull)
 
     # -- the reading position --------------------------------------------
-    def test_the_first_download_asks_for_everything_and_the_next_only_for_changes(self):
+    def test_the_next_download_asks_by_position_not_by_clock(self):
+        """The clock is the bug: a push that has not committed yet is invisible
+        to a download, but its rows already carry the earlier timestamp, so they
+        end up behind the marker and are never offered again."""
+        seen = []
+        with self._pull_patch([self._record()], "2026-08-27 10:00:00", seen, cursor=42), \
+             patch.object(api_client, "get_sync_state",
+                          return_value={"generation": 3, "purge_generation": 0}):
+            sync_service.pull_server_changes(self.owner, incremental=True)
+            sync_service.pull_server_changes(self.owner, incremental=True)
+
+        self.assertEqual(seen[0], None)
+        self.assertEqual(seen[1], 42)
+        self.assertEqual(db.get_pull_cursor(), 42)
+
+    def test_the_marker_only_moves_over_rows_that_arrived(self):
+        seen = []
+        with self._pull_patch([self._record()], "2026-08-27 10:00:00", seen, cursor=42), \
+             patch.object(api_client, "get_sync_state",
+                          return_value={"generation": 3, "purge_generation": 0}):
+            sync_service.pull_server_changes(self.owner, incremental=True)
+        # A later answer that carries nothing must not push the marker forward.
+        with self._pull_patch([], "2026-08-27 11:00:00", seen, cursor=0), \
+             patch.object(api_client, "get_sync_state",
+                          return_value={"generation": 3, "purge_generation": 0}):
+            sync_service.pull_server_changes(self.owner, incremental=True)
+        self.assertEqual(db.get_pull_cursor(), 42)
+
+    def test_an_old_server_is_asked_with_time_to_spare(self):
+        """Until the server is updated there is only the clock -- so we deliberately
+        re-read the last few minutes rather than trust it to the second."""
         seen = []
         with self._pull_patch([self._record()], "2026-08-27 10:00:00", seen), \
              patch.object(api_client, "get_sync_state",
@@ -81,7 +115,8 @@ class AutoSyncTest(unittest.TestCase):
             sync_service.pull_server_changes(self.owner, incremental=True)
 
         self.assertEqual(seen[0], None)
-        self.assertEqual(seen[1], "2026-08-27 10:00:00")
+        self.assertEqual(seen[1], "2026-08-27T09:57:00")
+        self.assertEqual(db.get_pull_cursor(), 0)
 
     def test_a_record_that_cannot_be_applied_is_set_aside_not_lost(self):
         """Nobody is watching the sync any more, so nothing may quietly vanish."""
@@ -126,7 +161,7 @@ class AutoSyncTest(unittest.TestCase):
     def test_a_round_takes_before_it_gives(self):
         order = []
 
-        def fake_pull(_token, since=None, table_name=None, include_deleted=True, timeout=30):
+        def fake_pull(_token, since=None, since_seq=None, table_name=None, include_deleted=True, timeout=30):
             order.append("pull")
             return {"records": [self._record()], "server_time": "t1", "generation": 3}
 

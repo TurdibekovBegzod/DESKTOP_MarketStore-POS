@@ -1,7 +1,7 @@
 from datetime import datetime
 import uuid
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -123,6 +123,20 @@ class UserRecord(Base):
     deleted_at: Mapped[str | None] = mapped_column(String(40), index=True)
     source_device_key: Mapped[str | None] = mapped_column(String(120))
     sync_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    # Position of this row in the account's change history.
+    #
+    # Downloads used to ask "what changed after this clock reading", and that is
+    # unsound: a push writes its rows with the timestamp of the moment the
+    # transaction *opened*, but they only become visible when it *commits*. A
+    # download running in between saw nothing, moved its reading position past
+    # that timestamp, and those rows were then behind the marker forever. Two
+    # devices could sit online next to each other, both certain they were up to
+    # date, holding completely different data.
+    #
+    # The counter below is handed out from the account's generation, which every
+    # push takes a lock to advance -- so it is assigned in commit order and never
+    # goes backwards. Asking "what is above this number" cannot skip anything.
+    change_seq: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 

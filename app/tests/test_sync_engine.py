@@ -46,7 +46,8 @@ class SyncEngineTest(unittest.TestCase):
 
     def test_it_stays_quiet_between_check_ins(self):
         self.engine._last_turn_at = sync_engine.time.monotonic()
-        with patch.object(db, "count_pending_sync_rows", return_value=0), \
+        with patch.object(sync_engine.sync_service, "reconcile_full", return_value={}), \
+             patch.object(db, "count_pending_sync_rows", return_value=0), \
              patch.object(sync_engine.sync_service, "auto_sync_turn") as turn:
             self.engine._tick()
 
@@ -63,7 +64,8 @@ class SyncEngineTest(unittest.TestCase):
         self.engine._last_turn_at = (
             sync_engine.time.monotonic() - sync_engine.IDLE_PULL_SECONDS - 1
         )
-        with patch.object(db, "count_pending_sync_rows", return_value=0), \
+        with patch.object(sync_engine.sync_service, "reconcile_full", return_value={}), \
+             patch.object(db, "count_pending_sync_rows", return_value=0), \
              patch.object(db, "record_sync_success"), \
              patch.object(sync_engine.sync_service, "auto_sync_turn",
                           return_value={"pulled": 1, "pushed": 0, "tables": ["sales"]}) as turn:
@@ -74,7 +76,8 @@ class SyncEngineTest(unittest.TestCase):
 
     def test_a_failure_is_written_down_rather_than_swallowed(self):
         self.engine.request_turn()
-        with patch.object(db, "count_pending_sync_rows", return_value=0), \
+        with patch.object(sync_engine.sync_service, "reconcile_full", return_value={}), \
+             patch.object(db, "count_pending_sync_rows", return_value=0), \
              patch.object(db, "record_sync_failure") as noted, \
              patch.object(sync_engine.sync_service, "auto_sync_turn",
                           side_effect=OSError("tunnel down")):
@@ -83,7 +86,8 @@ class SyncEngineTest(unittest.TestCase):
         noted.assert_called_once()
 
     def test_a_local_write_is_enough_to_make_it_run(self):
-        with patch.object(db, "count_pending_sync_rows", return_value=(3)), \
+        with patch.object(sync_engine.sync_service, "reconcile_full", return_value={}), \
+             patch.object(db, "count_pending_sync_rows", return_value=(3)), \
              patch.object(sync_engine.sync_service, "auto_sync_turn",
                           return_value={"pulled": 0, "pushed": 3, "tables": ["sales"]}) as turn, \
              patch.object(db, "record_sync_success"):
@@ -94,7 +98,8 @@ class SyncEngineTest(unittest.TestCase):
 
     def test_the_server_asking_is_enough_even_with_nothing_of_ours(self):
         self.engine.request_turn()
-        with patch.object(db, "count_pending_sync_rows", return_value=(0)), \
+        with patch.object(sync_engine.sync_service, "reconcile_full", return_value={}), \
+             patch.object(db, "count_pending_sync_rows", return_value=(0)), \
              patch.object(sync_engine.sync_service, "auto_sync_turn",
                           return_value={"pulled": 2, "pushed": 0, "tables": ["products"]}) as turn, \
              patch.object(db, "record_sync_success"):
@@ -103,14 +108,16 @@ class SyncEngineTest(unittest.TestCase):
         turn.assert_called_once()
         self.assertEqual(self.recorder.applied[0]["pulled"], 2)
         # The request is spent, not repeated on the next tick.
-        with patch.object(db, "count_pending_sync_rows", return_value=(0)), \
+        with patch.object(sync_engine.sync_service, "reconcile_full", return_value={}), \
+             patch.object(db, "count_pending_sync_rows", return_value=(0)), \
              patch.object(sync_engine.sync_service, "auto_sync_turn") as again:
             self.engine._tick()
         again.assert_not_called()
 
     def test_a_turn_that_changed_nothing_says_nothing(self):
         self.engine.request_turn()
-        with patch.object(db, "count_pending_sync_rows", return_value=(0)), \
+        with patch.object(sync_engine.sync_service, "reconcile_full", return_value={}), \
+             patch.object(db, "count_pending_sync_rows", return_value=(0)), \
              patch.object(sync_engine.sync_service, "auto_sync_turn",
                           return_value={"pulled": 0, "pushed": 0, "tables": []}), \
              patch.object(db, "record_sync_success"):
@@ -120,7 +127,8 @@ class SyncEngineTest(unittest.TestCase):
 
     def test_a_broken_connection_backs_off_instead_of_shouting(self):
         self.engine.request_turn()
-        with patch.object(db, "count_pending_sync_rows", return_value=(0)), \
+        with patch.object(sync_engine.sync_service, "reconcile_full", return_value={}), \
+             patch.object(db, "count_pending_sync_rows", return_value=(0)), \
              patch.object(sync_engine.sync_service, "auto_sync_turn",
                           side_effect=OSError("network down")), \
              patch.object(db, "record_sync_failure"):
@@ -132,7 +140,8 @@ class SyncEngineTest(unittest.TestCase):
 
     def test_a_conflict_is_handed_over_rather_than_retried_forever(self):
         self.engine.request_turn()
-        with patch.object(db, "count_pending_sync_rows", return_value=(1)), \
+        with patch.object(sync_engine.sync_service, "reconcile_full", return_value={}), \
+             patch.object(db, "count_pending_sync_rows", return_value=(1)), \
              patch.object(sync_engine.sync_service, "auto_sync_turn",
                           return_value={"pulled": 0, "pushed": 0, "conflict": True, "tables": []}), \
              patch.object(db, "record_sync_success"):

@@ -50,7 +50,7 @@ class StaleWriteProtectionTest(unittest.TestCase):
     def test_a_row_without_a_claimed_version_is_always_written(self):
         session = _FakeSession(written=False)
 
-        accepted = _upsert_record(session, _User(), self._record())
+        accepted = _upsert_record(session, _User(), self._record(), 7)
 
         self.assertTrue(accepted, "an insert must never be refused")
         self.assertEqual(len(session.statements), 1)
@@ -58,14 +58,14 @@ class StaleWriteProtectionTest(unittest.TestCase):
     def test_a_claimed_version_that_still_matches_is_written(self):
         session = _FakeSession(written=True)
 
-        accepted = _upsert_record(session, _User(), self._record(expected_version=4))
+        accepted = _upsert_record(session, _User(), self._record(expected_version=4), 7)
 
         self.assertTrue(accepted)
 
     def test_a_claimed_version_that_has_moved_on_is_refused(self):
         session = _FakeSession(written=False)
 
-        accepted = _upsert_record(session, _User(), self._record(expected_version=4))
+        accepted = _upsert_record(session, _User(), self._record(expected_version=4), 7)
 
         self.assertFalse(accepted)
 

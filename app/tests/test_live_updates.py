@@ -40,7 +40,7 @@ class _FakeServer:
         self.generation += 1
         return {"saved": saved, "batch_id": "b", "generation": self.generation, "rejected": []}
 
-    def pull(self, _token, since=None, table_name=None, include_deleted=True, timeout=30):
+    def pull(self, _token, since=None, since_seq=None, table_name=None, include_deleted=True, timeout=30):
         # The real server hands back only what moved after `since`, and the
         # client leans on that, so the stand-in has to behave the same way.
         records = []

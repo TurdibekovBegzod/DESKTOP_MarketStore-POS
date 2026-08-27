@@ -35,6 +35,16 @@ IDLE_PULL_SECONDS = 5
 # After a failed turn, wait before trying again rather than hammering a server
 # that is already unhappy.
 RETRY_INTERVAL_MS = 15_000
+# How often the device stops exchanging differences and compares itself against
+# the server in full.
+#
+# Sending and receiving differences is fast but has no way of noticing a
+# difference that was never recorded -- a queue entry lost to a crash, a
+# database restored from a backup, a row written by a version that had a bug
+# here. Nothing corrects that on its own, and the two devices stay apart for
+# good. So the first turn after start-up, and one turn every so often after
+# that, checks the whole picture instead.
+FULL_RECONCILE_SECONDS = 900
 
 
 class SyncEngine(QObject):
@@ -53,6 +63,8 @@ class SyncEngine(QObject):
         self._state = "idle"
         # Far enough in the past that the first tick checks in immediately.
         self._last_turn_at = 0.0
+        # Never reconciled in this run, so the first turn is a full one.
+        self._last_full_at = None
 
     # -- lifecycle -------------------------------------------------------
     @pyqtSlot()
@@ -115,7 +127,20 @@ class SyncEngine(QObject):
         self._pull_requested.clear()
         self._last_turn_at = time.monotonic()
         self._set_state("syncing")
+        full_due = (
+            self._last_full_at is None
+            or (time.monotonic() - self._last_full_at) >= FULL_RECONCILE_SECONDS
+        )
+        healed = {}
         try:
+            if full_due:
+                healed = dict(sync_service.reconcile_full(user) or {})
+                if not healed.get("deferred"):
+                    self._last_full_at = time.monotonic()
+                if healed.get("queued"):
+                    # Rows the server had never been told about are back in the
+                    # queue; the turn below is what actually delivers them.
+                    self._pull_requested.set()
             outcome = sync_service.auto_sync_turn(user)
         except sync_service.SyncConflict as exc:
             db.record_sync_failure(exc)
@@ -137,6 +162,14 @@ class SyncEngine(QObject):
         self._set_interval(LOCAL_SETTLE_MS)
         if outcome.get("conflict"):
             self.conflict.emit()
+            return
+        if healed.get("imported") or healed.get("queued"):
+            # The full comparison changed something on its own; the screens have
+            # to be told even if the ordinary turn afterwards found nothing.
+            merged = dict(outcome)
+            merged["pulled"] = int(merged.get("pulled") or 0) + int(healed.get("imported") or 0)
+            merged["healed"] = dict(healed)
+            self.applied.emit(merged)
             return
         if outcome.get("pulled") or outcome.get("pushed") or outcome.get("settled"):
             self.applied.emit(dict(outcome))

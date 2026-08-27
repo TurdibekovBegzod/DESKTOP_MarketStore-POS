@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import and_, delete, func, select
+from sqlalchemy import and_, delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
@@ -84,44 +84,60 @@ def _assert_purge_generation(db: Session, user: User, applied: int | None) -> No
         )
 
 
-def _bump_generation(db: Session, user: User, device_key: str | None, tables) -> dict:
-    """Advance the account's change counter and describe the change.
+def _reserve_generation(db: Session, user: User) -> int:
+    """Take the next number in the account's change history.
 
-    Returns the payload that should be published once the transaction commits.
+    Every writer advances this row, so Postgres serialises them: whoever takes
+    the lower number also commits first. That is what makes the number usable as
+    a download position -- a reader that can see number N can see everything
+    below it too, which a wall clock could never promise.
     """
-    table_list = sorted({name for name in (tables or []) if name})
-    now = datetime.now(timezone.utc)
-    stmt = insert(SyncMeta).values(
-        user_uid=user.uid,
-        generation=1,
-        last_change_at=now,
-        last_device_key=device_key,
-        last_tables=table_list,
-    )
+    stmt = insert(SyncMeta).values(user_uid=user.uid, generation=1)
     stmt = stmt.on_conflict_do_update(
         index_elements=[SyncMeta.user_uid],
-        set_={
-            "generation": SyncMeta.generation + 1,
-            "last_change_at": now,
-            "last_device_key": device_key,
-            "last_tables": table_list,
-        },
-    ).returning(
-        SyncMeta.generation,
-        SyncMeta.purge_generation,
-        SyncMeta.purge_requested_at,
+        set_={"generation": SyncMeta.generation + 1},
+    ).returning(SyncMeta.generation)
+    return int(db.execute(stmt).scalar_one())
+
+
+def _describe_generation(
+    db: Session,
+    user: User,
+    device_key: str | None,
+    tables,
+    generation: int,
+) -> dict:
+    """Record who made the change and hand back the event to publish."""
+    table_list = sorted({name for name in (tables or []) if name})
+    now = datetime.now(timezone.utc)
+    db.execute(
+        update(SyncMeta)
+        .where(SyncMeta.user_uid == user.uid)
+        .values(last_change_at=now, last_device_key=device_key, last_tables=table_list)
     )
-    generation, purge_generation, purge_requested_at = db.execute(stmt).one()
-    generation = int(generation)
+    row = db.execute(
+        select(SyncMeta.purge_generation, SyncMeta.purge_requested_at).where(
+            SyncMeta.user_uid == user.uid
+        )
+    ).one()
+    purge_generation, purge_requested_at = row
     return {
         "type": "change",
-        "generation": generation,
+        "generation": int(generation),
         "purge_generation": int(purge_generation or 0),
         "purge_requested_at": purge_requested_at.isoformat() if purge_requested_at else None,
         "tables": table_list,
         "device_key": device_key,
         "server_time": now.isoformat(),
+        # Devices download by this number, not by the clock.
+        "cursor": int(generation),
     }
+
+
+def _bump_generation(db: Session, user: User, device_key: str | None, tables) -> dict:
+    """Advance the counter and describe the change, for writers that do both."""
+    generation = _reserve_generation(db, user)
+    return _describe_generation(db, user, device_key, tables, generation)
 
 
 def _publish(user_uid: str, payload: dict | None) -> None:
@@ -146,7 +162,7 @@ def _assert_generation(db: Session, user: User, expected: int | None) -> None:
         )
 
 
-def _upsert_record(db: Session, user: User, record: RecordIn) -> bool:
+def _upsert_record(db: Session, user: User, record: RecordIn, change_seq: int) -> bool:
     """Store one row. Returns False when the sender was working from a stale copy.
 
     A device that sends ``expected_version`` is saying "I am changing the row
@@ -169,6 +185,7 @@ def _upsert_record(db: Session, user: User, record: RecordIn) -> bool:
         deleted_at=record.deleted_at,
         source_device_key=record.source_device_key,
         sync_version=1,
+        change_seq=change_seq,
     )
     updates = {
         "user_id": user.id,
@@ -178,6 +195,7 @@ def _upsert_record(db: Session, user: User, record: RecordIn) -> bool:
         "deleted_at": stmt.excluded.deleted_at,
         "source_device_key": stmt.excluded.source_device_key,
         "sync_version": UserRecord.sync_version + 1,
+        "change_seq": change_seq,
         "updated_at": func.now(),
     }
     if record.expected_version is None:
@@ -212,10 +230,14 @@ def push(payload: PushRequest, current_user: User = Depends(get_current_user), d
     _assert_purge_generation(db, current_user, payload.applied_purge_generation)
     _assert_generation(db, current_user, payload.expected_generation)
     device = _touch_device(db, current_user, payload.device)
+    # Reserved before anything is written so every row of this push carries the
+    # number, and so that concurrent pushes queue up behind each other here
+    # rather than interleaving their rows in the history.
+    generation = _reserve_generation(db, current_user)
     rejected: list[RejectedRecordOut] = []
     accepted: list[RecordIn] = []
     for record in payload.records:
-        if _upsert_record(db, current_user, record):
+        if _upsert_record(db, current_user, record, generation):
             accepted.append(record)
             continue
         # Partial success rather than a 409: the rest of the batch is perfectly
@@ -237,11 +259,12 @@ def push(payload: PushRequest, current_user: User = Depends(get_current_user), d
     )
     db.add(batch)
     device_key = payload.device.device_key if payload.device else None
-    event = _bump_generation(
+    event = _describe_generation(
         db,
         current_user,
         device_key,
         {record.table_name for record in accepted},
+        generation,
     )
     db.commit()
     db.refresh(batch)
@@ -269,11 +292,12 @@ def upsert_table_rows(
     if len(records) > 1000:
         raise HTTPException(status_code=413, detail="Sync batch is too large")
     normalized = [record.model_copy(update={"table_name": table_name}) for record in records]
+    generation = _reserve_generation(db, current_user)
     for record in normalized:
-        _upsert_record(db, current_user, record)
+        _upsert_record(db, current_user, record, generation)
     batch = SyncBatch(user_id=current_user.id, user_uid=current_user.uid, direction="push", records_count=len(normalized), note=f"table:{table_name}")
     db.add(batch)
-    event = _bump_generation(db, current_user, x_device_key, {table_name})
+    event = _describe_generation(db, current_user, x_device_key, {table_name}, generation)
     db.commit()
     db.refresh(batch)
     _publish(current_user.uid, event)
@@ -283,6 +307,7 @@ def upsert_table_rows(
 @router.get("/pull", response_model=PullResponse)
 def pull(
     since: datetime | None = Query(default=None),
+    since_seq: int | None = Query(default=None, ge=0),
     table_name: str | None = Query(default=None),
     include_deleted: bool = True,
     limit: int | None = Query(default=None, ge=1, le=5000),
@@ -295,34 +320,37 @@ def pull(
     purge_generation = int(meta.purge_generation or 0) if meta else 0
     purge_requested_at = meta.purge_requested_at if meta else None
     stmt = select(UserRecord).where(UserRecord.user_uid == current_user.uid)
-    if since is not None:
+    # A caller that knows about change numbers never asks by clock again. The
+    # timestamp filter stays only so an old desktop build keeps working.
+    if since_seq is not None:
+        stmt = stmt.where(UserRecord.change_seq > since_seq)
+    elif since is not None:
         stmt = stmt.where(UserRecord.updated_at > since)
     if table_name:
         stmt = stmt.where(UserRecord.table_name == table_name)
     if not include_deleted:
         stmt = stmt.where(UserRecord.deleted_at.is_(None))
-    ordered = stmt.order_by(UserRecord.updated_at, UserRecord.id).offset(offset)
-    if limit is None:
-        records = db.scalars(ordered).all()
+    ordered = stmt.order_by(UserRecord.change_seq, UserRecord.id).offset(offset)
+
+    def answer(page, has_more: bool) -> PullResponse:
         return PullResponse(
-            records=records,
+            records=page,
             server_time=datetime.now(timezone.utc),
             generation=generation,
             purge_generation=purge_generation,
             purge_requested_at=purge_requested_at,
+            has_more=has_more,
+            next_offset=offset + len(page) if has_more else None,
+            # Only what was actually handed over. A caller that moved its
+            # marker to anything else could step over a row it never received.
+            cursor=max((int(row.change_seq or 0) for row in page), default=0),
         )
+
+    if limit is None:
+        return answer(db.scalars(ordered).all(), False)
     records = db.scalars(ordered.limit(limit + 1)).all()
     has_more = len(records) > limit
-    page = records[:limit]
-    return PullResponse(
-        records=page,
-        server_time=datetime.now(timezone.utc),
-        generation=generation,
-        purge_generation=purge_generation,
-        purge_requested_at=purge_requested_at,
-        has_more=has_more,
-        next_offset=offset + len(page) if has_more else None,
-    )
+    return answer(records[:limit], has_more)
 
 
 @router.delete("/tables/{table_name}/rows/{local_id}", response_model=RecordOut)
@@ -345,13 +373,23 @@ def mark_deleted(
             )
         )
     )
+    generation = _reserve_generation(db, current_user)
     if record is None:
-        record = UserRecord(user_id=current_user.id, user_uid=current_user.uid, table_name=table_name, local_id=local_id, data={}, deleted_at=now_text)
+        record = UserRecord(
+            user_id=current_user.id,
+            user_uid=current_user.uid,
+            table_name=table_name,
+            local_id=local_id,
+            data={},
+            deleted_at=now_text,
+            change_seq=generation,
+        )
         db.add(record)
     else:
         record.deleted_at = now_text
         record.sync_version += 1
-    event = _bump_generation(db, current_user, x_device_key, {table_name})
+        record.change_seq = generation
+    event = _describe_generation(db, current_user, x_device_key, {table_name}, generation)
     db.commit()
     db.refresh(record)
     _publish(current_user.uid, event)
@@ -386,6 +424,9 @@ def state(current_user: User = Depends(get_current_user), db: Session = Depends(
     total = db.scalar(
         select(func.count(UserRecord.id)).where(UserRecord.user_uid == current_user.uid)
     ) or 0
+    cursor = db.scalar(
+        select(func.max(UserRecord.change_seq)).where(UserRecord.user_uid == current_user.uid)
+    ) or 0
     return SyncStateOut(
         generation=int(meta.generation) if meta else 0,
         purge_generation=int(meta.purge_generation or 0) if meta else 0,
@@ -394,6 +435,7 @@ def state(current_user: User = Depends(get_current_user), db: Session = Depends(
         last_device_key=meta.last_device_key if meta else None,
         last_tables=list(meta.last_tables or []) if meta else [],
         records_count=int(total),
+        cursor=int(cursor),
         server_time=datetime.now(timezone.utc),
     )
 

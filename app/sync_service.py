@@ -9,6 +9,7 @@ a wrong click is recoverable.
 
 import functools
 import threading
+from datetime import datetime, timedelta
 
 import api_client
 import database as db
@@ -362,6 +363,85 @@ def auto_sync_turn(user, incremental=True):
     return outcome
 
 
+# How far back an old server has to be asked to look. Only used when the server
+# has no change history yet: a clock reading can miss rows written by a push that
+# was still committing, and re-reading a couple of minutes costs nothing because
+# applying a row we already have changes nothing.
+WATERMARK_OVERLAP_SECONDS = 180
+
+
+def _overlapped_watermark(value):
+    """Move a stored clock reading back a little, so a race cannot skip rows."""
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        # Unreadable marker: ask for everything rather than guess.
+        return None
+    return (moment - timedelta(seconds=WATERMARK_OVERLAP_SECONDS)).isoformat()
+
+
+def _remember_cursor(result):
+    """Move the reading position, but only if the server keeps a history."""
+    if not (result or {}).get("cursor_supported"):
+        return
+    db.set_pull_cursor((result or {}).get("cursor"))
+
+
+@_one_at_a_time
+def reconcile_full(user):
+    """Compare this device against the server in full and heal any difference.
+
+    Ordinary sync moves differences around: the upload queue carries what
+    changed here, the cursor carries what changed there. Neither notices if a
+    difference was never recorded in the first place -- a queue entry lost to a
+    crash, a database restored from a backup, a row written by a version that
+    had a bug. Once that happens nothing ever corrects it, and the two devices
+    stay apart for good.
+
+    So every so often we stop moving differences and look at the whole picture:
+    take everything the server has, then walk the local tables and put anything
+    the server has never heard of back in the upload queue. After that the two
+    sides genuinely agree, rather than agreeing about the changes they happened
+    to exchange.
+    """
+    if db.is_upgrade_reconcile_required():
+        # The one-time settlement after the identity change decides between the
+        # two copies wholesale. Healing differences before it has run would only
+        # queue up rows it is about to discard.
+        return {"received": 0, "imported": 0, "queued": 0, "deferred": True}
+    token = _token_for_user(user)
+    result = api_client.pull_sync_records(token, include_deleted=True)
+    purge = apply_server_control(result)
+    if purge["purged"]:
+        return {"received": 0, "imported": 0, "queued": 0, "purged": True}
+    records = result.get("records", [])
+    if db.is_identity_reset_required():
+        if records and not _server_uses_uuid_identity(records):
+            return {"received": len(records), "imported": 0, "queued": 0, "blocked": True}
+        db.mark_identity_reset_complete()
+    imported = db.import_sync_records(records)
+    db.mark_server_bootstrap_complete()
+    _apply_generation(int(result.get("generation") or 0))
+    db.set_pull_watermark(result.get("server_time"))
+    _remember_cursor(result)
+    known = {
+        (record.get("table_name"), str(record.get("local_id") or ""))
+        for record in records
+    }
+    queued = db.queue_rows_absent_from_server(known)
+    return {
+        "received": len(records),
+        "imported": imported,
+        "queued": queued,
+        "generation": result.get("generation"),
+    }
+
+
 @_one_at_a_time
 def pull_server_changes(user, table_name=None, incremental=False):
     if table_name is None:
@@ -379,13 +459,28 @@ def pull_server_changes(user, table_name=None, incremental=False):
                 "discarded_pending": settled.get("discarded_pending", 0),
             }
     token = _token_for_user(user)
-    # Ask for what changed since we last read, not for the whole account. The
-    # server has always supported this; the client simply never asked, so every
-    # download was a full copy however little had moved.
-    since = db.get_pull_watermark() if (incremental and table_name is None) else None
+    # Ask for what is new to us rather than for the whole account -- but ask by
+    # position in the account's change history, never by clock reading. The old
+    # code asked "what changed after this moment", and a push whose transaction
+    # had opened but not yet committed was invisible to that question while its
+    # rows already carried the earlier timestamp. Those rows fell behind the
+    # marker and were never offered again: both devices online, both certain
+    # they were current, holding different data.
+    #
+    # A cursor of 0 means we have never read anything by number, so we take the
+    # whole account once. That is also what an older server gives us back, since
+    # it does not know the parameter -- degrading to a full copy is safe, while
+    # degrading to a clock is not.
+    since_seq = None
+    since = None
+    if incremental and table_name is None:
+        since_seq = db.get_pull_cursor() or None
+        if since_seq is None:
+            since = _overlapped_watermark(db.get_pull_watermark())
     result = api_client.pull_sync_records(
         token,
         since=since,
+        since_seq=since_seq,
         table_name=table_name,
         include_deleted=True,
     )
@@ -423,6 +518,7 @@ def pull_server_changes(user, table_name=None, incremental=False):
         # dropped, so the marker can move on without losing it. Freezing it
         # instead would stop every later download behind one bad row.
         db.set_pull_watermark(result.get("server_time"))
+        _remember_cursor(result)
     return {
         "received": len(records),
         "imported": imported,
@@ -465,6 +561,7 @@ def force_download(user):
     db.mark_server_reseed_complete()
     _apply_generation(int(result.get("generation") or 0))
     db.set_pull_watermark(result.get("server_time"))
+    _remember_cursor(result)
     return {
         "direction": "download",
         "received": len(records),

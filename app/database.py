@@ -3027,6 +3027,74 @@ def set_pull_watermark(value):
         _sync_state_set(conn, "pull_watermark", str(value))
 
 
+def get_pull_cursor():
+    """How far into the account's change history this device has already read.
+
+    This replaces the old clock reading. A clock could not be trusted: the
+    server stamps a row with the time its transaction opened, but the row only
+    becomes visible when that transaction commits, so a download running in
+    between saw nothing and still moved its marker past those rows -- which then
+    stayed invisible forever. Two devices sat online side by side showing
+    completely different data because of it.
+    """
+    with _get_engine().begin() as conn:
+        return _sync_state_int(conn, "pull_cursor", 0)
+
+
+def set_pull_cursor(value):
+    """Only ever moved forward, and only over rows we actually received."""
+    try:
+        number = int(value or 0)
+    except (TypeError, ValueError):
+        return
+    if number <= 0:
+        return
+    with _get_engine().begin() as conn:
+        if number <= _sync_state_int(conn, "pull_cursor", 0):
+            return
+        _sync_state_set(conn, "pull_cursor", str(number))
+
+
+def clear_pull_cursor():
+    with _get_engine().begin() as conn:
+        _sync_state_set(conn, "pull_cursor", "0")
+
+
+def queue_rows_absent_from_server(server_keys):
+    """Re-queue every local row the server has never been told about.
+
+    The upload queue is a list of things that changed; if an entry is ever lost
+    -- a crash between the write and the queueing, a database restored from a
+    backup, a version that had a bug here -- the row simply stops existing as
+    far as the other devices are concerned, and nothing ever notices. This walks
+    the actual tables against what the server holds and puts the difference back
+    in the queue, which is what lets two devices that have drifted apart come
+    back together on their own.
+    """
+    known = set()
+    for table_name, local_id in server_keys or ():
+        known.add((str(table_name), str(local_id)))
+    queued = 0
+    entries = []
+    with _get_engine().begin() as conn:
+        for table_name in SYNC_TABLES:
+            if not _has_table(conn, table_name):
+                continue
+            pk_col = _sync_primary_key_column(table_name)
+            quoted = _quote_identifier(table_name)
+            rows = conn.exec_driver_sql(f"SELECT {pk_col} FROM {quoted}").fetchall()
+            for row in rows:
+                local_id = str(row[0])
+                if (table_name, local_id) in known:
+                    continue
+                entries.append((table_name, local_id, "upsert"))
+                queued += 1
+        _write_outbox_entries(conn, entries)
+    if queued:
+        _announce_local_change()
+    return queued
+
+
 def clear_pull_watermark():
     with _get_engine().begin() as conn:
         _sync_state_set(conn, "pull_watermark", "")

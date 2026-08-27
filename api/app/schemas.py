@@ -195,6 +195,9 @@ class RecordOut(RecordIn):
     id: int
     user_uid: str
     sync_version: int
+    # Where this row sits in the account's change history. Devices download by
+    # this number instead of by a clock reading.
+    change_seq: int = 0
     created_at: datetime
     updated_at: datetime
 
@@ -237,6 +240,10 @@ class PullResponse(BaseModel):
     purge_requested_at: datetime | None = None
     has_more: bool = False
     next_offset: int | None = None
+    # Highest change number in this response, and the flag that tells an
+    # upgraded client it may stop downloading by clock reading altogether.
+    cursor: int = 0
+    cursor_supported: bool = True
 
 
 class ResetResponse(BaseModel):
@@ -252,6 +259,10 @@ class SyncStateOut(BaseModel):
     last_device_key: str | None = None
     last_tables: list[str] = Field(default_factory=list)
     records_count: int = 0
+    # Highest change number stored for the account. A device whose marker is
+    # below this still has something to collect.
+    cursor: int = 0
+    cursor_supported: bool = True
     server_time: datetime
 
 
