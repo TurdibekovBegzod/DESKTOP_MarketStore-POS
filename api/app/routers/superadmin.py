@@ -20,6 +20,7 @@ from app.models import Device, GoogleOAuthSession, SyncBatch, SyncMeta, User, Us
 from app.schemas import (
     ALLOWED_SYNC_TABLES,
     SuperadminAccountOut,
+    SuperadminAvailabilityOut,
     SuperadminActionOut,
     SuperadminConfirmRequest,
     SuperadminLoginRequest,
@@ -33,6 +34,11 @@ from app.security import create_superadmin_token, decode_superadmin_token
 router = APIRouter(prefix="/superadmin", tags=["superadmin"])
 page_router = APIRouter(include_in_schema=False)
 bearer = HTTPBearer(auto_error=False)
+
+_DISABLED_MESSAGE = (
+    "Superadmin panel yoqilmagan: serverdagi .env faylda SUPERADMIN_PASSWORD "
+    "qiymati o'rnatilmagan. Uni yozib, konteynerlarni qayta ishga tushiring."
+)
 
 _LOGIN_WINDOW_SECONDS = 5 * 60
 _LOGIN_MAX_FAILURES = 5
@@ -61,7 +67,7 @@ def _check_login_limit(client_key: str) -> None:
             retry_after = max(1, int(_LOGIN_WINDOW_SECONDS - (now - attempts[0])))
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail="Too many login attempts. Try again later.",
+                detail="Juda ko'p urinish. Bir necha daqiqadan keyin qayta urinib ko'ring.",
                 headers={"Retry-After": str(retry_after)},
             )
 
@@ -82,13 +88,16 @@ def get_superadmin(
 ) -> str:
     settings = get_settings()
     if not settings.superadmin_password:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Superadmin is disabled")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=_DISABLED_MESSAGE,
+        )
     token = credentials.credentials if credentials and credentials.scheme.lower() == "bearer" else ""
     username = decode_superadmin_token(token) if token else None
     if not username:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Superadmin authentication is required",
+            detail="Avval tizimga kiring.",
             headers={"WWW-Authenticate": "Bearer"},
         )
     return username
@@ -108,6 +117,23 @@ def _account_counts(db: Session, user_uid: str) -> tuple[int, int, int]:
     devices = db.scalar(select(func.count(Device.id)).where(Device.user_uid == user_uid)) or 0
     batches = db.scalar(select(func.count(SyncBatch.id)).where(SyncBatch.user_uid == user_uid)) or 0
     return int(records), int(devices), int(batches)
+
+
+@router.get("/availability", response_model=SuperadminAvailabilityOut)
+def availability() -> SuperadminAvailabilityOut:
+    """Whether the panel can be used at all.
+
+    Without this the only way to discover that SUPERADMIN_PASSWORD was never
+    set on the server is to type a password and be told the login failed --
+    which reads like a wrong password rather than a server that was never
+    configured. Deliberately unauthenticated: it reveals nothing beyond
+    whether the feature is switched on.
+    """
+    settings = get_settings()
+    return SuperadminAvailabilityOut(
+        enabled=bool(settings.superadmin_password),
+        message="" if settings.superadmin_password else _DISABLED_MESSAGE,
+    )
 
 
 @page_router.get("/superadmin", response_class=HTMLResponse)
@@ -131,7 +157,10 @@ def superadmin_page():
 def login(payload: SuperadminLoginRequest, request: Request):
     settings = get_settings()
     if not settings.superadmin_password:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Superadmin is disabled")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=_DISABLED_MESSAGE,
+        )
 
     client_key = _client_key(request)
     _check_login_limit(client_key)
@@ -140,7 +169,7 @@ def login(payload: SuperadminLoginRequest, request: Request):
     if not (valid_username and valid_password):
         _record_login_failure(client_key)
         time.sleep(0.2)
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Login yoki parol noto'g'ri.")
 
     _clear_login_failures(client_key)
     expires_in = max(1, settings.superadmin_token_expire_minutes) * 60

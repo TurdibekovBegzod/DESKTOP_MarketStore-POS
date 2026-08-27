@@ -245,6 +245,24 @@ function showToast(message, isError = false) {
   toastTimer = setTimeout(() => toast.classList.add("hidden"), 4200);
 }
 
+async function checkAvailability() {
+  // Say plainly that the server was never configured, rather than letting the
+  // person conclude they typed the wrong password.
+  try {
+    const response = await fetch(`${API_ROOT}/availability`, { cache: "no-store" });
+    if (!response.ok) return;
+    const payload = await response.json();
+    if (payload && payload.enabled === false) {
+      byId("loginError").textContent = payload.message || "Superadmin panel yoqilmagan.";
+      byId("loginButton").disabled = true;
+    }
+  } catch (error) {
+    /* Offline or blocked: the login attempt will report it. */
+  }
+}
+
+checkAvailability();
+
 byId("loginForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   const button = byId("loginButton");

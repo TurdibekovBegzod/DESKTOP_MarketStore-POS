@@ -266,6 +266,13 @@ class SuperadminTokenOut(BaseModel):
     expires_in_seconds: int
 
 
+class SuperadminAvailabilityOut(BaseModel):
+    """Whether the control panel is configured on this server."""
+
+    enabled: bool
+    message: str = ""
+
+
 class SuperadminConfirmRequest(BaseModel):
     confirm_email: str = Field(min_length=5, max_length=255)
 
