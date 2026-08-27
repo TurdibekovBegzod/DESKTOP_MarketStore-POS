@@ -110,7 +110,54 @@ def _server_uses_uuid_identity(records):
     return False
 
 
+def reconcile_after_upgrade(user):
+    """Settle this device against the server once, before any ordinary sync.
+
+    A device that has been running a while keeps rows the other devices deleted
+    long ago. Deletions travel as tombstones, and a tombstone this device never
+    received leaves the row in place -- so an ordinary merge would upload it
+    again and the deletion would undo itself.
+
+    So the first sync after the upgrade is one-directional: whatever the server
+    holds becomes this device's content, and the previous local copy is kept as
+    a backup file rather than merged. If the server has nothing usable -- it is
+    empty, or still on the old integer keys -- then this device is the only
+    source there is, and it uploads instead.
+
+    Returns None when there was nothing to settle.
+    """
+    if not db.is_upgrade_reconcile_required():
+        return None
+
+    token = _token_for_user(user)
+    snapshot = api_client.pull_sync_records(token, include_deleted=True)
+    purge = apply_server_control(snapshot)
+    if purge["purged"]:
+        db.mark_upgrade_reconcile_complete()
+        db.mark_identity_reset_complete()
+        return {"direction": "purge", "purged": True}
+
+    records = snapshot.get("records", [])
+    pending = int(db.get_sync_status().get("pending_change_count") or 0)
+    if _server_uses_uuid_identity(records):
+        result = force_download(user)
+        db.mark_upgrade_reconcile_complete()
+        db.mark_identity_reset_complete()
+        result["adopted_server"] = True
+        result["discarded_pending"] = pending
+        return result
+
+    result = force_upload(user)
+    db.mark_upgrade_reconcile_complete()
+    result["adopted_server"] = False
+    return result
+
+
 def push_local_changes(user, batch_size=1000, incremental=True, force=False):
+    if not force:
+        settled = reconcile_after_upgrade(user)
+        if settled is not None:
+            return settled
     if not force and db.is_identity_reset_required():
         token = _token_for_user(user)
         snapshot = api_client.pull_sync_records(token, include_deleted=True)
@@ -221,14 +268,20 @@ def push_local_changes(user, batch_size=1000, incremental=True, force=False):
 
 
 def pull_server_changes(user, table_name=None):
-    if db.is_identity_reset_required():
-        # Downloading before the server has been converted would mix obsolete
-        # integer ids into the new UUID schema. The upload path performs the
-        # one-time safe conversion/merge handshake.
-        raise SyncError(
-            "Bu qurilma yangi identifikatorlarga o'tdi. Avval \"Yuborish\" "
-            "orqali serverni yangilang, keyin ma'lumot olish mumkin bo'ladi."
-        )
+    if table_name is None:
+        settled = reconcile_after_upgrade(user)
+        if settled is not None:
+            return {
+                "received": settled.get("received", 0),
+                "imported": settled.get("imported", 0),
+                "skipped_legacy": 0,
+                "rejected": 0,
+                "server_time": None,
+                "generation": settled.get("generation") or db.get_sync_generation(),
+                "adopted_server": settled.get("adopted_server"),
+                "backup_path": settled.get("backup_path"),
+                "discarded_pending": settled.get("discarded_pending", 0),
+            }
     token = _token_for_user(user)
     result = api_client.pull_sync_records(
         token,
@@ -245,13 +298,29 @@ def pull_server_changes(user, table_name=None):
             "purged": True,
         }
     records = result.get("records", [])
+    if db.is_identity_reset_required():
+        # This device converted to UUID keys and is still marked as owing the
+        # server a replacement. Whether it really does is decided by what the
+        # server just handed back, not by the marker: another device may have
+        # replaced it already, and refusing the download in that case would
+        # leave this device unable to receive anything at all.
+        if records and not _server_uses_uuid_identity(records):
+            raise SyncError(
+                "Serverdagi ma'lumot eski formatda saqlangan, shuning uchun uni "
+                "olib bo'lmaydi. \"Yuborish\" tugmasini bosing — server shu "
+                "qurilmadagi ma'lumot bilan almashtiriladi."
+            )
+        db.mark_identity_reset_complete()
     imported = db.import_sync_records(records)
+    stats = db.get_last_pull_stats()
     if table_name is None:
         db.mark_server_bootstrap_complete()
         _apply_generation(int(result.get("generation") or 0))
     return {
         "received": len(records),
         "imported": imported,
+        "skipped_legacy": stats["skipped_legacy"],
+        "rejected": stats["rejected"],
         "server_time": result.get("server_time"),
         "generation": result.get("generation"),
     }

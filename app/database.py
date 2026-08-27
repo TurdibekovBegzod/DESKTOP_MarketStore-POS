@@ -112,6 +112,8 @@ SYNC_TABLES = (
     "expenses",
     "sales",
     "sale_items",
+    "sale_returns",
+    "customer_debt_movements",
     "stock_movements",
     "inventory_check_sessions",
     "inventory_check_items",
@@ -885,6 +887,15 @@ class Sale(Base):
     is_finalized = Column(Integer, default=0)
     finalized_at = Column(String)
     cashier_reward = Column(Float, default=0.0)
+    # The amounts as first written. A return used to overwrite total, discount
+    # and paid in place, so the sale forgot what it had been -- and the same
+    # return applied twice could not be told apart from two real ones. These
+    # are sealed at creation; everything above is recomputed from them and the
+    # sale_returns rows.
+    original_total = Column(Float)
+    original_discount = Column(Float)
+    original_paid = Column(Float)
+    original_cashier_reward = Column(Float)
     created_at = Column(String, server_default=text("CURRENT_TIMESTAMP"))
 
 
@@ -898,6 +909,52 @@ class SaleItem(Base):
     returned_at = Column(String)
     price = Column(Float, nullable=False)
     subtotal = Column(Float, nullable=False)
+    # Sealed when the line is sold. Profit used to read the product's current
+    # cost, so editing a cost rewrote the profit of every past month.
+    cost_at_sale = Column(Float)
+    created_at = Column(String, server_default=text("CURRENT_TIMESTAMP"))
+    updated_at = Column(String)
+
+
+class SaleReturn(Base):
+    """One return, as a row.
+
+    A return used to be a counter on the sale line, which meant the same
+    return could be applied twice without a trace. As a row it carries its own
+    identifier, so replaying it -- from a sync, from a double click -- lands on
+    the same row and changes nothing.
+    """
+
+    __tablename__ = "sale_returns"
+    id = Column(String(ROW_ID_LENGTH), primary_key=True, default=new_row_id)
+    sale_id = Column(String(ROW_ID_LENGTH), ForeignKey("sales.id"), nullable=False)
+    # Nullable on purpose: deleting a sale line keeps the returns that were
+    # already made against it, so the sale's amounts stay explainable.
+    sale_item_id = Column(String(ROW_ID_LENGTH), ForeignKey("sale_items.id"))
+    quantity = Column(Integer, nullable=False)
+    refund = Column(Float, nullable=False, default=0)
+    discount_refund = Column(Float, default=0)
+    reward_refund = Column(Float, default=0)
+    note = Column(String)
+    created_at = Column(String, server_default=text("CURRENT_TIMESTAMP"))
+
+
+class CustomerDebtMovement(Base):
+    """What a customer owes, as a ledger rather than a running total.
+
+    ``customers.balance`` was only ever added to and subtracted from, and
+    nothing could check it. Suppliers and debtors already keep a ledger; this
+    gives customers the same, and the balance becomes a cache of it.
+    """
+
+    __tablename__ = "customer_debt_movements"
+    id = Column(String(ROW_ID_LENGTH), primary_key=True, default=new_row_id)
+    customer_id = Column(String(ROW_ID_LENGTH), ForeignKey("customers.id"), nullable=False)
+    sale_id = Column(String(ROW_ID_LENGTH), ForeignKey("sales.id"))
+    type = Column(String, nullable=False)
+    amount = Column(Float, nullable=False)
+    note = Column(String)
+    created_at = Column(String, server_default=text("CURRENT_TIMESTAMP"))
 
 
 class StockMovement(Base):
@@ -977,6 +1034,7 @@ MIGRATIONS = (
     ("010_add_sale_item_returned_at", "Track when sold items are returned."),
     ("011_create_account_assets", "Store account-specific synchronized branding assets."),
     ("012_uuid_row_identity", "Give every row a UUID so two devices can never claim the same id."),
+    ("013_money_ledger", "Derive every money figure from rows that are never rewritten."),
 )
 
 
@@ -1487,6 +1545,9 @@ def _migration_uuid_row_identity(conn):
         # the first upgraded device replaces the server copy with this intact
         # UUID snapshot.
         _sync_state_set(conn, "identity_reset_required", "1")
+        # Settle with the server before trusting anything here: rows deleted on
+        # the other devices may still be sitting in this copy.
+        _sync_state_set(conn, "upgrade_reconcile_required", "1")
         _sync_state_set(conn, "server_reseed_required", "1")
         _sync_state_set(conn, "pending_change_count", "0")
         _sync_state_set(conn, "remote_generation", "0")
@@ -1494,6 +1555,101 @@ def _migration_uuid_row_identity(conn):
         _sync_state_set(conn, "last_dirty_at", "")
     finally:
         _record_dangling_references(conn)
+
+
+def _migration_money_ledger(conn):
+    """Make every money figure derivable from rows that are never rewritten.
+
+    Three things were being kept as running totals with nothing to check them
+    against: the sale's own amounts (a return overwrote them), the returned
+    quantity (a counter), and the customer's debt balance. Each now has an
+    immutable source -- the sealed original, the sale_returns rows, the
+    customer_debt_movements rows -- and the old column becomes a cache.
+
+    Existing rows are sealed at their current value. Anything already returned
+    before this point cannot be reconstructed, because the old code discarded
+    what it overwrote; from here on it can.
+    """
+    Base.metadata.create_all(bind=conn)
+
+    additions = {
+        "sales": {
+            "original_total": "ALTER TABLE sales ADD COLUMN original_total REAL",
+            "original_discount": "ALTER TABLE sales ADD COLUMN original_discount REAL",
+            "original_paid": "ALTER TABLE sales ADD COLUMN original_paid REAL",
+            "original_cashier_reward": "ALTER TABLE sales ADD COLUMN original_cashier_reward REAL",
+        },
+        "sale_items": {
+            "cost_at_sale": "ALTER TABLE sale_items ADD COLUMN cost_at_sale REAL",
+            "created_at": "ALTER TABLE sale_items ADD COLUMN created_at VARCHAR",
+            "updated_at": "ALTER TABLE sale_items ADD COLUMN updated_at VARCHAR",
+        },
+    }
+    for table_name, columns in additions.items():
+        if not _has_table(conn, table_name):
+            continue
+        existing = _table_columns(conn, table_name)
+        for column, statement in columns.items():
+            if column not in existing:
+                conn.exec_driver_sql(statement)
+
+    if _has_table(conn, "sales"):
+        conn.exec_driver_sql("""
+            UPDATE sales SET
+                original_total = COALESCE(original_total, total),
+                original_discount = COALESCE(original_discount, discount, 0),
+                original_paid = COALESCE(original_paid, paid),
+                original_cashier_reward = COALESCE(original_cashier_reward, cashier_reward, 0)
+        """)
+    if _has_table(conn, "sale_items") and _has_table(conn, "products"):
+        conn.exec_driver_sql("""
+            UPDATE sale_items SET cost_at_sale = COALESCE(
+                cost_at_sale,
+                (SELECT products.cost FROM products WHERE products.id = sale_items.product_id),
+                0
+            )
+        """)
+        conn.exec_driver_sql("""
+            UPDATE sale_items SET created_at = COALESCE(
+                created_at,
+                (SELECT sales.created_at FROM sales WHERE sales.id = sale_items.sale_id)
+            )
+        """)
+    # Sales that existed before this point carry an inherited figure, not a
+    # derived one: a return made under the old code overwrote what it reduced,
+    # and nothing can bring that back. Mark where the ledger actually begins so
+    # a figure from before it is never mistaken for a checked one.
+    if _has_table(conn, "sales"):
+        inherited = conn.exec_driver_sql("SELECT COUNT(*) FROM sales").scalar() or 0
+        if inherited:
+            _sync_state_set(conn, "ledger_baseline_at", _utc_now())
+            _sync_state_set(conn, "ledger_inherited_sales", str(int(inherited)))
+
+    # A customer who already owes something keeps owing it: the balance becomes
+    # the ledger's opening entry rather than a number with no history.
+    if _has_table(conn, "customers") and _has_table(conn, "customer_debt_movements"):
+        owing = conn.exec_driver_sql(
+            "SELECT id, balance FROM customers WHERE COALESCE(balance, 0) <> 0"
+        ).fetchall()
+        now = _utc_now()
+        for customer_id, balance in owing:
+            already = conn.exec_driver_sql(
+                "SELECT COUNT(*) FROM customer_debt_movements WHERE customer_id = ?",
+                (customer_id,),
+            ).scalar()
+            if already:
+                continue
+            conn.exec_driver_sql(
+                "INSERT INTO customer_debt_movements (id, customer_id, sale_id, type, amount, note, created_at) "
+                "VALUES (?, ?, NULL, 'boshlangich', ?, ?, ?)",
+                (
+                    stable_row_id("customer_debt_movements", f"opening:{customer_id}"),
+                    customer_id,
+                    float(balance or 0),
+                    "Jurnal boshlanishidagi qoldiq",
+                    now,
+                ),
+            )
 
 
 MIGRATION_FUNCTIONS = {
@@ -1509,6 +1665,7 @@ MIGRATION_FUNCTIONS = {
     "010_add_sale_item_returned_at": _migration_add_sale_item_returned_at,
     "011_create_account_assets": _migration_create_account_assets,
     "012_uuid_row_identity": _migration_uuid_row_identity,
+    "013_money_ledger": _migration_money_ledger,
 }
 
 
@@ -2417,6 +2574,51 @@ def set_sync_generation(value):
         _sync_state_set(conn, "server_generation", str(generation))
 
 
+def get_ledger_baseline():
+    """When the money ledger began, and how much predates it.
+
+    Figures from before this moment were inherited from the previous scheme:
+    a return used to overwrite the amount it reduced, so those sales cannot be
+    recomputed from their own history. Everything after it can.
+    """
+    with _get_engine().begin() as conn:
+        row = conn.exec_driver_sql(
+            "SELECT value FROM sync_state WHERE key='ledger_baseline_at'"
+        ).fetchone()
+        inherited = _sync_state_int(conn, "ledger_inherited_sales", 0)
+    return Row(dict(
+        started_at=row[0] if row and row[0] else None,
+        inherited_sales=inherited,
+    ))
+
+
+def get_last_pull_stats():
+    """What the most recent download had to leave behind."""
+    with _get_engine().begin() as conn:
+        return {
+            "skipped_legacy": _sync_state_int(conn, "last_pull_skipped_legacy", 0),
+            "rejected": _sync_state_int(conn, "last_pull_rejected", 0),
+        }
+
+
+def is_upgrade_reconcile_required():
+    """True until this device has settled with the server after the upgrade.
+
+    A device that had been running for a while keeps rows that were deleted on
+    the other devices long ago: deletions only travel as tombstones, and a
+    tombstone the device never received leaves the row sitting there, ready to
+    be uploaded again. The first sync after the upgrade therefore takes the
+    server's copy as the truth rather than merging into it.
+    """
+    with _get_engine().begin() as conn:
+        return _sync_state_int(conn, "upgrade_reconcile_required", 0) == 1
+
+
+def mark_upgrade_reconcile_complete():
+    with _get_engine().begin() as conn:
+        _sync_state_set(conn, "upgrade_reconcile_required", "0")
+
+
 def is_identity_reset_required():
     """True while the server still holds rows keyed by the old integers."""
     with _get_engine().begin() as conn:
@@ -3196,9 +3398,10 @@ def _cleanup_unfinalized_sales_for_product(session, product_id):
             )
         session.merge(SyncTombstone(
             table_name="sale_items",
-            local_id=item.id,
+            local_id=str(item.id),
             deleted_at=_utc_now(),
         ))
+        _detach_sale_item_returns(session, item.id)
         session.delete(item)
     session.flush()
     for sale_id in affected_sale_ids:
@@ -3210,9 +3413,10 @@ def _cleanup_unfinalized_sales_for_product(session, product_id):
             if remaining_count == 0:
                 session.merge(SyncTombstone(
                     table_name="sales",
-                    local_id=sale.id,
+                    local_id=str(sale.id),
                     deleted_at=_utc_now(),
                 ))
+                _release_sale_ledger_rows(session, sale.id)
                 session.delete(sale)
             else:
                 new_total = session.scalar(
@@ -3946,6 +4150,10 @@ def create_sale(customer_id, cashier_id, items, total, discount, paid, payment_m
             payment_method=payment_method,
             is_finalized=1 if is_finalized else 0,
             finalized_at=now_str if is_finalized else None,
+            original_total=total,
+            original_discount=discount,
+            original_paid=paid,
+            original_cashier_reward=0.0,
             created_at=now_str,
         )
         session.add(sale)
@@ -3973,6 +4181,10 @@ def create_sale(customer_id, cashier_id, items, total, discount, paid, payment_m
                 quantity=quantity,
                 price=item["price"],
                 subtotal=item["subtotal"],
+                # Sealed here: profit must keep reading the cost of the day,
+                # not whatever the product costs when the report is opened.
+                cost_at_sale=float((product.cost if product else 0) or 0),
+                created_at=now_str,
             )
             session.add(sale_item)
             session.add(StockMovement(product_id=product_id, type="sotuv", quantity=-quantity, note=f"Sotuv #{sale.display_no}"))
@@ -3980,8 +4192,15 @@ def create_sale(customer_id, cashier_id, items, total, discount, paid, payment_m
             customer = session.get(Customer, customer_id)
             if customer:
                 customer.total_purchases = (customer.total_purchases or 0) + payable
-                if payment_method == "qarz":
-                    customer.balance = (customer.balance or 0) + payable
+            if payment_method == "qarz":
+                _add_customer_debt_movement(
+                    session,
+                    customer_id,
+                    payable,
+                    "qarz",
+                    sale_id=sale.id,
+                    note=f"Sotuv #{sale.display_no}",
+                )
         sale_id = sale.id
         sale_display_no = sale.display_no
     log_activity(
@@ -3993,6 +4212,47 @@ def create_sale(customer_id, cashier_id, items, total, discount, paid, payment_m
         badge="Sotildi",
     )
     return sale_id
+
+
+def recalculate_sale_totals(sale_id):
+    """Rebuild a sale's cached figures from its sealed originals and returns.
+
+    Every cached number in a sale is derivable, so it can always be rebuilt --
+    after a download, after a repair, after anything that wrote the rows
+    without going through the return path.
+    """
+    with session_scope() as session:
+        sale = session.get(Sale, sale_id)
+        if sale is None:
+            return None
+        for item in session.scalars(select(SaleItem).where(SaleItem.sale_id == sale_id)):
+            _recalculate_sale_item(session, item)
+        _recalculate_sale(session, sale)
+        if sale.customer_id:
+            _recalculate_customer_balance(session, sale.customer_id)
+        return Row(dict(
+            total=sale.total,
+            discount=sale.discount,
+            paid=sale.paid,
+            cashier_reward=sale.cashier_reward,
+        ))
+
+
+def get_customer_debt_movements(customer_id):
+    with session_scope() as session:
+        return _rows_from_models(session.scalars(
+            select(CustomerDebtMovement)
+            .where(CustomerDebtMovement.customer_id == customer_id)
+            .order_by(CustomerDebtMovement.created_at, CustomerDebtMovement.id)
+        ).all())
+
+
+def get_sale_returns(sale_id=None):
+    with session_scope() as session:
+        stmt = select(SaleReturn).order_by(SaleReturn.created_at, SaleReturn.id)
+        if sale_id:
+            stmt = stmt.where(SaleReturn.sale_id == sale_id)
+        return _rows_from_models(session.scalars(stmt).all())
 
 
 def get_sale_display_no(sale_id):
@@ -4010,8 +4270,11 @@ def finalize_sale(sale_id, cashier_reward=0.0):
         if sale.is_finalized:
             return
         sale.is_finalized = 1
-        sale.cashier_reward = float(cashier_reward or 0.0)
+        # Sealed once. Returns are taken off the sealed figure in
+        # _recalculate_sale, so the reward never drifts by repeated subtraction.
+        sale.original_cashier_reward = float(cashier_reward or 0.0)
         sale.finalized_at = _utc_now()
+        _recalculate_sale(session, sale)
         sale_ref = sale.display_no or str(sale.id)[:8]
     if sale_ref:
         log_activity(
@@ -4094,7 +4357,7 @@ def get_product_sales_archive(query="", start_date=None, end_date=None, only_cas
             ) or 0
             item_discount = (sale.discount or 0) * (active_subtotal / active_sale_total) if active_sale_total > 0 else 0
             item_total_after_discount = max(0, active_subtotal - item_discount)
-            cost_val = (product.cost if product else 0) or 0
+            cost_val = _item_cost(item, product)
             price_val = item.price or 0
             sold_unit_price = (item_total_after_discount / active_quantity) if active_quantity > 0 else price_val
             result.append(Row(dict(
@@ -4448,8 +4711,167 @@ def clear_sales_history():
             session.merge(SyncTombstone(
                 table_name="sales", local_id=str(sale_id), deleted_at=deleted_at
             ))
+        for return_id in session.scalars(select(SaleReturn.id)):
+            session.merge(SyncTombstone(
+                table_name="sale_returns", local_id=str(return_id), deleted_at=deleted_at
+            ))
+        for movement in session.scalars(
+            select(CustomerDebtMovement).where(CustomerDebtMovement.sale_id.is_not(None))
+        ).all():
+            movement.sale_id = None
+        session.flush()
+        session.query(SaleReturn).delete()
         session.query(SaleItem).delete()
         session.query(Sale).delete()
+
+
+def _detach_sale_item_returns(session, sale_item_id):
+    """Keep a line's returns after the line itself is removed.
+
+    The sale's amounts are computed from its returns, so throwing them away
+    with the line would silently restore money that was already given back.
+    """
+    for row in session.scalars(
+        select(SaleReturn).where(SaleReturn.sale_item_id == sale_item_id)
+    ).all():
+        row.sale_item_id = None
+    session.flush()
+
+
+def _release_sale_ledger_rows(session, sale_id):
+    """A deleted sale takes its return rows with it, but never its debt.
+
+    The returns describe that sale and mean nothing without it. The customer's
+    debt is a different fact -- it was really incurred -- so those movements
+    stay and only lose their link.
+    """
+    deleted_at = _utc_now()
+    for row in session.scalars(select(SaleReturn).where(SaleReturn.sale_id == sale_id)).all():
+        session.merge(SyncTombstone(
+            table_name="sale_returns", local_id=str(row.id), deleted_at=deleted_at
+        ))
+        session.delete(row)
+    for movement in session.scalars(
+        select(CustomerDebtMovement).where(CustomerDebtMovement.sale_id == sale_id)
+    ).all():
+        movement.sale_id = None
+    session.flush()
+
+
+def _recalculate_debt_balance(session, party, movement_model, owner_column, lifetime_field):
+    """A debt balance is a cache of its movements, never a running total.
+
+    The balance used to be added to and subtracted from beside the movement
+    rows, with nothing comparing the two -- so the debtors window and the
+    finance report, which read different sides, could disagree and neither
+    could be shown to be wrong.
+    """
+    session.flush()
+    rows = session.execute(
+        select(movement_model.type, func.coalesce(func.sum(movement_model.amount), 0))
+        .where(owner_column == party.id)
+        .group_by(movement_model.type)
+    ).all()
+    totals = {str(kind or ""): float(amount or 0) for kind, amount in rows}
+    borrowed = totals.get("qarz", 0.0)
+    repaid = totals.get("tolov", 0.0)
+    party.balance = borrowed - repaid
+    setattr(party, lifetime_field, borrowed)
+    return party.balance
+
+
+def _item_cost(item, product):
+    """What this line cost us, as sealed on the day it was sold."""
+    sealed = getattr(item, "cost_at_sale", None)
+    if sealed is not None:
+        return float(sealed)
+    return float((product.cost if product else 0) or 0)
+
+
+def _sale_original(sale, field, fallback):
+    """The sealed amount, falling back to the live one for pre-ledger rows."""
+    value = getattr(sale, field, None)
+    return float(value) if value is not None else float(fallback or 0)
+
+
+def _sale_return_totals(session, sale_id):
+    row = session.execute(
+        select(
+            func.coalesce(func.sum(SaleReturn.refund), 0),
+            func.coalesce(func.sum(SaleReturn.discount_refund), 0),
+            func.coalesce(func.sum(SaleReturn.reward_refund), 0),
+        ).where(SaleReturn.sale_id == sale_id)
+    ).one()
+    return float(row[0] or 0), float(row[1] or 0), float(row[2] or 0)
+
+
+def _recalculate_sale(session, sale):
+    """Rebuild a sale's amounts from what was sealed plus its returns.
+
+    Nothing here subtracts from the previous value, which is what made a
+    repeated return impossible to detect: the answer is computed from the
+    sealed originals every time, so applying the same return twice lands on
+    the same figures.
+    """
+    refund, discount_refund, reward_refund = _sale_return_totals(session, sale.id)
+    original_total = _sale_original(sale, "original_total", sale.total)
+    original_discount = _sale_original(sale, "original_discount", sale.discount)
+    original_paid = _sale_original(sale, "original_paid", sale.paid)
+    original_reward = _sale_original(sale, "original_cashier_reward", sale.cashier_reward)
+    rate = sale.exchange_rate or 1
+
+    sale.total = max(original_total - refund, 0)
+    sale.discount = min(max(original_discount - discount_refund, 0), sale.total)
+    net_refund = max(0.0, refund - discount_refund)
+    if sale.payment_method != "qarz":
+        remaining_paid = max(original_paid - net_refund, 0)
+        sale.paid = remaining_paid
+        sale.paid_original = remaining_paid / rate if rate else remaining_paid
+    # A reward is earned on what the customer kept, so it shrinks with the
+    # returns -- but from the sealed figure, never by repeated subtraction.
+    sale.cashier_reward = max(0.0, original_reward - reward_refund)
+
+
+def _recalculate_sale_item(session, item):
+    returned = session.scalar(
+        select(func.coalesce(func.sum(SaleReturn.quantity), 0))
+        .where(SaleReturn.sale_item_id == item.id)
+    ) or 0
+    item.returned_quantity = int(returned)
+    item.returned_at = session.scalar(
+        select(func.max(SaleReturn.created_at)).where(SaleReturn.sale_item_id == item.id)
+    )
+    item.updated_at = _utc_now()
+
+
+def _recalculate_customer_balance(session, customer_id):
+    """The balance is a cache of the ledger, so it is never adjusted by hand."""
+    if not customer_id:
+        return
+    customer = session.get(Customer, customer_id)
+    if customer is None:
+        return
+    customer.balance = float(session.scalar(
+        select(func.coalesce(func.sum(CustomerDebtMovement.amount), 0))
+        .where(CustomerDebtMovement.customer_id == customer_id)
+    ) or 0)
+
+
+def _add_customer_debt_movement(session, customer_id, amount, movement_type, sale_id=None, note=None):
+    if not customer_id or not amount:
+        return None
+    movement = CustomerDebtMovement(
+        customer_id=customer_id,
+        sale_id=sale_id,
+        type=movement_type,
+        amount=float(amount),
+        note=note,
+        created_at=_utc_now(),
+    )
+    session.add(movement)
+    session.flush()
+    _recalculate_customer_balance(session, customer_id)
+    return movement
 
 
 def _return_sale_item_in_session(session, item, quantity, note=""):
@@ -4461,39 +4883,56 @@ def _return_sale_item_in_session(session, item, quantity, note=""):
     available = item.quantity - (item.returned_quantity or 0)
     if quantity > available:
         raise AppError(f"Qaytarish miqdori ko'p. Qaytarish mumkin: {available}.")
-    refund = item.price * quantity
-    rate = sale.exchange_rate or 1
-    active_sale_total = session.scalar(
-        select(func.coalesce(func.sum((SaleItem.quantity - func.coalesce(SaleItem.returned_quantity, 0)) * SaleItem.price), 0))
-        .where(SaleItem.sale_id == item.sale_id)
-    ) or 0
-    discount_refund = (sale.discount or 0) * (refund / active_sale_total) if active_sale_total > 0 else 0
-    net_refund = max(0, refund - discount_refund)
-    reward_refund = (sale.cashier_reward or 0.0) * (refund / active_sale_total) if active_sale_total > 0 else (sale.cashier_reward or 0.0)
-    sale.cashier_reward = max(0.0, (sale.cashier_reward or 0.0) - reward_refund)
-    item.returned_quantity = (item.returned_quantity or 0) + quantity
-    item.returned_at = _utc_now()
+
+    refund = (item.price or 0) * quantity
+    # The discount and the reward are shared out in proportion to the sale as
+    # it was written, not as it stands now. Returning every line therefore
+    # gives back exactly the whole discount, however many steps it took.
+    original_total = _sale_original(sale, "original_total", sale.total)
+    share = (refund / original_total) if original_total > 0 else 0.0
+    discount_refund = _sale_original(sale, "original_discount", sale.discount) * share
+    reward_refund = _sale_original(sale, "original_cashier_reward", sale.cashier_reward) * share
+    net_refund = max(0.0, refund - discount_refund)
+
+    session.add(SaleReturn(
+        sale_id=sale.id,
+        sale_item_id=item.id,
+        quantity=quantity,
+        refund=refund,
+        discount_refund=discount_refund,
+        reward_refund=reward_refund,
+        note=note or None,
+        created_at=_utc_now(),
+    ))
+    session.flush()
+
+    _apply_stock_delta(
+        session,
+        item.product_id,
+        quantity,
+        "qaytarish",
+        note or f"Sotuv #{_sale_label(session, item.sale_id)} qaytarildi",
+    )
     product = session.get(Product, item.product_id)
     if product:
-        product.stock = (product.stock or 0) + quantity
         product.is_deleted = 0
-    session.add(StockMovement(
-        product_id=item.product_id,
-        type="qaytarish",
-        quantity=quantity,
-        note=note or f"Sotuv #{_sale_label(session, item.sale_id)} qaytarildi",
-    ))
-    sale.total = max((sale.total or 0) - refund, 0)
-    sale.discount = min(max((sale.discount or 0) - discount_refund, 0), sale.total or 0)
-    if sale.payment_method != "qarz":
-        sale.paid = max((sale.paid or 0) - net_refund, 0)
-        sale.paid_original = max((sale.paid_original or 0) - net_refund / rate, 0)
+
+    _recalculate_sale_item(session, item)
+    _recalculate_sale(session, sale)
+
     if sale.customer_id:
         customer = session.get(Customer, sale.customer_id)
         if customer:
             customer.total_purchases = max((customer.total_purchases or 0) - net_refund, 0)
-            if sale.payment_method == "qarz":
-                customer.balance = max((customer.balance or 0) - net_refund, 0)
+        if sale.payment_method == "qarz":
+            _add_customer_debt_movement(
+                session,
+                sale.customer_id,
+                -net_refund,
+                "qaytarish",
+                sale_id=sale.id,
+                note=note or f"Sotuv #{_sale_label(session, sale.id)} qaytarildi",
+            )
 
 
 def return_sale_item(sale_item_id, quantity, note=""):
@@ -4523,6 +4962,7 @@ def delete_sale_item(sale_item_id):
             local_id=str(item.id),
             deleted_at=_utc_now(),
         ))
+        _detach_sale_item_returns(session, item.id)
         session.delete(item)
         session.flush()
         has_other_items = session.scalar(
@@ -4536,14 +4976,20 @@ def delete_sale_item(sale_item_id):
                     local_id=str(sale.id),
                     deleted_at=_utc_now(),
                 ))
+                _release_sale_ledger_rows(session, sale.id)
                 session.delete(sale)
 
 
 def _sale_cost(session, sale_id):
+    # coalesce, not a plain read: rows written before the cost was sealed fall
+    # back to the product's cost, which is the best they ever had.
     return session.scalar(
-        select(func.coalesce(func.sum((SaleItem.quantity - func.coalesce(SaleItem.returned_quantity, 0)) * Product.cost), 0))
+        select(func.coalesce(func.sum(
+            (SaleItem.quantity - func.coalesce(SaleItem.returned_quantity, 0))
+            * func.coalesce(SaleItem.cost_at_sale, Product.cost, 0)
+        ), 0))
         .select_from(SaleItem)
-        .join(Product, Product.id == SaleItem.product_id)
+        .outerjoin(Product, Product.id == SaleItem.product_id)
         .where(SaleItem.sale_id == sale_id)
     ) or 0
 
@@ -4633,8 +5079,9 @@ def get_cashier_sold_items(date_str, cashier_id=None):
             row = grouped.setdefault(key, Row(dict(product_name=product.name, barcode=product.barcode, quantity=0, price=item.price, revenue=0, cost=0, profit=0)))
             row["quantity"] += qty
             row["revenue"] += qty * item.price
-            row["cost"] += qty * (product.cost or 0)
-            row["profit"] += qty * (item.price - (product.cost or 0))
+            unit_cost = _item_cost(item, product)
+            row["cost"] += qty * unit_cost
+            row["profit"] += qty * ((item.price or 0) - unit_cost)
         return sorted(grouped.values(), key=lambda r: r["revenue"], reverse=True)
 
 
@@ -4654,7 +5101,7 @@ def _sale_section_totals(session, sale_id, section_id):
         revenue = qty * (item.price or 0)
         totals["product_count"] += qty
         totals["revenue"] += revenue
-        section_cost += qty * (product.cost or 0)
+        section_cost += qty * _item_cost(item, product)
     if totals["revenue"] > 0:
         totals["sales_count"] = 1
         sale = session.get(Sale, sale_id)
@@ -4973,7 +5420,7 @@ def get_cashier_sales_details(cashier_id=None, start_date=None, end_date=None, s
                 returned_at=_utc_to_local(item.returned_at) if item.returned_at else None,
                 net_quantity=net_quantity,
                 price=item.price or 0,
-                cost=product.cost if product else 0,
+                cost=_item_cost(item, product),
                 active_subtotal=active_subtotal,
                 item_discount=item_discount,
                 item_total_after_discount=max(0, active_subtotal - item_discount),
@@ -5279,12 +5726,12 @@ def add_supplier_debt(supplier_id, amount, note=""):
         raise AppError("Qarz summasi 0 dan katta bo'lishi kerak.")
     with session_scope() as session:
         row = session.get(Supplier, supplier_id)
-        row.balance = (row.balance or 0) + amount
-        row.total_received = (row.total_received or 0) + amount
+        session.add(SupplierDebtMovement(supplier_id=supplier_id, type="qarz", amount=amount, note=note))
+        s_balance = _recalculate_debt_balance(
+            session, row, SupplierDebtMovement, SupplierDebtMovement.supplier_id, "total_received"
+        )
         s_name = row.name
         s_curr = row.debt_currency or "UZS"
-        s_balance = row.balance
-        session.add(SupplierDebtMovement(supplier_id=supplier_id, type="qarz", amount=amount, note=note))
     log_activity(
         "supplier_debt_added",
         f"Ta'minotchi qarzi: {s_name}",
@@ -5303,11 +5750,12 @@ def pay_supplier_debt(supplier_id, amount, note=""):
         current_balance = row.balance or 0
         if amount > current_balance:
             raise AppError(f"To'lov joriy qarzdan oshib ketdi. Joriy qarz: {current_balance:,.2f}.")
-        row.balance = current_balance - amount
+        session.add(SupplierDebtMovement(supplier_id=supplier_id, type="tolov", amount=amount, note=note))
+        s_rem = _recalculate_debt_balance(
+            session, row, SupplierDebtMovement, SupplierDebtMovement.supplier_id, "total_received"
+        )
         s_name = row.name
         s_curr = row.debt_currency or "UZS"
-        s_rem = row.balance
-        session.add(SupplierDebtMovement(supplier_id=supplier_id, type="tolov", amount=amount, note=note))
     if s_rem <= 0:
         log_activity(
             "supplier_debt_cleared",
@@ -5441,12 +5889,12 @@ def add_debtor_debt(debtor_id, amount, note=""):
         raise AppError("Qarz summasi 0 dan katta bo'lishi kerak.")
     with session_scope() as session:
         row = session.get(Debtor, debtor_id)
-        row.balance = (row.balance or 0) + amount
-        row.total_given = (row.total_given or 0) + amount
+        session.add(DebtorDebtMovement(debtor_id=debtor_id, type="qarz", amount=amount, note=note))
+        d_balance = _recalculate_debt_balance(
+            session, row, DebtorDebtMovement, DebtorDebtMovement.debtor_id, "total_given"
+        )
         d_name = row.name
         d_curr = row.debt_currency or "UZS"
-        d_balance = row.balance
-        session.add(DebtorDebtMovement(debtor_id=debtor_id, type="qarz", amount=amount, note=note))
     log_activity(
         "debtor_debt_added",
         f"Mijozga qarz berildi: {d_name}",
@@ -5465,11 +5913,12 @@ def pay_debtor_debt(debtor_id, amount, note=""):
         current_balance = row.balance or 0
         if amount > current_balance:
             raise AppError(f"To'lov joriy qarzdan oshib ketdi. Joriy qarz: {current_balance:,.2f}.")
-        row.balance = current_balance - amount
+        session.add(DebtorDebtMovement(debtor_id=debtor_id, type="tolov", amount=amount, note=note))
+        d_rem = _recalculate_debt_balance(
+            session, row, DebtorDebtMovement, DebtorDebtMovement.debtor_id, "total_given"
+        )
         d_name = row.name
         d_curr = row.debt_currency or "UZS"
-        d_rem = row.balance
-        session.add(DebtorDebtMovement(debtor_id=debtor_id, type="tolov", amount=amount, note=note))
     if d_rem <= 0:
         log_activity(
             "debtor_debt_cleared",

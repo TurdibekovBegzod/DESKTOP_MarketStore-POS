@@ -270,6 +270,7 @@ TEXTS = {
         "sync_clean": "Sinxron", "sync_dirty": "Yuborilmagan o'zgarish bor",
         "sync_push": "Yuborish", "sync_pull": "Olish",
         "sync_replace_server": "Serverni shu qurilmadagiga almashtirish",
+        "sync_adopt_server": "Shu qurilmani serverdagiga almashtirish",
         "sync_done": "Sync tugadi", "sync_error": "Sync xatosi",
         "sync_pending_count": "Yuborilmagan o'zgarishlar",
         "sync_remote": "Serverda yangi o'zgarish bor",
@@ -329,6 +330,7 @@ TEXTS = {
         "sync_clean": "Synced", "sync_dirty": "Unsynced changes",
         "sync_push": "Upload", "sync_pull": "Download",
         "sync_replace_server": "Replace the server with this device",
+        "sync_adopt_server": "Replace this device with the server copy",
         "sync_done": "Sync completed", "sync_error": "Sync error",
         "sync_pending_count": "Unsynced changes",
         "sync_remote": "New changes on the server",
@@ -411,6 +413,7 @@ TEXTS["ru"].update({
     "sync_push": "Отправить",
     "sync_pull": "Получить",
     "sync_replace_server": "Заменить сервер копией этого устройства",
+    "sync_adopt_server": "Заменить это устройство копией сервера",
     "sync_done": "Синхронизация завершена",
     "sync_error": "Ошибка синхронизации",
 })
@@ -945,6 +948,7 @@ class SyncDialog(QDialog):
         # this action wipes the account on every device - not something a
         # cashier should be one misclick away from.
         self.replace_btn = None
+        self.adopt_btn = None
         if (getattr(self.parent_window, "user", {}) or {}).get("role") != "admin":
             return
         self.replace_btn = QPushButton(
@@ -958,6 +962,22 @@ class SyncDialog(QDialog):
         )
         self.replace_btn.clicked.connect(self._replace_server)
         layout.addWidget(self.replace_btn)
+
+        # The mirror action. A device that was switched off for a while keeps
+        # rows the others deleted, and a deletion it never heard about cannot
+        # be re-sent -- so the only way back is to take the server's copy
+        # wholesale. The first sync after an upgrade does this by itself; this
+        # button is for every time after that.
+        self.adopt_btn = QPushButton(
+            self.labels.get("sync_adopt_server", "Shu qurilmani serverdagiga almashtirish")
+        )
+        self.adopt_btn.setStyleSheet(
+            "QPushButton{background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;"
+            "border-radius:7px;padding:8px 14px;font-size:12px;}"
+            "QPushButton:hover{background:#dbeafe;border-color:#60a5fa;}"
+        )
+        self.adopt_btn.clicked.connect(self._adopt_server)
+        layout.addWidget(self.adopt_btn)
 
     def refresh(self):
         if not self.parent_window:
@@ -1027,6 +1047,31 @@ class SyncDialog(QDialog):
         self.accept()
         # force_upload snapshots the server copy to disk before resetting it.
         self.parent_window._resolve_conflict("force_upload")
+
+    def _adopt_server(self):
+        if not self.parent_window:
+            return
+        if (self.parent_window.user or {}).get("role") != "admin":
+            return
+        pending = db.get_sync_status().get("pending_change_count", 0)
+        question = self.labels.get(
+            "sync_adopt_server_q",
+            "Shu qurilmadagi ma'lumot O'CHIRILADI va serverdagi nusxa bilan almashtiriladi.\n\n"
+            "Boshqa qurilmalarga tegilmaydi. Eski nusxa zaxira fayl bo'lib saqlanadi.\n\n"
+            "Hali yuborilmagan {n} ta o'zgarish bor. Davom etilsinmi?",
+        ).replace("{n}", str(pending))
+        reply = QMessageBox.question(
+            self,
+            self.labels.get("sync_adopt_server", "Serverdagini olish"),
+            question,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self.accept()
+        # force_download backs the local copy up to disk before replacing it.
+        self.parent_window._resolve_conflict("force_download")
 
 
 class ToastItem(QFrame):
