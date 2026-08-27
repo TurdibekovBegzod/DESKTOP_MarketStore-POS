@@ -63,6 +63,26 @@ def _current_generation(db: Session, user_uid: str) -> int:
     return int(value or 0)
 
 
+def _current_purge_generation(db: Session, user_uid: str) -> int:
+    value = db.scalar(select(SyncMeta.purge_generation).where(SyncMeta.user_uid == user_uid))
+    return int(value or 0)
+
+
+def _assert_purge_generation(db: Session, user: User, applied: int | None) -> None:
+    """Never let an offline snapshot resurrect data erased by superadmin."""
+    current = _current_purge_generation(db, user.uid)
+    if current and applied != current:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "remote_purge_required",
+                "message": "Account data was erased by superadmin",
+                "purge_generation": current,
+                "applied_purge_generation": applied,
+            },
+        )
+
+
 def _bump_generation(db: Session, user: User, device_key: str | None, tables) -> dict:
     """Advance the account's change counter and describe the change.
 
@@ -85,11 +105,18 @@ def _bump_generation(db: Session, user: User, device_key: str | None, tables) ->
             "last_device_key": device_key,
             "last_tables": table_list,
         },
-    ).returning(SyncMeta.generation)
-    generation = int(db.execute(stmt).scalar_one())
+    ).returning(
+        SyncMeta.generation,
+        SyncMeta.purge_generation,
+        SyncMeta.purge_requested_at,
+    )
+    generation, purge_generation, purge_requested_at = db.execute(stmt).one()
+    generation = int(generation)
     return {
         "type": "change",
         "generation": generation,
+        "purge_generation": int(purge_generation or 0),
+        "purge_requested_at": purge_requested_at.isoformat() if purge_requested_at else None,
         "tables": table_list,
         "device_key": device_key,
         "server_time": now.isoformat(),
@@ -148,6 +175,7 @@ def _upsert_record(db: Session, user: User, record: RecordIn):
 
 @router.post("/push", response_model=PushResponse)
 def push(payload: PushRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    _assert_purge_generation(db, current_user, payload.applied_purge_generation)
     _assert_generation(db, current_user, payload.expected_generation)
     device = _touch_device(db, current_user, payload.device)
     for record in payload.records:
@@ -181,7 +209,9 @@ def upsert_table_rows(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
     x_device_key: str | None = Header(default=None, alias="X-Device-Key"),
+    x_purge_generation: int | None = Header(default=None, alias="X-Purge-Generation"),
 ):
+    _assert_purge_generation(db, current_user, x_purge_generation)
     if table_name not in ALLOWED_SYNC_TABLES:
         raise HTTPException(status_code=422, detail="Unsupported sync table")
     if len(records) > 1000:
@@ -208,7 +238,10 @@ def pull(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    generation = _current_generation(db, current_user.uid)
+    meta = db.scalar(select(SyncMeta).where(SyncMeta.user_uid == current_user.uid))
+    generation = int(meta.generation or 0) if meta else 0
+    purge_generation = int(meta.purge_generation or 0) if meta else 0
+    purge_requested_at = meta.purge_requested_at if meta else None
     stmt = select(UserRecord).where(UserRecord.user_uid == current_user.uid)
     if since is not None:
         stmt = stmt.where(UserRecord.updated_at > since)
@@ -219,7 +252,13 @@ def pull(
     ordered = stmt.order_by(UserRecord.updated_at, UserRecord.id).offset(offset)
     if limit is None:
         records = db.scalars(ordered).all()
-        return PullResponse(records=records, server_time=datetime.now(timezone.utc), generation=generation)
+        return PullResponse(
+            records=records,
+            server_time=datetime.now(timezone.utc),
+            generation=generation,
+            purge_generation=purge_generation,
+            purge_requested_at=purge_requested_at,
+        )
     records = db.scalars(ordered.limit(limit + 1)).all()
     has_more = len(records) > limit
     page = records[:limit]
@@ -227,6 +266,8 @@ def pull(
         records=page,
         server_time=datetime.now(timezone.utc),
         generation=generation,
+        purge_generation=purge_generation,
+        purge_requested_at=purge_requested_at,
         has_more=has_more,
         next_offset=offset + len(page) if has_more else None,
     )
@@ -239,7 +280,9 @@ def mark_deleted(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
     x_device_key: str | None = Header(default=None, alias="X-Device-Key"),
+    x_purge_generation: int | None = Header(default=None, alias="X-Purge-Generation"),
 ):
+    _assert_purge_generation(db, current_user, x_purge_generation)
     now_text = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     record = db.scalar(
         select(UserRecord).where(
@@ -268,12 +311,14 @@ def reset(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
     x_device_key: str | None = Header(default=None, alias="X-Device-Key"),
+    x_purge_generation: int | None = Header(default=None, alias="X-Purge-Generation"),
 ):
     """Drop every stored record for the account.
 
     Used by the desktop client's "upload mine, discard the server copy" branch of
     the conflict dialog, right before it streams a full snapshot back up.
     """
+    _assert_purge_generation(db, current_user, x_purge_generation)
     removed = db.execute(
         delete(UserRecord).where(UserRecord.user_uid == current_user.uid)
     ).rowcount or 0
@@ -291,6 +336,8 @@ def state(current_user: User = Depends(get_current_user), db: Session = Depends(
     ) or 0
     return SyncStateOut(
         generation=int(meta.generation) if meta else 0,
+        purge_generation=int(meta.purge_generation or 0) if meta else 0,
+        purge_requested_at=meta.purge_requested_at if meta else None,
         last_change_at=meta.last_change_at if meta else None,
         last_device_key=meta.last_device_key if meta else None,
         last_tables=list(meta.last_tables or []) if meta else [],
@@ -325,9 +372,18 @@ def _read_meta(user_uid: str) -> dict:
     try:
         meta = db.scalar(select(SyncMeta).where(SyncMeta.user_uid == user_uid))
         if meta is None:
-            return {"generation": 0, "tables": [], "device_key": None, "last_change_at": None}
+            return {
+                "generation": 0,
+                "purge_generation": 0,
+                "purge_requested_at": None,
+                "tables": [],
+                "device_key": None,
+                "last_change_at": None,
+            }
         return {
             "generation": int(meta.generation or 0),
+            "purge_generation": int(meta.purge_generation or 0),
+            "purge_requested_at": meta.purge_requested_at.isoformat() if meta.purge_requested_at else None,
             "tables": list(meta.last_tables or []),
             "device_key": meta.last_device_key,
             "last_change_at": meta.last_change_at.isoformat() if meta.last_change_at else None,
@@ -381,6 +437,8 @@ async def events(
         try:
             yield _sse("hello", {
                 "generation": last_generation,
+                "purge_generation": int(initial.get("purge_generation") or 0),
+                "purge_requested_at": initial.get("purge_requested_at"),
                 "tables": initial["tables"],
                 "device_key": initial["device_key"],
                 "server_time": datetime.now(timezone.utc).isoformat(),
@@ -391,6 +449,8 @@ async def events(
             if since_generation is not None and last_generation > since_generation:
                 yield _sse("change", {
                     "generation": last_generation,
+                    "purge_generation": int(initial.get("purge_generation") or 0),
+                    "purge_requested_at": initial.get("purge_requested_at"),
                     "tables": initial["tables"],
                     "device_key": initial["device_key"],
                     "server_time": datetime.now(timezone.utc).isoformat(),
@@ -409,6 +469,8 @@ async def events(
                         payload = {
                             "type": "change",
                             "generation": int(fresh["generation"]),
+                            "purge_generation": int(fresh.get("purge_generation") or 0),
+                            "purge_requested_at": fresh.get("purge_requested_at"),
                             "tables": fresh["tables"],
                             "device_key": fresh["device_key"],
                             "server_time": datetime.now(timezone.utc).isoformat(),
@@ -430,6 +492,8 @@ async def events(
                     last_generation = int(payload["generation"])
                     yield _sse("change", {
                         "generation": last_generation,
+                        "purge_generation": int(payload.get("purge_generation") or 0),
+                        "purge_requested_at": payload.get("purge_requested_at"),
                         "tables": payload.get("tables") or [],
                         "device_key": payload.get("device_key"),
                         "server_time": payload.get("server_time"),

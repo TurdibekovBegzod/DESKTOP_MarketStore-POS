@@ -160,7 +160,11 @@ class AccountDatabaseIsolationTest(unittest.TestCase):
             sync_service.api_client,
             "push_sync_records",
             return_value={"saved": len(db.export_sync_records()), "batch_id": 1},
-        ) as push:
+        ) as push, patch.object(
+            sync_service.api_client,
+            "get_sync_state",
+            return_value={"generation": 0, "purge_generation": 0},
+        ):
             result = sync_service.synchronize_account_storage(
                 {**dict(owner), "api_access_token": "replacement-token"}
             )

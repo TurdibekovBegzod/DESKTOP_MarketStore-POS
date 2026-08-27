@@ -33,16 +33,37 @@ def _token_for_user(user):
     raise SyncError("Online account token topilmadi. Email va parol orqali qayta kiring.")
 
 
+def apply_server_control(payload):
+    """Apply irreversible server control markers before ordinary sync work."""
+    state = dict(payload or {})
+    purge_generation = int(state.get("purge_generation") or 0)
+    if purge_generation <= db.get_applied_purge_generation():
+        return {"purged": False, "purge_generation": purge_generation}
+    result = db.apply_remote_purge(
+        purge_generation,
+        server_generation=state.get("generation"),
+    )
+    return {
+        "purged": bool(result.get("applied")),
+        "purge_generation": purge_generation,
+        "removed_records": int(result.get("removed_records") or 0),
+        "removed_artifacts": int(result.get("removed_artifacts") or 0),
+    }
+
+
 def get_server_state(user):
     token = _token_for_user(user)
     state = api_client.get_sync_state(token)
     generation = int(state.get("generation") or 0)
-    db.mark_remote_change(
-        generation,
-        tables=state.get("last_tables") or [],
-        device_key=state.get("last_device_key"),
-        changed_at=state.get("last_change_at"),
-    )
+    purge = apply_server_control(state)
+    state["local_purge_applied"] = purge["purged"]
+    if not purge["purged"]:
+        db.mark_remote_change(
+            generation,
+            tables=state.get("last_tables") or [],
+            device_key=state.get("last_device_key"),
+            changed_at=state.get("last_change_at"),
+        )
     return state
 
 
@@ -77,6 +98,15 @@ def _apply_generation(generation):
 
 def push_local_changes(user, batch_size=1000, incremental=True, force=False):
     token = _token_for_user(user)
+    state = get_server_state(user)
+    if state.get("local_purge_applied"):
+        return {
+            "sent": 0,
+            "saved": 0,
+            "batch_id": None,
+            "generation": db.get_sync_generation(),
+            "purged": True,
+        }
     records, watermark = db.export_sync_records(incremental=incremental, with_watermark=True)
     device_key = db.get_sync_device_key()
     expected = None if force else db.get_sync_generation()
@@ -105,6 +135,7 @@ def push_local_changes(user, batch_size=1000, incremental=True, force=False):
                 note=f"desktop snapshot ({i + len(chunk)}/{len(records)})",
                 timeout=60,
                 expected_generation=guard,
+                applied_purge_generation=db.get_applied_purge_generation(),
             )
             total_saved += result.get("saved", 0)
             last_batch_id = result.get("batch_id")
@@ -113,6 +144,17 @@ def push_local_changes(user, batch_size=1000, incremental=True, force=False):
                 seen = int(returned)
             # Our own write moved the counter; the next chunk must expect that.
             guard = seen if guard is not None else None
+    except api_client.RemotePurgeRequiredError:
+        latest = get_server_state(user)
+        if latest.get("local_purge_applied"):
+            return {
+                "sent": 0,
+                "saved": 0,
+                "batch_id": None,
+                "generation": db.get_sync_generation(),
+                "purged": True,
+            }
+        raise SyncError("Serverdagi o'chirish buyrug'ini lokal bazaga qo'llab bo'lmadi.")
     except api_client.SyncConflictError as exc:
         raise SyncConflict(describe_sync(user)) from exc
 
@@ -145,6 +187,15 @@ def pull_server_changes(user, table_name=None):
         table_name=table_name,
         include_deleted=True,
     )
+    purge = apply_server_control(result)
+    if purge["purged"]:
+        return {
+            "received": 0,
+            "imported": 0,
+            "server_time": result.get("server_time"),
+            "generation": result.get("generation"),
+            "purged": True,
+        }
     records = result.get("records", [])
     imported = db.import_sync_records(records)
     if table_name is None:
@@ -161,8 +212,28 @@ def pull_server_changes(user, table_name=None):
 def force_download(user):
     """Take the server copy and discard local changes (after backing them up)."""
     token = _token_for_user(user)
+    state = get_server_state(user)
+    if state.get("local_purge_applied"):
+        return {
+            "direction": "purge",
+            "received": 0,
+            "imported": 0,
+            "backup_path": None,
+            "generation": db.get_sync_generation(),
+            "purged": True,
+        }
     backup_path = db.create_local_backup(tag="before_download")
     result = api_client.pull_sync_records(token, include_deleted=True)
+    purge = apply_server_control(result)
+    if purge["purged"]:
+        return {
+            "direction": "purge",
+            "received": 0,
+            "imported": 0,
+            "backup_path": None,
+            "generation": db.get_sync_generation(),
+            "purged": True,
+        }
     records = result.get("records", [])
     imported = db.replace_local_from_records(records)
     db.mark_server_bootstrap_complete()
@@ -180,6 +251,17 @@ def force_download(user):
 def force_upload(user):
     """Overwrite the server with our copy (after backing the server copy up)."""
     token = _token_for_user(user)
+    state = get_server_state(user)
+    if state.get("local_purge_applied"):
+        return {
+            "direction": "purge",
+            "sent": 0,
+            "saved": 0,
+            "backup_path": None,
+            "server_backup_path": None,
+            "generation": db.get_sync_generation(),
+            "purged": True,
+        }
     device_key = db.get_sync_device_key()
     local_backup = db.create_local_backup(tag="before_upload")
 
@@ -191,7 +273,25 @@ def force_upload(user):
         # A snapshot we cannot read is not a reason to block the user's choice.
         server_backup = None
 
-    api_client.reset_sync_records(token, device_key=device_key)
+    try:
+        api_client.reset_sync_records(
+            token,
+            device_key=device_key,
+            applied_purge_generation=db.get_applied_purge_generation(),
+        )
+    except api_client.RemotePurgeRequiredError:
+        latest = get_server_state(user)
+        if latest.get("local_purge_applied"):
+            return {
+                "direction": "purge",
+                "sent": 0,
+                "saved": 0,
+                "backup_path": None,
+                "server_backup_path": None,
+                "generation": db.get_sync_generation(),
+                "purged": True,
+            }
+        raise SyncError("Serverdagi o'chirish buyrug'ini lokal bazaga qo'llab bo'lmadi.")
     db.mark_server_bootstrap_complete()
     result = push_local_changes(user, incremental=False, force=True)
     return {

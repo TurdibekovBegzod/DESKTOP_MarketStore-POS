@@ -185,6 +185,45 @@ class DestructiveResolutionTest(_SyncDbTestCase):
         # token, and the cascade would take it down with the user.
         self.assertEqual(db.get_user_api_token(self.owner["id"]), "tok-1")
 
+    def test_remote_purge_erases_rows_outbox_and_account_backups_once(self):
+        self._add_product("P-ERASE", "Erase me")
+        backup_path = db.create_local_backup(tag="before_purge")
+        self.assertTrue(os.path.exists(backup_path))
+        self.assertGreater(db.get_sync_status()["pending_change_count"], 0)
+
+        result = db.apply_remote_purge(7, server_generation=9)
+
+        self.assertTrue(result["applied"])
+        self.assertEqual(db.get_all_products(), [])
+        self.assertEqual(db.get_sync_status()["pending_change_count"], 0)
+        self.assertEqual(db.get_sync_generation(), 9)
+        self.assertEqual(db.get_applied_purge_generation(), 7)
+        self.assertEqual(db.get_user_api_token(self.owner["id"]), "tok-1")
+        self.assertFalse(os.path.exists(backup_path))
+
+        # Replayed SSE greetings must not erase legitimate post-purge work.
+        self._add_product("P-NEW", "Created later")
+        repeated = db.apply_remote_purge(7, server_generation=9)
+        self.assertFalse(repeated["applied"])
+        self.assertEqual([row["name"] for row in db.get_all_products()], ["Created later"])
+
+    def test_push_applies_server_purge_before_exporting_local_rows(self):
+        self._add_product("P-OLD", "Offline copy")
+        state = {
+            "generation": 12,
+            "purge_generation": 12,
+            "records_count": 0,
+            "last_tables": ["products"],
+            "last_device_key": "superadmin",
+        }
+        with patch.object(api_client, "get_sync_state", return_value=state), \
+             patch.object(api_client, "push_sync_records") as push:
+            result = sync_service.push_local_changes(self.owner)
+
+        self.assertTrue(result["purged"])
+        self.assertEqual(db.get_all_products(), [])
+        push.assert_not_called()
+
     def test_force_download_backs_up_then_replaces_local_data(self):
         self._add_product("P-LOCAL", "Only local")
         server_records = [{
@@ -200,6 +239,10 @@ class DestructiveResolutionTest(_SyncDbTestCase):
         with patch.object(
             api_client, "pull_sync_records",
             return_value={"records": server_records, "server_time": None, "generation": 11},
+        ), patch.object(
+            api_client,
+            "get_sync_state",
+            return_value={"generation": 11, "purge_generation": 0},
         ):
             result = sync_service.force_download(self.owner)
 
@@ -216,8 +259,9 @@ class DestructiveResolutionTest(_SyncDbTestCase):
         server_records = [{"table_name": "products", "local_id": "77", "data": {"id": 77, "name": "Server copy"}}]
         calls = {"reset": 0, "pushed": []}
 
-        def fake_reset(_token, device_key=None, timeout=60):
+        def fake_reset(_token, device_key=None, timeout=60, applied_purge_generation=None):
             calls["reset"] += 1
+            self.assertEqual(applied_purge_generation, 0)
             return {"removed": 1, "generation": 12}
 
         def fake_push(_token, records, **kwargs):

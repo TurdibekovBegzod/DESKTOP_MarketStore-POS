@@ -8,7 +8,7 @@ import shutil
 import sqlite3
 import sys
 import threading
-from contextlib import contextmanager, nullcontext
+from contextlib import closing, contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import (
@@ -296,7 +296,10 @@ def _legacy_database_matches_account(user_uid, email):
 
 def _copy_sqlite_database(source_path, target_path):
     os.makedirs(os.path.dirname(target_path), exist_ok=True)
-    with sqlite3.connect(source_path) as source, sqlite3.connect(target_path) as target:
+    # sqlite3.Connection's context manager commits but does not close. Explicit
+    # closing matters on Windows, where an open backup handle cannot be erased
+    # by a later account-wide purge.
+    with closing(sqlite3.connect(source_path)) as source, closing(sqlite3.connect(target_path)) as target:
         source.backup(target)
 
 
@@ -2029,6 +2032,12 @@ def set_sync_generation(value):
         _sync_state_set(conn, "server_generation", str(generation))
 
 
+def get_applied_purge_generation():
+    """Newest server purge that this local account database has applied."""
+    with _get_engine().begin() as conn:
+        return _sync_state_int(conn, "applied_purge_generation", 0)
+
+
 def mark_remote_change(generation, tables=None, device_key=None, changed_at=None):
     """Remember that the server moved ahead of us, so the badge survives restart."""
     try:
@@ -2193,6 +2202,66 @@ def wipe_sync_tables():
             conn.exec_driver_sql("DELETE FROM sync_outbox")
     finally:
         _sync_suspend_token.__exit__(None, None, None)
+
+
+def _remove_account_purge_artifacts():
+    """Remove account-specific copies that could resurrect erased data."""
+    removed = 0
+    account_dir = os.path.dirname(DB_PATH)
+    account_key = os.path.basename(account_dir) or "account"
+    candidates = [
+        os.path.join(account_dir, "custom_logo.png"),
+        os.path.join(account_dir, f".{os.path.basename(DB_PATH)}.account_logo_migrated"),
+    ]
+    if os.path.isdir(BACKUP_DIR):
+        try:
+            candidates.extend(
+                os.path.join(BACKUP_DIR, name)
+                for name in os.listdir(BACKUP_DIR)
+                if name.startswith(f"{account_key}.")
+            )
+        except OSError:
+            pass
+    for path in candidates:
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+                removed += 1
+        except OSError:
+            pass
+    return removed
+
+
+def apply_remote_purge(purge_generation, server_generation=None):
+    """Erase this account locally exactly once for a server purge marker."""
+    try:
+        purge_generation = int(purge_generation or 0)
+        server_generation = int(server_generation or purge_generation)
+    except (TypeError, ValueError):
+        return Row(applied=False, removed_records=0, removed_artifacts=0)
+    if purge_generation <= 0 or purge_generation <= get_applied_purge_generation():
+        return Row(applied=False, removed_records=0, removed_artifacts=0)
+
+    removed_records = count_sync_records()
+    wipe_sync_tables()
+    removed_artifacts = _remove_account_purge_artifacts()
+    with _get_engine().begin() as conn:
+        _sync_state_set(conn, "applied_purge_generation", str(purge_generation))
+        _sync_state_set(conn, "server_generation", str(max(server_generation, purge_generation)))
+        _sync_state_set(conn, "remote_generation", "0")
+        _sync_state_set(conn, "remote_tables", "")
+        _sync_state_set(conn, "remote_device_key", "")
+        _sync_state_set(conn, "remote_changed_at", "")
+        _sync_state_set(conn, "last_dirty_at", "")
+        _sync_state_set(conn, "pending_change_count", "0")
+        _sync_state_set(conn, "server_bootstrap_required", "0")
+        _sync_state_set(conn, "server_reseed_required", "0")
+    return Row(
+        applied=True,
+        purge_generation=purge_generation,
+        removed_records=removed_records,
+        removed_artifacts=removed_artifacts,
+    )
 
 
 def replace_local_from_records(records):

@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="uz">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <title>MarketStore Control</title>
+  <link rel="stylesheet" href="/superadmin/assets/admin.css">
+</head>
+<body>
+  <main class="login-shell" id="loginView">
+    <section class="login-panel" aria-labelledby="loginTitle">
+      <div class="brand-mark" aria-hidden="true">M</div>
+      <h1 id="loginTitle">MarketStore Control</h1>
+      <form id="loginForm" autocomplete="on">
+        <label for="username">Login</label>
+        <input id="username" name="username" autocomplete="username" required maxlength="120">
+        <label for="password">Parol</label>
+        <div class="password-field">
+          <input id="password" name="password" type="password" autocomplete="current-password" required maxlength="256">
+          <button class="show-password" id="showPassword" type="button">Ko‘rsatish</button>
+        </div>
+        <p class="form-error" id="loginError" role="alert"></p>
+        <button class="primary-button login-button" id="loginButton" type="submit">Kirish</button>
+      </form>
+    </section>
+  </main>
+
+  <div class="app-shell hidden" id="appView">
+    <header class="topbar">
+      <div class="topbar-brand">
+        <span class="brand-mark brand-mark-small" aria-hidden="true">M</span>
+        <div>
+          <strong>MarketStore Control</strong>
+          <span>Superadmin</span>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <button class="secondary-button" id="refreshButton" type="button">Yangilash</button>
+        <button class="secondary-button" id="logoutButton" type="button">Chiqish</button>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <section class="stats-grid" aria-label="Tizim statistikasi">
+        <div class="stat"><span>Jami account</span><strong id="totalAccounts">0</strong></div>
+        <div class="stat"><span>Faol</span><strong id="activeAccounts">0</strong></div>
+        <div class="stat"><span>Server yozuvlari</span><strong id="totalRecords">0</strong></div>
+        <div class="stat"><span>Qurilmalar</span><strong id="totalDevices">0</strong></div>
+      </section>
+
+      <section class="accounts-section" aria-labelledby="accountsTitle">
+        <div class="section-toolbar">
+          <div>
+            <h1 id="accountsTitle">Accountlar</h1>
+            <p id="updatedAt">Hali yangilanmagan</p>
+          </div>
+          <label class="search-field">
+            <span class="sr-only">Account qidirish</span>
+            <input id="searchInput" type="search" placeholder="Email yoki ism bo‘yicha qidirish" autocomplete="off">
+          </label>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Account</th>
+                <th>Holati</th>
+                <th>Yozuvlar</th>
+                <th>Qurilmalar</th>
+                <th>Oxirgi faollik</th>
+                <th>Yaratilgan</th>
+                <th><span class="sr-only">Amallar</span></th>
+              </tr>
+            </thead>
+            <tbody id="accountsBody"></tbody>
+          </table>
+          <div class="empty-state hidden" id="emptyState">Account topilmadi</div>
+          <div class="loading-state" id="loadingState">Yuklanmoqda...</div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="modal-backdrop hidden" id="confirmModal" role="presentation">
+    <section class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+      <button class="modal-close" id="modalClose" type="button" aria-label="Yopish">&times;</button>
+      <h2 id="modalTitle">Amalni tasdiqlash</h2>
+      <p id="modalMessage"></p>
+      <div class="account-reference" id="modalEmail"></div>
+      <label for="confirmEmail">Tasdiqlash uchun emailni kiriting</label>
+      <input id="confirmEmail" type="email" autocomplete="off">
+      <p class="form-error" id="modalError" role="alert"></p>
+      <div class="modal-actions">
+        <button class="secondary-button" id="modalCancel" type="button">Bekor qilish</button>
+        <button class="danger-button" id="modalConfirm" type="button" disabled>Tasdiqlash</button>
+      </div>
+    </section>
+  </div>
+
+  <div class="toast hidden" id="toast" role="status"></div>
+  <script src="/superadmin/assets/admin.js" defer></script>
+</body>
+</html>

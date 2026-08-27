@@ -37,6 +37,12 @@ class Settings(BaseSettings):
     # path, so an unauthenticated /metrics would publish our traffic shape to
     # anyone who guesses the URL. Unset means the endpoint does not exist.
     metrics_token: str | None = None
+    # Emergency/control-plane account. It is intentionally not stored in the
+    # users table, so tenant data and ordinary login flows can never grant this
+    # privilege. Leave the password empty to disable the control panel.
+    superadmin_username: str = "superadmin"
+    superadmin_password: str | None = None
+    superadmin_token_expire_minutes: int = 15
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

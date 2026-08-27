@@ -4,7 +4,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
+from pathlib import Path
 
 from prometheus_fastapi_instrumentator import Instrumentator
 
@@ -12,7 +14,7 @@ from app.config import get_settings
 from app.database import SessionLocal
 from app.events import broker
 from app.releases import broadcast_release, fetch_latest_from_github, get_release, store_release
-from app.routers import auth, health, metrics, sync, updates
+from app.routers import auth, health, metrics, superadmin, sync, updates
 
 
 settings = get_settings()
@@ -84,6 +86,8 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.resolved_trusted_hosts())
+_superadmin_static = Path(__file__).resolve().parent / "static" / "superadmin"
+app.mount("/superadmin/assets", StaticFiles(directory=_superadmin_static), name="superadmin-assets")
 
 if settings.metrics_token:
     # Records request count, duration and status per endpoint. The template
@@ -97,7 +101,9 @@ if settings.metrics_token:
     app.include_router(metrics.router)
 
 app.include_router(health.router)
+app.include_router(superadmin.page_router)
 app.include_router(auth.router, prefix=settings.api_prefix)
+app.include_router(superadmin.router, prefix=settings.api_prefix)
 app.include_router(sync.router, prefix=settings.api_prefix)
 app.include_router(updates.router, prefix=settings.api_prefix)
 

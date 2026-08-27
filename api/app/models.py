@@ -60,6 +60,21 @@ class EmailVerificationCode(Base):
     user: Mapped[User] = relationship(back_populates="email_verification_codes")
 
 
+class GoogleOAuthSession(Base):
+    """Legacy OAuth rows kept only so account deletion can remove old secrets."""
+
+    __tablename__ = "google_oauth_sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    state: Mapped[str] = mapped_column(String(120), unique=True, index=True, nullable=False)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    access_token: Mapped[str | None] = mapped_column(Text)
+    error: Mapped[str | None] = mapped_column(Text)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
 class Device(Base):
     __tablename__ = "devices"
     __table_args__ = (
@@ -121,6 +136,8 @@ class SyncMeta(Base):
         ForeignKey("users.uid", ondelete="CASCADE"), primary_key=True
     )
     generation: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    purge_generation: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    purge_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_change_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_device_key: Mapped[str | None] = mapped_column(String(120))
     last_tables: Mapped[list | None] = mapped_column(JSONB)

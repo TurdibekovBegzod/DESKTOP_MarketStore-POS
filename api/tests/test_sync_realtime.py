@@ -111,6 +111,31 @@ class SyncSchemaTest(unittest.TestCase):
         state = SyncStateOut(generation=3, server_time=datetime.now(timezone.utc))
         self.assertEqual(state.last_tables, [])
         self.assertEqual(state.records_count, 0)
+        self.assertEqual(state.purge_generation, 0)
+
+    def test_push_request_carries_applied_purge_generation(self):
+        record = RecordIn(table_name="products", local_id="1")
+        request = PushRequest(records=[record], applied_purge_generation=8)
+        self.assertEqual(request.applied_purge_generation, 8)
+        with self.assertRaises(ValidationError):
+            PushRequest(records=[record], applied_purge_generation=-1)
+
+
+class PurgeGuardTest(unittest.TestCase):
+    def test_stale_desktop_is_rejected_before_it_can_restore_erased_rows(self):
+        from fastapi import HTTPException
+        from app.routers.sync import _assert_purge_generation
+
+        class FakeDb:
+            def scalar(self, _statement):
+                return 5
+
+        with self.assertRaises(HTTPException) as ctx:
+            _assert_purge_generation(FakeDb(), _FakeUser("acct-x"), 4)
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertEqual(ctx.exception.detail["code"], "remote_purge_required")
+
+        _assert_purge_generation(FakeDb(), _FakeUser("acct-x"), 5)
 
 
 class AppWiringTest(unittest.TestCase):

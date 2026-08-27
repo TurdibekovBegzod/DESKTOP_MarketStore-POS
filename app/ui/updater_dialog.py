@@ -5,7 +5,8 @@ Telegram-style Auto-Updater Dialog for MarketStore POS
 import os
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QProgressBar, QTextEdit, QFrame, QSizePolicy, QMessageBox
+    QProgressBar, QTextEdit, QFrame, QSizePolicy, QMessageBox,
+    QApplication,
 )
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont, QColor
@@ -195,7 +196,7 @@ class UpdaterDialog(QDialog):
         self.primary_btn.setEnabled(False)
         self.secondary_btn.setText(self._tr("Yopish"))
 
-        self.checker_thread = UpdateCheckerThread(parent=self)
+        self.checker_thread = UpdateCheckerThread(parent=QApplication.instance())
         self.checker_thread.update_available.connect(self._show_update_available)
         self.checker_thread.no_update_available.connect(self._show_up_to_date)
         self.checker_thread.check_error.connect(self._show_check_error)
@@ -267,7 +268,7 @@ class UpdaterDialog(QDialog):
             file_name,
             expected_size=self.update_data.get("file_size", 0),
             expected_sha256=self.update_data.get("sha256", ""),
-            parent=self,
+            parent=QApplication.instance(),
         )
         self.downloader_thread.progress.connect(self._on_download_progress)
         self.downloader_thread.download_finished.connect(self._on_download_finished)
@@ -311,7 +312,11 @@ class UpdaterDialog(QDialog):
 
     def _on_primary_clicked(self):
         if self.downloaded_file and os.path.exists(self.downloaded_file):
-            apply_and_restart(self.downloaded_file)
+            try:
+                apply_and_restart(self.downloaded_file)
+            except (OSError, ValueError) as exc:
+                self._on_download_error(str(exc))
+                QMessageBox.warning(self, self._tr("Xatolik"), str(exc))
         elif self.update_data and self.update_data.get("has_update"):
             self._start_download()
         else:
@@ -323,6 +328,8 @@ class UpdaterDialog(QDialog):
         self.reject()
 
     def closeEvent(self, event):
+        if self.checker_thread and self.checker_thread.isRunning():
+            self.checker_thread.requestInterruption()
         if self.downloader_thread and self.downloader_thread.isRunning():
             self.downloader_thread.cancel()
         super().closeEvent(event)

@@ -12,6 +12,7 @@ import urllib.request
 import urllib.error
 import json
 import hashlib
+import threading
 from urllib.parse import urljoin, urlparse
 from PyQt6.QtCore import QThread, pyqtSignal
 
@@ -284,9 +285,18 @@ class UpdateDownloaderThread(QThread):
         self.expected_size = max(0, int(expected_size or 0))
         self.expected_sha256 = str(expected_sha256 or "").strip().lower()
         self._is_cancelled = False
+        self._response = None
+        self._response_lock = threading.Lock()
 
     def cancel(self):
         self._is_cancelled = True
+        with self._response_lock:
+            response = self._response
+        if response is not None:
+            try:
+                response.close()
+            except OSError:
+                pass
 
     def run(self):
         url = self.download_url
@@ -319,6 +329,8 @@ class UpdateDownloaderThread(QThread):
                 },
             )
             with urllib.request.urlopen(req, timeout=30, context=create_ssl_context()) as response:
+                with self._response_lock:
+                    self._response = response
                 total_size = int(response.headers.get("Content-Length", 0))
                 downloaded = 0
                 digest = hashlib.sha256()
@@ -375,9 +387,32 @@ class UpdateDownloaderThread(QThread):
                     os.remove(target_path)
             except OSError:
                 pass
-            self.download_error.emit(f"Yuklab olishda xatolik: {str(exc)}")
+            if not self._is_cancelled:
+                self.download_error.emit(f"Yuklab olishda xatolik: {str(exc)}")
+        finally:
+            with self._response_lock:
+                self._response = None
 
 
+def validate_update_package(file_path: str, platform_name: str | None = None) -> None:
+    """Reject an HTML error page or truncated file before closing the app."""
+    platform_name = platform_name or get_client_platform()
+    size = os.path.getsize(file_path)
+    if size < 1024:
+        raise ValueError("Yangilanish fayli to'liq yuklanmagan.")
+    with open(file_path, "rb") as handle:
+        header = handle.read(8)
+        trailer = b""
+        if size >= 512:
+            handle.seek(-512, os.SEEK_END)
+            trailer = handle.read(512)
+    valid = {
+        "windows": header.startswith(b"MZ") or header.startswith(b"\xd0\xcf\x11\xe0"),
+        "linux": header.startswith(b"\x7fELF") or header.startswith(b"!<arch>\n"),
+        "macos": header.startswith(b"xar!") or b"koly" in trailer,
+    }.get(platform_name, False)
+    if not valid:
+        raise ValueError("Yuklangan fayl haqiqiy o'rnatish paketi emas.")
 def apply_and_restart(file_path: str):
     """Execute installer or update package and close current app."""
     platform_name = get_client_platform()
@@ -392,6 +427,7 @@ def apply_and_restart(file_path: str):
     }
     if not lower_path.endswith(allowed_extensions.get(platform_name, ())):
         raise ValueError("Yangilanish fayli ushbu platforma uchun mos emas.")
+    validate_update_package(file_path, platform_name)
 
     if platform_name == "windows":
         # Launch installer in separate process
@@ -400,21 +436,25 @@ def apply_and_restart(file_path: str):
             if hasattr(os, "startfile"):
                 os.startfile(file_path)
             else:
-                subprocess.Popen([file_path])
+                subprocess.Popen([file_path], start_new_session=True)
         except OSError:
-            subprocess.Popen([file_path])
+            subprocess.Popen([file_path], start_new_session=True)
     elif platform_name == "linux":
         try:
             os.chmod(file_path, 0o755)
-            subprocess.Popen([file_path])
-        except Exception as exc:
-            subprocess.Popen(["xdg-open", file_path])
+            subprocess.Popen([file_path], start_new_session=True)
+        except OSError:
+            subprocess.Popen(["xdg-open", file_path], start_new_session=True)
     elif platform_name == "macos":
-        subprocess.Popen(["open", file_path])
+        subprocess.Popen(["open", file_path], start_new_session=True)
 
     # Exit application cleanly
     from PyQt6.QtWidgets import QApplication
     app = QApplication.instance()
     if app:
-        app.quit()
-    sys.exit(0)
+        # Returning from the Qt slot before quitting avoids an uncaught
+        # SystemExit crossing the PyQt signal boundary (a native crash on some
+        # packaged macOS/Windows builds).
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(0, app.quit)
+    return True

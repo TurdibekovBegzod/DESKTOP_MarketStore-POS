@@ -205,6 +205,9 @@ class PushRequest(BaseModel):
     # When set, the server refuses the push with 409 if another device has
     # written since the caller last synced. Omit it to force the write through.
     expected_generation: int | None = Field(default=None, ge=0)
+    # A server-side purge always wins over an old desktop snapshot. Clients
+    # must acknowledge the newest purge before they can write anything back.
+    applied_purge_generation: int | None = Field(default=None, ge=0)
 
 
 class PushResponse(BaseModel):
@@ -217,6 +220,8 @@ class PullResponse(BaseModel):
     records: list[RecordOut]
     server_time: datetime
     generation: int = 0
+    purge_generation: int = 0
+    purge_requested_at: datetime | None = None
     has_more: bool = False
     next_offset: int | None = None
 
@@ -228,6 +233,8 @@ class ResetResponse(BaseModel):
 
 class SyncStateOut(BaseModel):
     generation: int
+    purge_generation: int = 0
+    purge_requested_at: datetime | None = None
     last_change_at: datetime | None = None
     last_device_key: str | None = None
     last_tables: list[str] = Field(default_factory=list)
@@ -246,3 +253,53 @@ class SummaryResponse(BaseModel):
     user_id: int
     user_uid: str
     tables: list[SummaryItem]
+
+
+class SuperadminLoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=120)
+    password: str = Field(min_length=1, max_length=256)
+
+
+class SuperadminTokenOut(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in_seconds: int
+
+
+class SuperadminConfirmRequest(BaseModel):
+    confirm_email: str = Field(min_length=5, max_length=255)
+
+
+class SuperadminStatusRequest(SuperadminConfirmRequest):
+    is_active: bool
+
+
+class SuperadminAccountOut(BaseModel):
+    user_uid: str
+    email: str
+    display_name: str | None = None
+    role: str
+    is_active: bool
+    is_verified: bool
+    created_at: datetime
+    updated_at: datetime
+    records_count: int = 0
+    deleted_records_count: int = 0
+    devices_count: int = 0
+    sync_batches_count: int = 0
+    last_activity_at: datetime | None = None
+
+
+class SuperadminOverviewOut(BaseModel):
+    accounts: list[SuperadminAccountOut]
+    total_accounts: int
+    active_accounts: int
+    total_records: int
+    total_devices: int
+
+
+class SuperadminActionOut(BaseModel):
+    message: str
+    removed_records: int = 0
+    removed_devices: int = 0
+    removed_batches: int = 0

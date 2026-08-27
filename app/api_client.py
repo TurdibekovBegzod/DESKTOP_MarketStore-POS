@@ -46,6 +46,14 @@ class SyncConflictError(ApiClientError):
         self.expected_generation = expected_generation
 
 
+class RemotePurgeRequiredError(ApiClientError):
+    """The server erased this account after the desktop's last sync."""
+
+    def __init__(self, message, purge_generation=None):
+        super().__init__(message)
+        self.purge_generation = purge_generation
+
+
 def _format_api_detail(detail):
     if isinstance(detail, list) and detail:
         messages = []
@@ -126,6 +134,11 @@ def _single_request_json(path, payload=None, token=None, timeout=10, method=None
                 "Serverdagi ma'lumot boshqa qurilmada o'zgargan.",
                 server_generation=detail.get("server_generation"),
                 expected_generation=detail.get("expected_generation"),
+            ) from exc
+        if exc.code == 409 and isinstance(detail, dict) and detail.get("code") == "remote_purge_required":
+            raise RemotePurgeRequiredError(
+                "Account ma'lumotlari web boshqaruv panelidan o'chirilgan.",
+                purge_generation=detail.get("purge_generation"),
             ) from exc
         detail_text = _format_api_detail(detail)
         if exc.code == 409:
@@ -266,7 +279,15 @@ def get_current_user(token):
     return _request_json("/auth/me", token=token, timeout=AUTH_TIMEOUT, retries=AUTH_RETRIES)
 
 
-def push_sync_records(token, records, device_key=None, note=None, timeout=30, expected_generation=None):
+def push_sync_records(
+    token,
+    records,
+    device_key=None,
+    note=None,
+    timeout=30,
+    expected_generation=None,
+    applied_purge_generation=None,
+):
     payload = {
         "device": {"device_key": device_key or "desktop", "name": "MarketStore POS Desktop"},
         "records": records,
@@ -274,6 +295,8 @@ def push_sync_records(token, records, device_key=None, note=None, timeout=30, ex
     }
     if expected_generation is not None:
         payload["expected_generation"] = int(expected_generation)
+    if applied_purge_generation is not None:
+        payload["applied_purge_generation"] = int(applied_purge_generation)
     return _request_json("/sync/push", payload, token=token, timeout=timeout)
 
 
@@ -282,14 +305,19 @@ def get_sync_state(token, timeout=15):
     return _request_json("/sync/state", token=token, timeout=timeout)
 
 
-def reset_sync_records(token, device_key=None, timeout=60):
+def reset_sync_records(token, device_key=None, timeout=60, applied_purge_generation=None):
     """Wipe every server-side record for the account (full re-upload path)."""
     return _request_json(
         "/sync/reset",
         payload={},
         token=token,
         timeout=timeout,
-        headers={"X-Device-Key": device_key},
+        headers={
+            "X-Device-Key": device_key,
+            "X-Purge-Generation": (
+                str(applied_purge_generation) if applied_purge_generation is not None else None
+            ),
+        },
     )
 
 
@@ -350,6 +378,8 @@ def pull_sync_records(token, since=None, table_name=None, include_deleted=True, 
     records = []
     server_time = None
     generation = 0
+    purge_generation = 0
+    purge_requested_at = None
     while True:
         query = {
             "include_deleted": "true" if include_deleted else "false",
@@ -364,8 +394,16 @@ def pull_sync_records(token, since=None, table_name=None, include_deleted=True, 
         records.extend(result.get("records", []))
         server_time = result.get("server_time") or server_time
         generation = result.get("generation") or generation
+        purge_generation = result.get("purge_generation") or purge_generation
+        purge_requested_at = result.get("purge_requested_at") or purge_requested_at
         if not result.get("has_more"):
-            return {"records": records, "server_time": server_time, "generation": generation}
+            return {
+                "records": records,
+                "server_time": server_time,
+                "generation": generation,
+                "purge_generation": purge_generation,
+                "purge_requested_at": purge_requested_at,
+            }
         next_offset = result.get("next_offset")
         if next_offset is None or int(next_offset) <= offset:
             raise ApiClientError("Server sync sahifasini davom ettirib bo'lmadi.")

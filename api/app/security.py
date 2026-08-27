@@ -57,3 +57,28 @@ def decode_access_token(token: str) -> str | None:
         return None
     subject = payload.get("sub")
     return str(subject) if subject else None
+
+
+def create_superadmin_token(username: str) -> str:
+    settings = get_settings()
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(minutes=max(1, settings.superadmin_token_expire_minutes))
+    payload = {
+        "sub": username,
+        "scope": "superadmin",
+        "iat": now,
+        "exp": expires_at,
+    }
+    return jwt.encode(payload, settings.secret_key, algorithm=ALGORITHM)
+
+
+def decode_superadmin_token(token: str) -> str | None:
+    settings = get_settings()
+    try:
+        payload = jwt.decode(token, settings.secret_key, algorithms=[ALGORITHM])
+    except JWTError:
+        return None
+    subject = str(payload.get("sub") or "")
+    if payload.get("scope") != "superadmin" or subject != settings.superadmin_username:
+        return None
+    return subject

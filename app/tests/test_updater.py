@@ -1,5 +1,7 @@
 import unittest
 import ssl
+import tempfile
+from unittest.mock import patch
 from PyQt6.QtWidgets import QApplication
 
 import sys
@@ -19,6 +21,8 @@ from updater import (
     match_asset_for_platform,
     normalize_api_root,
     parse_version_tuple,
+    apply_and_restart,
+    validate_update_package,
 )
 from ui.updater_dialog import UpdaterDialog
 
@@ -70,6 +74,32 @@ class TestUpdaterModule(unittest.TestCase):
         checksum = "a" * 64
         self.assertEqual(_asset_sha256({"digest": f"sha256:{checksum}"}), checksum)
         self.assertEqual(_asset_sha256({"digest": "md5:bad"}), "")
+
+    def test_apply_update_returns_through_qt_slot_instead_of_raising_system_exit(self):
+        handle, path = tempfile.mkstemp(suffix=".exe")
+        os.close(handle)
+        try:
+            with open(path, "wb") as package:
+                package.write(b"MZ" + b"\0" * 2048)
+            with patch("updater.get_client_platform", return_value="windows"), \
+                 patch.object(os, "startfile", create=True) as startfile, \
+                 patch("PyQt6.QtCore.QTimer.singleShot") as single_shot:
+                self.assertTrue(apply_and_restart(path))
+            startfile.assert_called_once_with(path)
+            single_shot.assert_called_once()
+        finally:
+            os.remove(path)
+
+    def test_invalid_download_is_rejected_before_installer_launch(self):
+        handle, path = tempfile.mkstemp(suffix=".exe")
+        os.close(handle)
+        try:
+            with open(path, "wb") as package:
+                package.write(b"<html>gateway error</html>" * 100)
+            with self.assertRaises(ValueError):
+                validate_update_package(path, "windows")
+        finally:
+            os.remove(path)
 
     def test_updater_dialog_ui(self):
         test_update_data = {

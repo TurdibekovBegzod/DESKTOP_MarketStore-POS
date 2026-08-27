@@ -275,6 +275,8 @@ TEXTS = {
         "sync_remote": "Serverda yangi o'zgarish bor",
         "sync_remote_toast": "Boshqa qurilmada o'zgarish qilindi. Yuklab oling.",
         "sync_remote_title": "Yangi o'zgarish",
+        "sync_purge_toast": "Web boshqaruv panelidan o'chirilgan account ma'lumotlari bu qurilmadan ham tozalandi.",
+        "sync_purge_title": "Ma'lumotlar tozalandi",
         "sync_checking": "Tekshirilmoqda...",
         "sync_offline_stream": "Realtime aloqa uzildi",
         "sync_online_stream": "Realtime aloqa tiklandi",
@@ -332,6 +334,8 @@ TEXTS = {
         "sync_remote": "New changes on the server",
         "sync_remote_toast": "Another device made changes. Download them.",
         "sync_remote_title": "New changes",
+        "sync_purge_toast": "Account data erased from the web control panel was also removed from this device.",
+        "sync_purge_title": "Data cleared",
         "sync_checking": "Checking...",
         "sync_offline_stream": "Realtime link lost",
         "sync_online_stream": "Realtime link restored",
@@ -416,6 +420,8 @@ TEXTS["ru"].update({
     "sync_remote": "На сервере есть новые изменения",
     "sync_remote_toast": "Другое устройство внесло изменения. Загрузите их.",
     "sync_remote_title": "Новые изменения",
+    "sync_purge_toast": "Данные аккаунта, удалённые через веб-панель, также удалены с этого устройства.",
+    "sync_purge_title": "Данные очищены",
     "sync_checking": "Проверка...",
     "sync_offline_stream": "Связь в реальном времени потеряна",
     "sync_online_stream": "Связь в реальном времени восстановлена",
@@ -2003,6 +2009,14 @@ class MainWindow(QMainWindow):
         self._set_logo_icon()
         self._reload_current_page()
         self._refresh_sync_status()
+        if result.get("purged"):
+            self.show_toast(
+                self.labels.get("sync_purge_toast", "Webda o'chirilgan ma'lumotlar bu qurilmadan ham tozalandi."),
+                title=self.labels.get("sync_purge_title", "Ma'lumotlar tozalandi"),
+                level="warning",
+                duration_ms=9000,
+            )
+            return
         if show_message:
             imported = result.get("imported", 0)
             self.show_toast(f"Ma'lumotlar serverdan muvaffaqiyatli qabul qilindi ({imported} ta yangilandi)", title="Sync tugadi", level="success")
@@ -2019,6 +2033,16 @@ class MainWindow(QMainWindow):
     def _on_push_success(self, result, show_message):
         self._cleanup_sync_thread()
         self._refresh_sync_status()
+        if result.get("purged"):
+            self._set_logo_icon()
+            self._reload_current_page()
+            self.show_toast(
+                self.labels.get("sync_purge_toast", "Webda o'chirilgan ma'lumotlar bu qurilmadan ham tozalandi."),
+                title=self.labels.get("sync_purge_title", "Ma'lumotlar tozalandi"),
+                level="warning",
+                duration_ms=9000,
+            )
+            return
         if show_message:
             saved = result.get("saved", 0)
             self.show_toast(f"Ma'lumotlar serverga muvaffaqiyatli yuborildi ({saved} ta saqlandi)", title="Sync tugadi", level="success")
@@ -2063,6 +2087,14 @@ class MainWindow(QMainWindow):
         self._set_logo_icon()
         self._reload_current_page()
         self._refresh_sync_status()
+        if result.get("direction") == "purge":
+            self.show_toast(
+                self.labels.get("sync_purge_toast", "Webda o'chirilgan ma'lumotlar bu qurilmadan ham tozalandi."),
+                title=self.labels.get("sync_purge_title", "Ma'lumotlar tozalandi"),
+                level="warning",
+                duration_ms=9000,
+            )
+            return
         if result.get("direction") == "download":
             message = f"Serverdagi nusxa qabul qilindi ({result.get('imported', 0)} ta yozuv)."
         else:
@@ -2139,6 +2171,21 @@ class MainWindow(QMainWindow):
         try:
             generation = int(generation)
         except (TypeError, ValueError):
+            return
+        purge = sync_service.apply_server_control(payload)
+        if purge.get("purged"):
+            self._set_logo_icon()
+            self._reload_current_page()
+            self._refresh_sync_status()
+            self.show_toast(
+                self.labels.get(
+                    "sync_purge_toast",
+                    "Web boshqaruv panelidan o'chirilgan ma'lumotlar bu qurilmadan ham tozalandi.",
+                ),
+                title=self.labels.get("sync_purge_title", "Ma'lumotlar tozalandi"),
+                level="warning",
+                duration_ms=9000,
+            )
             return
         tables = [str(name) for name in (payload.get("tables") or [])]
         device_key = str(payload.get("device_key") or "")
