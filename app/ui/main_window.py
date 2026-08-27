@@ -934,6 +934,13 @@ class SyncDialog(QDialog):
         # with nothing to send it does nothing at all, and the next "Olish"
         # brings everything back. Replacing the server copy wholesale needs its
         # own action, which is why this is a separate, confirmed button.
+        #
+        # Admin only. The sync button sits in the top bar for every role, and
+        # this action wipes the account on every device - not something a
+        # cashier should be one misclick away from.
+        self.replace_btn = None
+        if (getattr(self.parent_window, "user", {}) or {}).get("role") != "admin":
+            return
         self.replace_btn = QPushButton(
             self.labels.get("sync_replace_server", "Serverni shu qurilmadagiga almashtirish")
         )
@@ -992,6 +999,8 @@ class SyncDialog(QDialog):
 
     def _replace_server(self):
         if not self.parent_window:
+            return
+        if (self.parent_window.user or {}).get("role") != "admin":
             return
         local_records = db.get_sync_status().get("record_count", 0)
         question = self.labels.get(
