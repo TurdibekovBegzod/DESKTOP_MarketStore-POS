@@ -40,9 +40,23 @@ jobs:
           pip install -r api/requirements.txt
           pip install pytest
 
+      # The failing lines go into the job summary as well as the log. Reading a
+      # workflow log needs admin rights on this repository, so a red build used
+      # to be a wall: everyone could see that it failed and nobody could see
+      # why. The summary is part of the public run page.
       - name: Run API tests
         working-directory: api
-        run: python -m pytest tests -q
+        run: |
+          set -o pipefail
+          status=0
+          python -m pytest tests -q 2>&1 | tee /tmp/api-tests.log || status=$?
+          {
+            echo "### API testlar"
+            echo '```'
+            tail -n 80 /tmp/api-tests.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $status
 
       - name: Install desktop dependencies
         run: |
@@ -56,7 +70,17 @@ jobs:
         working-directory: app
         env:
           QT_QPA_PLATFORM: offscreen
-        run: python -m pytest tests -q
+        run: |
+          set -o pipefail
+          status=0
+          python -m pytest tests -q 2>&1 | tee /tmp/desktop-tests.log || status=$?
+          {
+            echo "### Desktop testlar"
+            echo '```'
+            tail -n 80 /tmp/desktop-tests.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $status
 
   deploy:
     name: Deploy to server
