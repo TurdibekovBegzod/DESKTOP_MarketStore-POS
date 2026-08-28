@@ -41,6 +41,8 @@ function setView(authenticated) {
 function logout(message = "") {
   state.token = "";
   state.accounts = [];
+  // The log stream carries the token in its URL, so it must not outlive it.
+  if (typeof stopLogStream === "function") stopLogStream();
   sessionStorage.removeItem("marketstore_superadmin_token");
   sessionStorage.removeItem("marketstore_superadmin_expires");
   setView(false);
@@ -321,3 +323,231 @@ if (state.token && expiresAt > Date.now()) {
 } else {
   logout();
 }
+
+/* --- Server loglari -------------------------------------------------------
+ * Docker faqat oxirgi bir necha megabaytni saqlaydi. Yig'uvchi xizmat har bir
+ * qatorni oylik arxivga yozadi: pastda jonli oqim, yuqoriga aylantirilsa esa
+ * o'sha oyning boshigacha, undan keyin arxivlangan oylar.
+ */
+
+const logs = {
+  month: "",
+  current: "",
+  container: "",
+  query: "",
+  before: null,
+  offset: 0,
+  live: true,
+  source: null,
+  loading: false,
+  searchTimer: null,
+};
+
+function logStatus(text) {
+  byId("logsStatus").textContent = text;
+}
+
+function atBottom(view) {
+  return view.scrollHeight - view.scrollTop - view.clientHeight < 40;
+}
+
+function logRow(entry) {
+  const row = document.createElement("div");
+  row.className = entry.s === "stderr" ? "log-row is-stderr" : "log-row";
+
+  const time = document.createElement("span");
+  time.className = "log-time";
+  const moment = new Date(entry.t);
+  time.textContent = Number.isNaN(moment.getTime())
+    ? "--:--:--"
+    : moment.toLocaleTimeString("uz-UZ", { hour12: false });
+  time.title = entry.t || "";
+
+  const name = document.createElement("span");
+  name.className = "log-container";
+  name.textContent = (entry.c || "").replace(/^marketstore-/, "");
+  name.title = entry.c || "";
+
+  const message = document.createElement("span");
+  message.className = "log-message";
+  message.textContent = entry.m || "";
+
+  row.append(time, name, message);
+  return row;
+}
+
+function appendLines(entries, { prepend = false } = {}) {
+  if (!entries.length) return;
+  const view = byId("logView");
+  const stick = !prepend && atBottom(view);
+  const fragment = document.createDocumentFragment();
+  entries.forEach((entry) => fragment.append(logRow(entry)));
+  if (prepend) {
+    // Keep the reader where they were: adding above must not move the text
+    // they are currently looking at.
+    const anchorHeight = view.scrollHeight;
+    view.prepend(fragment);
+    view.scrollTop += view.scrollHeight - anchorHeight;
+  } else {
+    view.append(fragment);
+    if (stick) view.scrollTop = view.scrollHeight;
+  }
+}
+
+async function loadLogMonths() {
+  const result = await apiRequest("/logs/months");
+  logs.current = result.current;
+  if (!logs.month) logs.month = result.current;
+  const select = byId("logMonth");
+  select.textContent = "";
+  const months = result.months.length ? result.months : [{ month: result.current, bytes: 0, archived: false }];
+  months.forEach((item) => {
+    const option = document.createElement("option");
+    const size = item.bytes > 1024 * 1024
+      ? `${(item.bytes / (1024 * 1024)).toFixed(1)} MB`
+      : `${Math.round(item.bytes / 1024)} KB`;
+    option.value = item.month;
+    option.textContent = `${item.month} - ${size}${item.archived ? " (arxiv)" : ""}`;
+    select.append(option);
+  });
+  select.value = logs.month;
+
+  const containers = byId("logContainer");
+  const chosen = logs.container;
+  containers.textContent = "";
+  const all = document.createElement("option");
+  all.value = "";
+  all.textContent = "Barcha konteynerlar";
+  containers.append(all);
+  result.containers.forEach((name) => {
+    const option = document.createElement("option");
+    option.value = name;
+    option.textContent = name.replace(/^marketstore-/, "");
+    containers.append(option);
+  });
+  containers.value = chosen;
+}
+
+async function loadLogPage({ reset = false } = {}) {
+  if (logs.loading) return;
+  logs.loading = true;
+  const view = byId("logView");
+  try {
+    const params = new URLSearchParams({ month: logs.month, limit: "300" });
+    if (!reset && logs.before !== null) params.set("before", String(logs.before));
+    if (logs.container) params.set("container", logs.container);
+    if (logs.query) params.set("q", logs.query);
+    const page = await apiRequest(`/logs?${params.toString()}`);
+    if (reset) view.textContent = "";
+    appendLines(page.lines, { prepend: !reset });
+    logs.before = page.next_before;
+    if (reset) {
+      logs.offset = page.offset || 0;
+      view.scrollTop = view.scrollHeight;
+      if (!page.lines.length) {
+        logStatus("Bu oy uchun yozuv yo'q. Yig'uvchi xizmat ishga tushganini tekshiring.");
+      }
+    }
+    byId("logOlder").disabled = !page.has_more;
+    if (page.lines.length || !reset) {
+      logStatus(page.has_more
+        ? `${logs.month} - yuqoriga aylantirib eskisini ko'ring`
+        : `${logs.month} - oy boshidan beri hammasi ko'rsatildi`);
+    }
+  } catch (error) {
+    logStatus(error.message);
+  } finally {
+    logs.loading = false;
+  }
+}
+
+function stopLogStream() {
+  if (logs.source) {
+    logs.source.close();
+    logs.source = null;
+  }
+}
+
+function startLogStream() {
+  stopLogStream();
+  if (!logs.live || logs.month !== logs.current || !state.token) return;
+  const params = new URLSearchParams({ token: state.token, offset: String(logs.offset) });
+  if (logs.container) params.set("container", logs.container);
+  const source = new EventSource(`${API_ROOT}/logs/stream?${params.toString()}`);
+  logs.source = source;
+  source.addEventListener("hello", (event) => {
+    const payload = JSON.parse(event.data || "{}");
+    logs.offset = payload.offset || logs.offset;
+    logStatus(`${logs.month} - jonli`);
+  });
+  source.addEventListener("lines", (event) => {
+    const payload = JSON.parse(event.data || "{}");
+    logs.offset = payload.offset || logs.offset;
+    const entries = (payload.lines || []).filter(
+      (entry) => !logs.query || (entry.m || "").toLowerCase().includes(logs.query.toLowerCase())
+    );
+    appendLines(entries);
+  });
+  source.onerror = () => {
+    // EventSource reconnects on its own; say so rather than looking frozen.
+    logStatus(`${logs.month} - aloqa uzildi, qayta ulanmoqda...`);
+  };
+}
+
+async function openLogs() {
+  try {
+    await loadLogMonths();
+    await loadLogPage({ reset: true });
+    startLogStream();
+  } catch (error) {
+    logStatus(error.message);
+  }
+}
+
+function switchView(view) {
+  const showLogs = view === "logs";
+  byId("accountsView").classList.toggle("hidden", showLogs);
+  byId("logsView").classList.toggle("hidden", !showLogs);
+  byId("tabAccounts").classList.toggle("is-active", !showLogs);
+  byId("tabLogs").classList.toggle("is-active", showLogs);
+  if (showLogs) openLogs();
+  else stopLogStream();
+}
+
+byId("tabAccounts").addEventListener("click", () => switchView("accounts"));
+byId("tabLogs").addEventListener("click", () => switchView("logs"));
+byId("logMonth").addEventListener("change", (event) => {
+  logs.month = event.target.value;
+  logs.before = null;
+  stopLogStream();
+  loadLogPage({ reset: true }).then(startLogStream);
+});
+byId("logContainer").addEventListener("change", (event) => {
+  logs.container = event.target.value;
+  logs.before = null;
+  stopLogStream();
+  loadLogPage({ reset: true }).then(startLogStream);
+});
+byId("logSearch").addEventListener("input", (event) => {
+  logs.query = event.target.value.trim();
+  clearTimeout(logs.searchTimer);
+  logs.searchTimer = setTimeout(() => {
+    logs.before = null;
+    loadLogPage({ reset: true });
+  }, 300);
+});
+byId("logOlder").addEventListener("click", () => loadLogPage());
+byId("logLive").addEventListener("click", () => {
+  logs.live = !logs.live;
+  const button = byId("logLive");
+  button.textContent = logs.live ? "Jonli: yoniq" : "Jonli: o'chiq";
+  button.setAttribute("aria-pressed", String(logs.live));
+  button.classList.toggle("is-live", logs.live);
+  if (logs.live) startLogStream();
+  else stopLogStream();
+});
+byId("logView").addEventListener("scroll", () => {
+  const view = byId("logView");
+  if (view.scrollTop <= 24 && logs.before !== null && !logs.loading) loadLogPage();
+});
+window.addEventListener("beforeunload", stopLogStream);

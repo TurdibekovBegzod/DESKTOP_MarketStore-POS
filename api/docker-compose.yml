@@ -74,11 +74,17 @@ services:
       SUPERADMIN_USERNAME: ${SUPERADMIN_USERNAME:-superadmin}
       SUPERADMIN_PASSWORD: ${SUPERADMIN_PASSWORD:-}
       SUPERADMIN_TOKEN_EXPIRE_MINUTES: ${SUPERADMIN_TOKEN_EXPIRE_MINUTES:-15}
+      LOG_ARCHIVE_DIR: /var/log/marketstore
+      LOG_POLL_SECONDS: ${LOG_POLL_SECONDS:-2}
+      LOG_RETENTION_MONTHS: ${LOG_RETENTION_MONTHS:-0}
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+    volumes:
+      # The archive is written by the logs service; the panel only reads it.
+      - logs_data:/var/log/marketstore:ro
     healthcheck:
       test: ["CMD-SHELL", "python -c \"from urllib.request import Request, urlopen; urlopen(Request('http://127.0.0.1:8000/health', headers={'Host': 'api'}), timeout=3).read()\""]
       interval: 15s
@@ -110,6 +116,31 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+
+  logs:
+    # Copies every container's output into a monthly archive, so the control
+    # panel can show more than the few megabytes Docker keeps per container.
+    build: .
+    container_name: marketstore-logs
+    restart: unless-stopped
+    logging: *default-logging
+    command: ["python", "-m", "app.log_collector"]
+    environment:
+      LOG_ARCHIVE_DIR: /var/log/marketstore
+      DOCKER_SOCKET_PATH: /var/run/docker.sock
+      LOG_POLL_SECONDS: ${LOG_POLL_SECONDS:-2}
+      LOG_INITIAL_LINES: ${LOG_INITIAL_LINES:-200}
+      LOG_RETENTION_MONTHS: ${LOG_RETENTION_MONTHS:-0}
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY must be set in api/.env}
+    volumes:
+      - logs_data:/var/log/marketstore
+      # Read-only view of the docker socket: the container list and their logs.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      api:
+        condition: service_started
 
   ngrok:
     image: docker.io/ngrok/ngrok:latest
@@ -186,3 +217,4 @@ volumes:
   postgres_data:
   redis_data:
   alloy_data:
+  logs_data:

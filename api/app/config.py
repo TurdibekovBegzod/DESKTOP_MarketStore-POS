@@ -45,6 +45,17 @@ class Settings(BaseSettings):
     superadmin_username: str = "superadmin"
     superadmin_password: str | None = None
     superadmin_token_expire_minutes: int = 15
+    # Container output is copied out of Docker into one file per month, so the
+    # panel can show more than the few megabytes Docker itself keeps.
+    log_archive_dir: str = "/var/log/marketstore"
+    docker_socket_path: str = "/var/run/docker.sock"
+    log_poll_seconds: int = 2
+    # How much of a container's past to take the first time it is seen, so the
+    # panel is not empty right after a deploy.
+    log_initial_lines: int = 200
+    # How many monthly files to keep. 0 keeps every month: an archive that
+    # deletes history on its own is worse than one that needs a bigger disk.
+    log_retention_months: int = 0
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

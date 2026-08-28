@@ -3,22 +3,30 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
+import asyncio
+import json
 import secrets
 import threading
 import time
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
+from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
+from app import log_archive
 from app.config import get_settings
 from app.database import get_db
 from app.events import broker
 from app.models import Device, GoogleOAuthSession, SyncBatch, SyncMeta, User, UserRecord
 from app.schemas import (
     ALLOWED_SYNC_TABLES,
+    LogLineOut,
+    LogMonthOut,
+    LogMonthsOut,
+    LogPageOut,
     SuperadminAccountOut,
     SuperadminAvailabilityOut,
     SuperadminActionOut,
@@ -327,4 +335,117 @@ def delete_account(
         removed_records=removed_records,
         removed_devices=removed_devices,
         removed_batches=removed_batches,
+    )
+
+
+# --- container logs -------------------------------------------------------
+# Docker keeps only the last few megabytes per container, and reading even that
+# means an SSH session. The collector copies every line into a monthly archive;
+# these endpoints are how the panel shows it - live at the bottom, and
+# scrollable all the way back through the months before it.
+
+
+def _stream_superadmin(token: str | None, authorization: str | None) -> str:
+    """EventSource cannot send an Authorization header, so accept a query token.
+
+    The same shape the device event stream uses. The token is short-lived and
+    the panel already holds it, so this is no easier to reach than any other
+    superadmin call.
+    """
+    settings = get_settings()
+    if not settings.superadmin_password:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=_DISABLED_MESSAGE)
+    bearer_token = token
+    if not bearer_token and authorization and authorization.lower().startswith("bearer "):
+        bearer_token = authorization.split(" ", 1)[1].strip()
+    username = decode_superadmin_token(bearer_token) if bearer_token else None
+    if not username:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Avval tizimga kiring.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return username
+
+
+@router.get("/logs/months", response_model=LogMonthsOut)
+def log_months(_superadmin: str = Depends(get_superadmin)) -> LogMonthsOut:
+    """Which months are on disk, and which containers were seen recently."""
+    return LogMonthsOut(
+        months=[LogMonthOut(**item) for item in log_archive.list_months()],
+        current=log_archive.month_key(),
+        containers=log_archive.known_containers(),
+    )
+
+
+@router.get("/logs", response_model=LogPageOut)
+def log_page(
+    month: str | None = Query(default=None),
+    before: int | None = Query(default=None, ge=0),
+    limit: int = Query(default=300, ge=1, le=2000),
+    container: str | None = Query(default=None, max_length=120),
+    q: str | None = Query(default=None, max_length=200),
+    _superadmin: str = Depends(get_superadmin),
+) -> LogPageOut:
+    """One screenful of a month, oldest first; ``before`` walks further back."""
+    key = month or log_archive.month_key()
+    if not log_archive.is_month_key(key):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Oy formati: YYYY-MM",
+        )
+    page = log_archive.read_page(key, limit=limit, before=before, container=container, query=q)
+    return LogPageOut(
+        month=key,
+        lines=[LogLineOut(**line) for line in page["lines"]],
+        next_before=page.get("next_before"),
+        has_more=bool(page.get("has_more")),
+        offset=int(page.get("size") or 0),
+    )
+
+
+@router.get("/logs/stream", include_in_schema=False)
+async def log_stream(
+    request: Request,
+    token: str | None = Query(default=None),
+    authorization: str | None = Header(default=None),
+    offset: int | None = Query(default=None, ge=0),
+    container: str | None = Query(default=None, max_length=120),
+):
+    """Live tail of the current month, as Server-Sent Events."""
+    _stream_superadmin(token, authorization)
+    settings = get_settings()
+    start = log_archive.current_size() if offset is None else int(offset)
+    interval = max(1, int(settings.log_poll_seconds))
+
+    async def stream():
+        position = start
+        quiet_seconds = 0
+        yield "event: hello\ndata: " + json.dumps({"offset": position}) + "\n\n"
+        while True:
+            if await request.is_disconnected():
+                break
+            entries, position = await run_in_threadpool(log_archive.read_since, position)
+            if container:
+                entries = [item for item in entries if item.get("c") == container]
+            if entries:
+                payload = json.dumps({"offset": position, "lines": entries}, ensure_ascii=False)
+                yield "event: lines\ndata: " + payload + "\n\n"
+                quiet_seconds = 0
+            else:
+                quiet_seconds += interval
+                if quiet_seconds >= 20:
+                    # nginx and ngrok both drop a stream that goes quiet.
+                    yield ": ping\n\n"
+                    quiet_seconds = 0
+            await asyncio.sleep(interval)
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
     )

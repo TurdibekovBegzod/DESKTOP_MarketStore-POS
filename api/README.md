@@ -116,6 +116,33 @@ foydalanuvchi `Yuborish` yoki `Olish` tugmasini bosishi shart emas.
 Nginx orqali ishlatilganda `/api/v1/sync/events` uchun `proxy_buffering off` kerak -
 u `nginx/default.conf` da sozlangan.
 
+## Server loglari (superadmin panelida)
+
+Docker har bir konteyner uchun faqat oxirgi bir necha megabaytni saqlaydi va
+uni ko'rish uchun serverga SSH bilan kirish kerak edi. Endi `logs` xizmati
+(`python -m app.log_collector`) docker socketi orqali barcha konteynerlarning
+chiqishini o'qib, oylik arxivga yozadi:
+
+```
+/var/log/marketstore/2026-08.log      # joriy oy - jonli oqim shu fayldan
+/var/log/marketstore/2026-07.log.gz   # tugagan oylar avtomat siqiladi
+```
+
+Har oy yangi fayl boshlanadi - "oyiga bir marta tozalanadi" degani shu; eski
+oylar o'chirilmaydi. `LOG_RETENTION_MONTHS` 0 bo'lsa hammasi saqlanadi, musbat
+son berilsa eng eski oylar o'chiriladi.
+
+Endpointlar (hammasi superadmin tokeni bilan):
+
+| Endpoint | Vazifasi |
+| --- | --- |
+| `GET /api/v1/superadmin/logs/months` | Qaysi oylar bor, qaysi konteynerlar ko'rilgan |
+| `GET /api/v1/superadmin/logs?month=&before=&container=&q=` | Bir sahifa log; `before` bilan yuqoriga qarab yuriladi |
+| `GET /api/v1/superadmin/logs/stream?token=` | Jonli oqim (SSE) |
+
+Panelda "Loglar" bo'limi: pastda jonli oqim, yuqoriga aylantirilsa oldingi
+yozuvlar yuklanadi, konteyner va matn bo'yicha filtr bor.
+
 ## Conflict (Anki modeli)
 
 `POST /api/v1/sync/push` ixtiyoriy `expected_generation` maydonini qabul qiladi. Agar

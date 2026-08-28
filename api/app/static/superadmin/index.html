@@ -41,7 +41,12 @@
       </div>
     </header>
 
-    <main class="workspace">
+    <nav class="view-tabs" aria-label="Bo'limlar">
+      <button class="tab-button is-active" id="tabAccounts" type="button">Accountlar</button>
+      <button class="tab-button" id="tabLogs" type="button">Loglar</button>
+    </nav>
+
+    <main class="workspace" id="accountsView">
       <section class="stats-grid" aria-label="Tizim statistikasi">
         <div class="stat"><span>Jami account</span><strong id="totalAccounts">0</strong></div>
         <div class="stat"><span>Faol</span><strong id="activeAccounts">0</strong></div>
@@ -81,7 +86,33 @@
         </div>
       </section>
     </main>
+
+    <main class="workspace hidden" id="logsView">
+      <section class="logs-section" aria-labelledby="logsTitle">
+        <div class="section-toolbar">
+          <div>
+            <h1 id="logsTitle">Server loglari</h1>
+            <p id="logsStatus">Ulanmoqda...</p>
+          </div>
+          <div class="log-controls">
+            <label class="sr-only" for="logMonth">Oy</label>
+            <select id="logMonth"></select>
+            <label class="sr-only" for="logContainer">Konteyner</label>
+            <select id="logContainer"><option value="">Barcha konteynerlar</option></select>
+            <label class="search-field">
+              <span class="sr-only">Log ichidan qidirish</span>
+              <input id="logSearch" type="search" placeholder="Matn bo‘yicha qidirish" autocomplete="off">
+            </label>
+            <button class="secondary-button" id="logOlder" type="button">Eskisini yuklash</button>
+            <button class="secondary-button is-live" id="logLive" type="button" aria-pressed="true">Jonli: yoniq</button>
+          </div>
+        </div>
+        <div class="log-view" id="logView" tabindex="0" role="log" aria-live="polite"></div>
+        <p class="log-hint">Yuqoriga aylantirilsa oldingi yozuvlar yuklanadi. Har oy yangi fayl boshlanadi, eskilari arxivda saqlanadi.</p>
+      </section>
+    </main>
   </div>
+
 
   <div class="modal-backdrop hidden" id="confirmModal" role="presentation">
     <section class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">

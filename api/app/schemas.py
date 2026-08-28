@@ -335,3 +335,34 @@ class SuperadminActionOut(BaseModel):
     removed_records: int = 0
     removed_devices: int = 0
     removed_batches: int = 0
+
+
+class LogLineOut(BaseModel):
+    """One archived log line: when, from which container, and what it said."""
+
+    t: str = ""
+    c: str = ""
+    s: str = "stdout"
+    m: str = ""
+
+
+class LogMonthOut(BaseModel):
+    month: str
+    bytes: int = 0
+    archived: bool = False
+
+
+class LogMonthsOut(BaseModel):
+    months: list[LogMonthOut] = Field(default_factory=list)
+    current: str
+    containers: list[str] = Field(default_factory=list)
+
+
+class LogPageOut(BaseModel):
+    month: str
+    lines: list[LogLineOut] = Field(default_factory=list)
+    # Byte offset to ask for when scrolling further back; null at the top.
+    next_before: int | None = None
+    has_more: bool = False
+    # Where the live stream should start reading from.
+    offset: int = 0
