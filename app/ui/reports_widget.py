@@ -249,6 +249,7 @@ class ReportsWidget(QWidget):
         self.period_combo.addItem("Haftalik", "week")
         self.period_combo.addItem("Oylik", "month")
         self.period_combo.addItem("Yillik", "year")
+        self.period_combo.setCurrentIndex(self.period_combo.findData("month"))
         self.period_combo.setStyleSheet("border:1px solid #d1d5db;border-radius:6px;padding:6px 10px;background:white;")
         self.period_combo.currentIndexChanged.connect(self._period_changed)
 
@@ -679,7 +680,7 @@ class ReportsWidget(QWidget):
         if self._selected_section_id():
             for row in filled_rows:
                 row["expense"] = 0
-                row["net_profit"] = (row["profit"] or 0) - self._cashier_cost(row)
+                row["net_profit"] = row.get("profit", 0) or 0
             filled = filled_rows
         else:
             filled = self._with_entity_net_profit(filled_rows, start_date, end_date)
@@ -688,9 +689,11 @@ class ReportsWidget(QWidget):
         if hasattr(self, "summary_cards") and self.summary_cards:
             currency = self._selected_report_currency()
             gross_salary = sum(
-                row.get("cashier_reward", 0) or row.get("salary", 0) or 0 for row in filled
+                (row.get("cashier_reward", 0) or 0) for row in filled
             )
-            salary_deduction = sum(row.get("salary_deduction", 0) or 0 for row in filled)
+            salary_deduction = sum(
+                (row.get("salary_deduction", 0) or 0) for row in filled
+            )
             cashier_totals = {
                 "revenue": sum(row.get("revenue", 0) or 0 for row in filled),
                 "profit": sum(row.get("profit", 0) or 0 for row in filled),
@@ -700,7 +703,7 @@ class ReportsWidget(QWidget):
                 "salary": gross_salary - salary_deduction,
                 "salary_deduction": salary_deduction,
             }
-            cashier_totals["net_profit"] = cashier_totals["profit"] - gross_salary
+            cashier_totals["net_profit"] = cashier_totals["profit"]
 
             if "revenue" in self.summary_cards:
                 self.summary_cards["revenue"].setText(self._format_money(cashier_totals["revenue"], currency))
@@ -1101,7 +1104,7 @@ class ReportsWidget(QWidget):
         expenses = self._expense_totals_by_period(start_date, end_date)
         for row in rows:
             row["expense"] = expenses.get(row["label"], 0)
-            row["net_profit"] = (row["profit"] or 0) - row["expense"] - self._cashier_cost(row)
+            row["net_profit"] = (row["profit"] or 0) - (row["expense"] or 0)
         return rows
 
     def _with_net_profit_from_expenses(self, rows, expense_rows, currencies, section_id=None, start_date=None, end_date=None):
@@ -1126,7 +1129,7 @@ class ReportsWidget(QWidget):
             totals[label] = totals.get(label, 0) + (expense["amount"] or 0) * (rates.get(currency, 1) or 1) * ratio
         for row in rows:
             row["expense"] = totals.get(row["label"], 0)
-            row["net_profit"] = (row["profit"] or 0) - row["expense"] - self._cashier_cost(row)
+            row["net_profit"] = (row["profit"] or 0) - (row["expense"] or 0)
         return rows
 
     def _with_entity_net_profit(self, rows, start_date, end_date):
@@ -1135,11 +1138,11 @@ class ReportsWidget(QWidget):
             expenses = self._expense_totals_by_period(start_date, end_date, user_id=entity["id"], include_unassigned=True)
             for row in rows:
                 row["expense"] = expenses.get(row["label"], 0)
-                row["net_profit"] = (row["profit"] or 0) - row["expense"] - self._cashier_cost(row)
+                row["net_profit"] = (row["profit"] or 0) - (row["expense"] or 0)
             return rows
         for row in rows:
             row["expense"] = 0
-            row["net_profit"] = (row["profit"] or 0) - self._cashier_cost(row)
+            row["net_profit"] = row.get("profit", 0) or 0
         return rows
 
     @staticmethod
@@ -1549,15 +1552,15 @@ class SalesDetailsWidget(QWidget):
         layout.addLayout(summary)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(10)
+        self.table.setColumnCount(9)
         self.table.setHorizontalHeaderLabels([
-            "Sana", "Mahsulot", "Shtrix-kod", "Miqdor", "Qaytdi",
-            "Narx", "Jami", "Kassirga ajratildi", "To'lov", "Holati",
+            "Sana", "Mahsulot", "Shtrix-kod", "Miqdor",
+            "Narx", "Jami", "Kassirga ajratildi", "Kassir", "Holati",
         ])
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         for column, width in [
-            (0, 105), (2, 130), (3, 72), (4, 72), (5, 125),
-            (6, 135), (7, 150), (8, 105), (9, 82),
+            (0, 105), (2, 130), (3, 72), (4, 125),
+            (5, 135), (6, 150), (7, 150), (8, 82),
         ]:
             self.table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
             self.table.setColumnWidth(column, width)
@@ -1590,6 +1593,10 @@ class SalesDetailsWidget(QWidget):
         self.load_data()
 
     def load_data(self, *_args):
+        # Cashiers can arrive from another device while this page is already
+        # open. Refresh the list on every server-driven page reload while
+        # preserving the current selection.
+        self._load_cashiers()
         cashier_id = self.cashier_combo.currentData()
         start_date, end_date = self._date_range()
         section_id = self.section_combo.currentData()
@@ -1690,11 +1697,10 @@ class SalesDetailsWidget(QWidget):
         ]
         
         rows = self._group_sales_rows(raw_rows)
-        # Keep fully returned rows visible so the current red return state is not lost.
+        # Only show sold products and products pending confirmation (exclude returned products)
         rows = [
             r for r in rows
             if (r.get("net_quantity", 0) or 0) > 0
-            or (r.get("returned_quantity", 0) or 0) > 0
         ]
         # Cashier expenses sit in the same list as the sales, ordered by time.
         rows = sorted(
@@ -1720,9 +1726,7 @@ class SalesDetailsWidget(QWidget):
         # Deliberately not clamped: when the expenses exceed what the sales have
         # earned so far, the cashier owes the difference back and must see it.
         salary_uzs = gross_salary_uzs - deduction_uzs
-        # The shop still paid the full amount - part as an expense, part as the
-        # remaining salary - so the net profit uses the gross figure.
-        net_profit_uzs = max(0, profit_uzs - gross_salary_uzs)
+        net_profit_uzs = profit_uzs
 
         if hasattr(self, "summary_cards"):
             if "revenue" in self.summary_cards:
@@ -1758,7 +1762,6 @@ class SalesDetailsWidget(QWidget):
                 "",
                 "",
                 f"{total_quantity:g}",
-                f"{total_returns:g}",
                 "",
                 self._format_money(total_value),
                 self._format_money(net_cashier_reward)
@@ -1775,11 +1778,11 @@ class SalesDetailsWidget(QWidget):
                 font = item.font()
                 font.setBold(True)
                 item.setFont(font)
-                if column in (3, 4, 5, 6, 7):
+                if column in (3, 4, 5, 6):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                elif column in (0, 2, 8, 9):
+                elif column in (0, 2, 7, 8):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                if column == 7 and deduction_uzs > 0:
+                if column == 6 and deduction_uzs > 0:
                     item.setForeground(QColor("#991b1b"))
                     item.setToolTip(
                         f"{t('Jami ajratildi', language)}: {self._format_money(total_cashier_reward)}\n"
@@ -1804,15 +1807,7 @@ class SalesDetailsWidget(QWidget):
                 self._fill_expense_row(table_row, data, language)
                 continue
 
-            if returned > 0 and net_quantity <= 0:
-                status_key, row_hex, status_hex, status_text = (
-                    "Qaytarilgan", "#fee2e2", "#fecaca", "#991b1b"
-                )
-            elif returned > 0:
-                status_key, row_hex, status_hex, status_text = (
-                    "Qisman qaytarilgan", "#fef3c7", "#fde68a", "#92400e"
-                )
-            elif not is_finalized:
+            if not is_finalized:
                 status_key, row_hex, status_hex, status_text = (
                     "Hali yakunlanmagan", "#fffbeb", "#fef3c7", "#92400e"
                 )
@@ -1831,22 +1826,21 @@ class SalesDetailsWidget(QWidget):
                 str(data.get("product_name") or "-"),
                 str(data.get("barcode") or "-"),
                 f"{net_quantity:g}",
-                f"{returned:g}",
                 self._format_money(data.get("price", 0)),
                 self._format_money(data.get("item_total_after_discount", 0)),
                 self._format_money(cashier_reward) if cashier_reward > 0 else "-",
-                self._payment_label(payment),
+                str(data.get("cashier_name") or "-"),
                 status_value,
             ]
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 item.setBackground(QColor(row_hex))
                 item.setForeground(QColor("#1e293b"))
-                if column in (3, 4, 5, 6, 7):
+                if column in (3, 4, 5, 6):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                elif column in (0, 2, 8, 9):
+                elif column in (0, 2, 7, 8):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                if column == 9:
+                if column == 8:
                     item.setBackground(QColor(status_hex))
                     item.setForeground(QColor(status_text))
                     item.setToolTip(t(status_key, language))
@@ -1887,9 +1881,8 @@ class SalesDetailsWidget(QWidget):
             "-",
             "-",
             "-",
-            "-",
             f"-{self._format_money(amount)}",
-            "-",
+            str(data.get("cashier_name") or "-"),
             "\U0001f4b8",
         ]
         tooltip = f"{t('Kassir harajati', language)}: -{self._format_money(amount)}"
@@ -1904,11 +1897,11 @@ class SalesDetailsWidget(QWidget):
             item.setBackground(QColor(self.EXPENSE_ROW_HEX))
             item.setForeground(QColor("#1e293b"))
             item.setToolTip(tooltip)
-            if column in (3, 4, 5, 6, 7):
+            if column in (3, 4, 5, 6):
                 item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            elif column in (0, 2, 8, 9):
+            elif column in (0, 2, 7, 8):
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            if column == 7:
+            if column == 6:
                 item.setForeground(QColor(self.EXPENSE_AMOUNT_TEXT))
                 font = item.font()
                 font.setBold(True)
@@ -1918,7 +1911,7 @@ class SalesDetailsWidget(QWidget):
                 font = item.font()
                 font.setBold(True)
                 item.setFont(font)
-            if column == 9:
+            if column == 8:
                 item.setBackground(QColor(self.EXPENSE_STATUS_HEX))
                 item.setForeground(QColor(self.EXPENSE_STATUS_TEXT))
                 item.setToolTip(t(status_key, language))
@@ -1944,6 +1937,8 @@ class SalesDetailsWidget(QWidget):
                 "price": data.get("price", 0) or 0,
                 "item_total_after_discount": 0,
                 "cashier_reward": 0,
+                "cashier_id": data.get("cashier_id"),
+                "cashier_name": data.get("cashier_name") or "-",
                 "payment_method": "",
                 "payment_methods": set(),
                 "is_finalized": int(is_fin),
@@ -1960,6 +1955,7 @@ class SalesDetailsWidget(QWidget):
             if created_at > (item.get("created_at") or ""):
                 item["created_at"] = created_at
                 item["price"] = data.get("price", 0) or 0
+                item["cashier_name"] = data.get("cashier_name") or item["cashier_name"]
         for key, item in grouped.items():
             state = states.get(key, {})
             item["sold_quantity"] = state.get("sold_quantity", item["sold_quantity"])
@@ -1975,10 +1971,11 @@ class SalesDetailsWidget(QWidget):
 
     @staticmethod
     def _sales_product_key(data):
-        return data.get("product_id") or (
+        product_key = data.get("product_id") or (
             data.get("product_name") or "-",
             data.get("barcode") or "-",
         )
+        return data.get("cashier_id"), product_key
 
     @classmethod
     def _sales_return_states(cls, rows):
@@ -2018,31 +2015,13 @@ class SalesDetailsWidget(QWidget):
     @classmethod
     def _current_sales_rows(cls, rows):
         active_rows = []
-        latest_returns = {}
-        active_products = set()
         for data in rows:
             sold = data.get("sold_quantity", 0) or 0
             returned = data.get("returned_quantity", 0) or 0
             net_quantity = data.get("net_quantity", max(0, sold - returned)) or 0
-            product_key = cls._sales_product_key(data)
             if net_quantity > 0:
                 active_rows.append(data)
-                active_products.add(product_key)
-                continue
-            if returned <= 0:
-                continue
-            order_key = (
-                str(data.get("returned_at") or data.get("created_at") or ""),
-                str(data.get("sale_item_id") or ""),
-            )
-            previous = latest_returns.get(product_key)
-            if previous is None or order_key > previous[0]:
-                latest_returns[product_key] = (order_key, data)
-        return active_rows + [
-            entry[1]
-            for product_key, entry in latest_returns.items()
-            if product_key not in active_products
-        ]
+        return active_rows
 
     @staticmethod
     def _compact_details_time(value):
@@ -2064,10 +2043,7 @@ class SalesDetailsWidget(QWidget):
         # Always add "Barcha kassirlar" first
         self.cashier_combo.addItem(t("Barcha kassirlar", language), None)
 
-        for user in db.get_users():
-            u_role = user.get("role") if isinstance(user, dict) else user["role"]
-            if u_role != "cashier":
-                continue
+        for user in db.get_staff_users():
             name = user.get("username") or user.get("email") or t("Noma'lum", language)
             uid = user.get("id")
             self.cashier_combo.addItem(name, uid)

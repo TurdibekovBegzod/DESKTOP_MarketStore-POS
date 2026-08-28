@@ -64,16 +64,6 @@ def main():
         recent_user = None
     if recent_user:
         recent_user["role"] = "cashier"
-        # The stored session is what authorises this launch; a sync that fails
-        # (server down, tunnel restarting) is retried from inside the app and
-        # must not send the user back to the login screen.
-        try:
-            sync_result = sync_service.synchronize_account_storage(recent_user)
-            if sync_result.get("direction") == "none":
-                sync_service.refresh_account_assets(recent_user)
-        except Exception:
-            traceback.print_exc()
-    if recent_user:
         db.touch_user_activity(recent_user["id"])
         window = MainWindow(dict(recent_user))
         window.showMaximized()

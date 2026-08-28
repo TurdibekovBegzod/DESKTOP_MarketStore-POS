@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QTimer
 import database as db
-from ui.async_loader import AsyncDataLoader, make_progress_bar
+from ui.async_loader import AsyncDataLoader, make_progress_bar, set_progress_bar_loading
 from ui.i18n import set_language, t
 
 
@@ -113,7 +113,7 @@ class StockWidget(QWidget):
         self.table.setRowCount(0)
         self.table.setUpdatesEnabled(False)
         if self.progress_bar:
-            self.progress_bar.setVisible(True)
+            set_progress_bar_loading(self.progress_bar, True)
         self._render_timer.start(0)
 
     def _render_stock_chunk(self):
@@ -122,14 +122,15 @@ class StockWidget(QWidget):
             self.table.setUpdatesEnabled(True)
             set_language(self, self.property("app_language") or "uz")
             if self.progress_bar:
-                QTimer.singleShot(150, lambda: self.progress_bar.setVisible(False))
+                QTimer.singleShot(150, lambda: set_progress_bar_loading(self.progress_bar, False))
             return
         batch_size = 30
         end = min(self._render_index + batch_size, len(self._render_products))
         for row in range(self._render_index, end):
             product = self._render_products[row]
             self.table.insertRow(row)
-            name_item = QTableWidgetItem(product["name"])
+            name_item = QTableWidgetItem(str(product.get("name") or "").strip())
+            name_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             name_item.setData(Qt.ItemDataRole.UserRole, dict(product))
             self.table.setItem(row, 0, name_item)
             self.table.setItem(row, 1, QTableWidgetItem(f"{product['stock']}"))
@@ -157,7 +158,7 @@ class StockWidget(QWidget):
             self.table.setUpdatesEnabled(True)
             set_language(self, self.property("app_language") or "uz")
             if self.progress_bar:
-                QTimer.singleShot(150, lambda: self.progress_bar.setVisible(False))
+                QTimer.singleShot(150, lambda: set_progress_bar_loading(self.progress_bar, False))
 
     def _queue_search(self, *_args):
         self._search_timer.start()

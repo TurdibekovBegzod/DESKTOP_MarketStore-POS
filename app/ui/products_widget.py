@@ -16,7 +16,7 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtPrintSupport import QPrinter, QPrintDialog
 import database as db
-from ui.async_loader import AsyncDataLoader, make_progress_bar
+from ui.async_loader import AsyncDataLoader, make_progress_bar, set_progress_bar_loading
 from ui.i18n import set_language, t
 from ui.sales_widget import ProductInfoDialog
 
@@ -2282,7 +2282,7 @@ class ProductsWidget(QWidget):
         self._render_generation += 1
         generation = self._render_generation
         if self.progress_bar:
-            self.progress_bar.setVisible(True)
+            set_progress_bar_loading(self.progress_bar, True)
 
         def render_chunk():
             if generation != self._render_generation:
@@ -2298,7 +2298,7 @@ class ProductsWidget(QWidget):
             table.setUpdatesEnabled(True)
             set_language(self, self.property("app_language") or "uz")
             if self.progress_bar:
-                QTimer.singleShot(150, lambda: self.progress_bar.setVisible(False))
+                QTimer.singleShot(150, lambda: set_progress_bar_loading(self.progress_bar, False))
 
         QTimer.singleShot(0, render_chunk)
 
@@ -2327,11 +2327,18 @@ class ProductsWidget(QWidget):
             time_item.setData(Qt.ItemDataRole.UserRole, dict(p))
             table.setItem(row, 0, time_item)
 
-            name_item = QTableWidgetItem(p["name"])
+            name_item = QTableWidgetItem(str(p.get("name") or "").strip())
+            name_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             name_item.setData(Qt.ItemDataRole.UserRole, dict(p))
             table.setItem(row, 1, name_item)
-            table.setItem(row, 2, QTableWidgetItem(p["template_name"] or ""))
-            table.setItem(row, 3, QTableWidgetItem(p["barcode"] or ""))
+
+            template_item = QTableWidgetItem(str(p.get("template_name") or "").strip())
+            template_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            table.setItem(row, 2, template_item)
+
+            barcode_item = QTableWidgetItem(str(p.get("barcode") or "").strip())
+            barcode_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            table.setItem(row, 3, barcode_item)
 
             price_item = QTableWidgetItem(self._money_display(p["price"]))
             price_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -2366,11 +2373,18 @@ class ProductsWidget(QWidget):
             return
 
         # mode == "available" (7 columns: Nomi, Template, Shtrix-kod, Narx, Qoldiq, Zaklad, Amallar)
-        name_item = QTableWidgetItem(p["name"])
+        name_item = QTableWidgetItem(str(p.get("name") or "").strip())
+        name_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         name_item.setData(Qt.ItemDataRole.UserRole, dict(p))
         table.setItem(row, 0, name_item)
-        table.setItem(row, 1, QTableWidgetItem(p["template_name"] or ""))
-        table.setItem(row, 2, QTableWidgetItem(p["barcode"] or ""))
+
+        template_item = QTableWidgetItem(str(p.get("template_name") or "").strip())
+        template_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        table.setItem(row, 1, template_item)
+
+        barcode_item = QTableWidgetItem(str(p.get("barcode") or "").strip())
+        barcode_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        table.setItem(row, 2, barcode_item)
 
         price_item = QTableWidgetItem(self._money_display(p["price"]))
         price_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -2490,7 +2504,7 @@ class ProductsWidget(QWidget):
         self._render_generation += 1
         generation = self._render_generation
         if self.progress_bar:
-            self.progress_bar.setVisible(True)
+            set_progress_bar_loading(self.progress_bar, True)
 
         def render_chunk():
             if generation != self._render_generation:
@@ -2505,7 +2519,7 @@ class ProductsWidget(QWidget):
             self.sold_table.setUpdatesEnabled(True)
             set_language(self, self.property("app_language") or "uz")
             if self.progress_bar:
-                QTimer.singleShot(150, lambda: self.progress_bar.setVisible(False))
+                QTimer.singleShot(150, lambda: set_progress_bar_loading(self.progress_bar, False))
 
         QTimer.singleShot(0, render_chunk)
 

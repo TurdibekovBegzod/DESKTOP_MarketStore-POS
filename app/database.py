@@ -4041,6 +4041,10 @@ def get_product_by_id(product_id):
 
 def _normalize_product_money(data):
     normalized = dict(data)
+    if "name" in normalized and normalized["name"] is not None:
+        normalized["name"] = str(normalized["name"]).strip()
+    if "barcode" in normalized and normalized["barcode"] is not None:
+        normalized["barcode"] = str(normalized["barcode"]).strip()
     normalized.setdefault("price_currency", "UZS")
     normalized.setdefault("price_exchange_rate", 1)
     normalized.setdefault("price_original", normalized.get("price", 0))
@@ -6344,11 +6348,27 @@ def get_cashier_period_summary(start_date, end_date, section_id=None, only_cashi
         return sorted(rows, key=lambda r: (-r["revenue"], r["entity_name"]))
 
 
+def _staff_user_ids(session):
+    """Users created in the Kassirlar section, excluding the account owner."""
+    owner_ids = set(session.scalars(
+        select(UserSetting.user_id).where(UserSetting.key == "api_user_uid")
+    ).all())
+    if owner_ids:
+        return set(session.scalars(
+            select(User.id).where(User.id.not_in(owner_ids))
+        ).all())
+    # Legacy databases have no owner marker. Preserve their old behaviour and
+    # avoid treating the seeded admin account as a cashier.
+    return set(session.scalars(
+        select(User.id).where(User.role == "cashier")
+    ).all())
+
+
 def get_cashier_sales_details(cashier_id=None, start_date=None, end_date=None, section_id=None, only_cashiers=False):
     with session_scope() as session:
         cashier_ids = None
         if only_cashiers:
-            cashier_ids = set(session.scalars(select(User.id).where(User.role == "cashier")).all())
+            cashier_ids = _staff_user_ids(session)
             if cashier_id and cashier_id not in cashier_ids:
                 return []
             if not cashier_id and not cashier_ids:
@@ -6387,6 +6407,10 @@ def get_cashier_sales_details(cashier_id=None, start_date=None, end_date=None, s
             .where(SaleItem.sale_id.in_(sale_ids))
             .group_by(SaleItem.sale_id)
         ).all())
+        cashier_names = {
+            user.id: (user.username or user.email or "-")
+            for user in session.scalars(select(User)).all()
+        }
 
         result = []
         for item, sale, product in records:
@@ -6422,6 +6446,8 @@ def get_cashier_sales_details(cashier_id=None, start_date=None, end_date=None, s
                 item_total_after_discount=max(0, active_subtotal - item_discount),
                 cashier_reward=item_cashier_reward,
                 sale_cashier_reward=sale.cashier_reward or 0,
+                cashier_id=sale.cashier_id,
+                cashier_name=cashier_names.get(sale.cashier_id, "-"),
                 payment_method=sale.payment_method or "",
                 is_finalized=sale.is_finalized or 0,
                 finalized_at=_utc_to_local(sale.finalized_at) if sale.finalized_at else None,
@@ -7243,7 +7269,7 @@ def get_expense_hourly_report(date_str, category_id=None, user_id=None, include_
         return [Row(dict(row._mapping)) for row in session.execute(stmt)]
 
 
-def get_expense_category_report(start_date, end_date, category_id=None):
+def get_expense_category_report(start_date, end_date, category_id=None, include_cashier=False):
     category_name = func.coalesce(ExpenseCategory.name, "Kategoriya yo'q").label("category_name")
     stmt = (
         select(category_name, Expense.currency_code, func.coalesce(func.sum(Expense.amount), 0).label("amount"))
@@ -7254,6 +7280,8 @@ def get_expense_category_report(start_date, end_date, category_id=None):
     )
     if category_id:
         stmt = stmt.where(Expense.category_id == category_id)
+    if not include_cashier:
+        stmt = stmt.where(Expense.cashier_id.is_(None))
     with session_scope() as session:
         return [Row(dict(row._mapping)) for row in session.execute(stmt)]
 
@@ -7500,16 +7528,20 @@ def get_users():
         return [Row(dict(id=u.id, username=u.username, email=u.email, role=u.role, created_at=u.created_at)) for u in rows]
 
 
-def get_debt_cashiers():
-    """Return staff users without the online account owner."""
+def get_staff_users():
+    """Return Kassirlar-section users without the online account owner."""
     with session_scope() as session:
-        owner_ids = select(UserSetting.user_id).where(UserSetting.key == "api_user_uid")
         rows = session.scalars(
             select(User)
-            .where(User.id.not_in(owner_ids))
+            .where(User.id.in_(_staff_user_ids(session)))
             .order_by(User.role, User.email, User.username)
         ).all()
         return [Row(dict(id=u.id, username=u.username, email=u.email, role=u.role, created_at=u.created_at)) for u in rows]
+
+
+def get_debt_cashiers():
+    """Backward-compatible staff list used by debt assignment controls."""
+    return get_staff_users()
 
 
 def add_user(email=None, password=None, role="cashier", username=None):

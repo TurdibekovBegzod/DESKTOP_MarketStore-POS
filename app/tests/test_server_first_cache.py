@@ -126,6 +126,42 @@ class ServerFirstCacheTest(unittest.TestCase):
         self.assertEqual(pull.call_args_list[2].kwargs["since_seq"], 0)
         self.assertEqual(pull.call_args_list[3].kwargs["since_seq"], 0)
 
+    def test_page_reload_refetches_current_rows_after_remote_purge(self):
+        _activation, owner = self._open()
+        cashier_id = db.stable_row_id("users", "post-purge-cashier")
+        current = {
+            "records": [{
+                "table_name": "users",
+                "local_id": cashier_id,
+                "data": {
+                    "id": cashier_id,
+                    "username": "Sardor",
+                    "email": None,
+                    "password": "unused",
+                    "role": "cashier",
+                },
+                "local_updated_at": "2026-08-28 08:00:00",
+                "deleted_at": None,
+            }],
+            "generation": 8,
+            "purge_generation": 7,
+        }
+        first = {
+            "records": [],
+            "generation": 8,
+            "purge_generation": 7,
+        }
+        with patch.object(
+            sync_service.api_client,
+            "pull_sync_records",
+            side_effect=[first, current],
+        ) as pull:
+            result = sync_service.refresh_page_data(owner, "sales_details")
+
+        self.assertEqual(pull.call_count, 2)
+        self.assertTrue(result["purged"])
+        self.assertEqual([user["username"] for user in db.get_staff_users()], ["Sardor"])
+
 
 if __name__ == "__main__":
     unittest.main()

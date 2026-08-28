@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QTimer, QDate, QRegularExpression
 from PyQt6.QtGui import QRegularExpressionValidator
 import database as db
-from ui.async_loader import AsyncDataLoader, make_progress_bar
+from ui.async_loader import AsyncDataLoader, make_progress_bar, set_progress_bar_loading
 from ui.i18n import t
 
 
@@ -438,7 +438,7 @@ class FinalizeSalesWidget(QWidget):
         self._render_generation += 1
         generation = self._render_generation
         if self.progress_bar:
-            self.progress_bar.setVisible(True)
+            set_progress_bar_loading(self.progress_bar, True)
 
         state = {"row": 0}
 
@@ -454,7 +454,7 @@ class FinalizeSalesWidget(QWidget):
                 return
             self.table.setUpdatesEnabled(True)
             if self.progress_bar:
-                self.progress_bar.setVisible(False)
+                set_progress_bar_loading(self.progress_bar, False)
 
         render_chunk()
 

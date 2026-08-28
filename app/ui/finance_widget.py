@@ -5,10 +5,11 @@ from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QDoubleValidator
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QDateEdit, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QDialog, QFormLayout,
-    QComboBox, QLineEdit, QMessageBox, QFileDialog, QProgressBar
+    QComboBox, QLineEdit, QMessageBox, QFileDialog
 )
 
 import database as db
+from ui.async_loader import make_progress_bar, set_progress_bar_loading
 from ui.finance_excel import export_finance_xlsx
 from ui.i18n import set_language, t
 
@@ -284,11 +285,7 @@ class FinanceWidget(QWidget):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
 
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 0)
-        self.progress_bar.setTextVisible(False)
-        self.progress_bar.setFixedHeight(4)
-        self.progress_bar.hide()
+        self.progress_bar = make_progress_bar()
         layout.addWidget(self.progress_bar)
 
         toolbar = QHBoxLayout()
@@ -512,15 +509,20 @@ class FinanceWidget(QWidget):
         """
         self.date_lbl.setStyleSheet(f"color:{theme['title']};background:transparent;border:none;")
         self.progress_bar.setStyleSheet(f"""
-            QProgressBar {{
+            QProgressBar[loading="true"] {{
                 background:{theme['content']};
                 border:none;
                 border-radius:2px;
             }}
-            QProgressBar::chunk {{
+            QProgressBar[loading="true"]::chunk {{
                 background:{theme['accent']};
                 border-radius:2px;
             }}
+            QProgressBar[loading="false"] {{
+                background:transparent;
+                border:none;
+            }}
+            QProgressBar[loading="false"]::chunk {{ background:transparent; }}
         """)
         self.month_edit.setStyleSheet(field_style)
         self.period_combo.setStyleSheet(field_style)
@@ -917,7 +919,7 @@ class FinanceWidget(QWidget):
         self.load_data()
 
     def _set_loading_visible(self, visible):
-        self.progress_bar.setVisible(visible)
+        set_progress_bar_loading(self.progress_bar, visible)
         for widget in (self.prev_btn, self.next_btn, self.period_combo, self.currency_combo, self.refresh_btn):
             widget.setEnabled(not visible)
 

@@ -253,32 +253,32 @@ class UiDatabaseSmokeTest(unittest.TestCase):
             "payment_method": "naqd",
             "is_finalized": 1,
         }])
-        self.assertEqual(details.table.columnCount(), 10)
+        self.assertEqual(details.table.columnCount(), 9)
         self.assertEqual(details.table.rowCount(), 2)
         self.assertEqual(details.table.item(0, 0).text(), "")
         self.assertEqual(details.table.item(0, 1).text(), "")
-        self.assertEqual(details.table.item(0, 9).text(), "")
-        self.assertEqual(details.table.item(0, 4).text(), "1")
-        self.assertIn("5,000", details.table.item(0, 6).text())
-        self.assertIn("750", details.table.item(0, 7).text())
+        self.assertEqual(details.table.item(0, 8).text(), "")
+        self.assertEqual(details.table.item(0, 3).text(), "1")
+        self.assertIn("5,000", details.table.item(0, 5).text())
+        self.assertIn("750", details.table.item(0, 6).text())
         self.assertEqual(details.table.verticalHeaderItem(0).text(), "")
         self.assertEqual(details.table.verticalHeaderItem(1).text(), "1")
         self.assertEqual(details.table.item(1, 0).text(), "22.08 14:30")
         self.assertEqual(details.table.item(1, 1).text(), "Test product")
         self.assertEqual(details.table.item(0, 3).text(), "1")
         self.assertEqual(details.table.item(1, 3).text(), "1")
-        self.assertEqual(details.table.item(1, 4).text(), "1")
-        self.assertEqual(details.table.item(1, 9).text(), "↩️")
-        self.assertEqual(details.table.item(1, 9).toolTip(), "Qisman qaytarilgan")
-        self.assertEqual(details.table.item(1, 9).background().color().name(), "#fde68a")
-        self.assertNotEqual(details.table.item(1, 9).background().color().name(), "#ffffff")
+        self.assertEqual(details.table.item(1, 4).text(), "5,000 so'm")
+        self.assertEqual(details.table.item(1, 8).text(), "✅")
+        self.assertEqual(details.table.item(1, 8).toolTip(), "Yakunlangan")
+        self.assertEqual(details.table.item(1, 8).background().color().name(), "#bbf7d0")
+        self.assertNotEqual(details.table.item(1, 8).background().color().name(), "#ffffff")
         self.assertIn("#f3f4f6", details.table.verticalHeader().styleSheet())
         self.assertEqual(details._status_icon("Yakunlangan"), "✅")
 
         pending_row = dict(details._last_rows[0], is_finalized=0, cashier_reward=0)
         details._fill_table([pending_row])
-        self.assertEqual(details.table.item(1, 9).text(), "↩️")
-        self.assertEqual(details.table.item(1, 7).text(), "-")
+        self.assertEqual(details.table.item(1, 8).text(), "⏳")
+        self.assertEqual(details.table.item(1, 6).text(), "-")
         grouped = details._group_sales_rows([pending_row, pending_row])
         self.assertEqual(len(grouped), 1)
         self.assertEqual(grouped[0]["net_quantity"], 2)
@@ -286,7 +286,7 @@ class UiDatabaseSmokeTest(unittest.TestCase):
 
         completed_row = dict(details._last_rows[0], returned_quantity=0, net_quantity=2, is_finalized=1)
         details._fill_table([completed_row])
-        self.assertEqual(details.table.item(1, 9).text(), "✅")
+        self.assertEqual(details.table.item(1, 8).text(), "✅")
 
         fully_returned_row = dict(
             details._last_rows[0],
@@ -297,11 +297,7 @@ class UiDatabaseSmokeTest(unittest.TestCase):
             is_finalized=1,
         )
         details._fill_table([fully_returned_row])
-        self.assertEqual(details.table.rowCount(), 2)
-        self.assertEqual(details.table.item(1, 3).text(), "0")
-        self.assertEqual(details.table.item(1, 4).text(), "2")
-        self.assertEqual(details.table.item(1, 9).text(), "↩️")
-        self.assertEqual(details.table.item(1, 9).background().color().name(), "#fecaca")
+        self.assertEqual(details.table.rowCount(), 0)
 
         active_rows = [
             dict(completed_row, sale_item_id=20, sold_quantity=1, net_quantity=1, created_at="2026-08-22 14:20:00"),
@@ -347,9 +343,9 @@ class UiDatabaseSmokeTest(unittest.TestCase):
         )
         details._fill_table([returned_once, resale])
         self.assertEqual(details.table.item(1, 3).text(), "1")
-        self.assertEqual(details.table.item(1, 4).text(), "0")
-        self.assertEqual(details.table.item(1, 9).text(), "✅")
-        self.assertEqual(details.table.item(1, 9).background().color().name(), "#bbf7d0")
+        self.assertEqual(details.table.item(1, 4).text(), "5,000 so'm")
+        self.assertEqual(details.table.item(1, 8).text(), "✅")
+        self.assertEqual(details.table.item(1, 8).background().color().name(), "#bbf7d0")
 
         pending_resale = dict(resale, sale_item_id=32, is_finalized=0, created_at="2026-08-22 15:15:00")
         grouped = details._group_sales_rows([returned_once, pending_resale])
@@ -362,7 +358,7 @@ class UiDatabaseSmokeTest(unittest.TestCase):
             [],
             [dict(currency) for currency in db.get_currencies()],
         )
-        self.assertEqual(net_rows[0]["net_profit"], 4250)
+        self.assertEqual(net_rows[0]["net_profit"], 5000)
 
         products._load_cashier_filter()
         cashier_index = products.cashier_filter.findData(cashier_id)

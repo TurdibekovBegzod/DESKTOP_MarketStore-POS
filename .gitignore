@@ -14,6 +14,7 @@ dist/
 app/data/accounts/
 app/data/account_session.json
 app/data/local_preferences.json
+data/
 api/credentials.json
 downloads/
 eggs/

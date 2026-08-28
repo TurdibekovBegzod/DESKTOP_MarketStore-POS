@@ -9,7 +9,7 @@ from PyQt6.QtGui import QFont, QColor, QPixmap, QRegularExpressionValidator
 from pathlib import Path
 import sys
 import database as db
-from ui.async_loader import AsyncDataLoader, make_progress_bar
+from ui.async_loader import AsyncDataLoader, make_progress_bar, set_progress_bar_loading
 from ui.i18n import set_language, t
 
 
@@ -553,7 +553,7 @@ class SalesWidget(QWidget):
         self.products_table.setRowCount(0)
         self.products_table.setUpdatesEnabled(False)
         if self.progress_bar:
-            self.progress_bar.setVisible(True)
+            set_progress_bar_loading(self.progress_bar, True)
         self._render_timer.start(0)
 
     def _render_product_chunk(self):
@@ -562,7 +562,7 @@ class SalesWidget(QWidget):
             self.products_table.setUpdatesEnabled(True)
             set_language(self, self.property("app_language") or "uz")
             if self.progress_bar:
-                QTimer.singleShot(150, lambda: self.progress_bar.setVisible(False))
+                QTimer.singleShot(150, lambda: set_progress_bar_loading(self.progress_bar, False))
             return
         batch_size = 25
         end = min(self._render_index + batch_size, len(self._render_products))
@@ -570,8 +570,12 @@ class SalesWidget(QWidget):
             p = self._render_products[row]
             available_stock = self._available_stock(p)
             self.products_table.insertRow(row)
-            self.products_table.setItem(row, 0, QTableWidgetItem(p["name"]))
-            self.products_table.setItem(row, 1, QTableWidgetItem(p["barcode"] or ""))
+            name_item = QTableWidgetItem(str(p.get("name") or "").strip())
+            name_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            self.products_table.setItem(row, 0, name_item)
+            barcode_item = QTableWidgetItem(str(p.get("barcode") or "").strip())
+            barcode_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            self.products_table.setItem(row, 1, barcode_item)
             price_item = QTableWidgetItem(f"{p['price']:,.0f} so'm")
             price_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.products_table.setItem(row, 2, price_item)
@@ -598,7 +602,7 @@ class SalesWidget(QWidget):
             self.products_table.setUpdatesEnabled(True)
             set_language(self, self.property("app_language") or "uz")
             if self.progress_bar:
-                QTimer.singleShot(150, lambda: self.progress_bar.setVisible(False))
+                QTimer.singleShot(150, lambda: set_progress_bar_loading(self.progress_bar, False))
 
     def _load_currencies(self, currencies=None):
         current = self.currency_combo.currentData() if hasattr(self, "currency_combo") else None

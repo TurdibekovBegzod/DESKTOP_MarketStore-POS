@@ -438,7 +438,7 @@ class ExpenseReportDialog(QDialog):
     def load_data(self):
         start_date, end_date = self._date_range()
         category_id = self.category_filter.currentData() if hasattr(self, "category_filter") else None
-        rows = db.get_expense_report(start_date, end_date, category_id)
+        rows = db.get_expense_report(start_date, end_date, category_id, include_cashier=False)
         totals = {}
         by_label = {}
         for row in rows:
@@ -466,7 +466,7 @@ class ExpenseReportDialog(QDialog):
 
     def _load_category_report(self, start_date, end_date, category_id=None):
         self.category_table.setRowCount(0)
-        for row, item in enumerate(db.get_expense_category_report(start_date, end_date, category_id)):
+        for row, item in enumerate(db.get_expense_category_report(start_date, end_date, category_id, include_cashier=False)):
             self.category_table.insertRow(row)
             self.category_table.setItem(row, 0, QTableWidgetItem(item["category_name"]))
             self.category_table.setItem(row, 1, QTableWidgetItem(item["currency_code"] or "UZS"))
@@ -621,6 +621,8 @@ class ExpensesWidget(QWidget):
         target_rate = rates.get(target_currency, 1) or 1
         total_uzs = 0
         for expense in expenses:
+            if expense.get("cashier_id"):
+                continue
             source_currency = expense["currency_code"] or "UZS"
             source_rate = rates.get(source_currency, 1) or 1
             total_uzs += (expense["amount"] or 0) * source_rate

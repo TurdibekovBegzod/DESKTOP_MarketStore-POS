@@ -738,7 +738,16 @@ def refresh_page_data(user, page_key):
     )
     purge = apply_server_control(result)
     if purge.get("purged"):
-        return {"received": 0, "imported": 0, "tables": tables, "purged": True}
+        # A remote-session database is disposable, so a fresh app launch sees
+        # an old purge marker as new again. The first response correctly clears
+        # the cache; immediately read the current post-purge records so the
+        # page does not stay empty until it is opened a second time.
+        result = api_client.pull_sync_records(
+            token,
+            table_names=tables,
+            include_deleted=True,
+        )
+        apply_server_control(result)
     imported = db.import_sync_records(result.get("records", []))
     generation = int(result.get("generation") or 0)
     for table_name in tables:
@@ -748,6 +757,7 @@ def refresh_page_data(user, page_key):
         "imported": imported,
         "tables": tables,
         "generation": generation,
+        "purged": bool(purge.get("purged")),
     }
 
 

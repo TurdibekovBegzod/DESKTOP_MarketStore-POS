@@ -1762,17 +1762,17 @@ class MainWindow(QMainWindow):
         # the device can currently reach the others, which the cashier has to
         # know because money cannot be written while it cannot.
         self.sync_wrap = QWidget()
-        self.sync_wrap.setFixedSize(112, 36)
+        self.sync_wrap.setFixedSize(100, 36)
         self.sync_btn = QLabel(self.sync_wrap)
         self.sync_btn.setObjectName("syncStateDot")
-        self.sync_btn.setFixedSize(108, 26)
-        self.sync_btn.move(0, 5)
+        self.sync_btn.setFixedSize(92, 24)
+        self.sync_btn.move(0, 6)
         self.sync_btn.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.sync_btn.setText(self.labels.get("sync_online", "Onlayn"))
         self.sync_badge_lbl = QLabel(self.sync_wrap)
         self.sync_badge_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.sync_badge_lbl.setFixedSize(16, 16)
-        self.sync_badge_lbl.move(96, 0)
+        self.sync_badge_lbl.move(80, 0)
         self.sync_badge_lbl.hide()
         topbar_lay.addWidget(self.sync_wrap)
         topbar_lay.addWidget(self.clock_lbl)
@@ -2068,10 +2068,11 @@ class MainWindow(QMainWindow):
             QLabel#syncStateDot {{
                 background: {palette['bg']};
                 border: 1px solid {palette['border']};
-                border-radius: 13px;
+                border-radius: 12px;
                 color: {palette['text']};
-                font-size: 12px;
-                font-weight: bold;
+                font-size: 11px;
+                font-weight: 600;
+                padding: 0 4px;
             }}
         """)
 
@@ -2390,7 +2391,7 @@ class MainWindow(QMainWindow):
             worker.stop()
         if thread is not None:
             thread.quit()
-            thread.wait(4000)
+            thread.wait(250)
 
     @pyqtSlot(dict)
     def _on_sync_turn_finished(self, outcome):
@@ -2527,7 +2528,7 @@ class MainWindow(QMainWindow):
             worker.stop()
         if thread is not None:
             thread.quit()
-            thread.wait(4000)
+            thread.wait(250)
 
     @pyqtSlot(bool, str)
     def _on_realtime_connection(self, online, _reason):
@@ -3059,7 +3060,7 @@ class MainWindow(QMainWindow):
             font-weight: bold;
         """)
         self.content_area.setStyleSheet(f"#content {{ background: {theme['content']}; }}")
-        self.topbar.setStyleSheet(f"background:{theme['topbar']};border-bottom:1px solid #e2e8f0;")
+        self.topbar.setStyleSheet(f"background:{theme['topbar']};border:none;")
         self.page_title_lbl.setStyleSheet(f"font-size:18px;font-weight:bold;color:{theme['title']};")
         self.clock_lbl.setStyleSheet(f"color:{theme['muted']};font-size:13px;")
         for key, btn in self.nav_buttons.items():

@@ -251,14 +251,14 @@ class SalesDetailsExpenseRowTest(unittest.TestCase):
             row for row in range(widget.table.rowCount())
             if widget.table.item(row, 1) and "avans" in widget.table.item(row, 1).text()
         )
-        allocation = widget.table.item(expense_row, 7)
+        allocation = widget.table.item(expense_row, 6)
         self.assertTrue(allocation.text().startswith("-"))
         self.assertEqual(
             widget.table.item(expense_row, 0).background().color(),
             QColor(SalesDetailsWidget.EXPENSE_ROW_HEX),
         )
         self.assertEqual(
-            widget.table.item(expense_row, 9).background().color(),
+            widget.table.item(expense_row, 8).background().color(),
             QColor(SalesDetailsWidget.EXPENSE_STATUS_HEX),
         )
 
@@ -273,7 +273,7 @@ class SalesDetailsExpenseRowTest(unittest.TestCase):
         self.assertEqual(widget.summary_cards["products"].text(), "1")
         # 125 000 earned - 40 000 already taken.
         self.assertIn("85,000", widget.summary_cards["salary"].text())
-        self.assertIn("85,000", widget.table.item(0, 7).text())
+        self.assertIn("85,000", widget.table.item(0, 6).text())
 
 
 class ProfitIsolationTest(unittest.TestCase):
@@ -332,8 +332,8 @@ class ProfitIsolationTest(unittest.TestCase):
         self.assertEqual(before["profit"], after["profit"])
         self.assertEqual(before["net_profit"], after["net_profit"])
         self.assertEqual(before["revenue"], after["revenue"])
-        # 800 000 profit - 50 000 ordinary expense - 200 000 gross salary
-        self.assertIn("550,000", after["net_profit"])
+        # 800 000 profit - 50 000 ordinary expense = 750 000 net profit
+        self.assertIn("750,000", after["net_profit"])
         # Only the salary moves: 200 000 earned - 120 000 already taken.
         self.assertIn("200,000", before["salary"])
         self.assertIn("80,000", after["salary"])
