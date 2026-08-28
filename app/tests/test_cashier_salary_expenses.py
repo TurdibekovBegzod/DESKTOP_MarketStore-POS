@@ -332,8 +332,8 @@ class ProfitIsolationTest(unittest.TestCase):
         self.assertEqual(before["profit"], after["profit"])
         self.assertEqual(before["net_profit"], after["net_profit"])
         self.assertEqual(before["revenue"], after["revenue"])
-        # 800 000 profit - 50 000 ordinary expense = 750 000 net profit
-        self.assertIn("750,000", after["net_profit"])
+        # 800 000 profit - 50 000 ordinary expense - 200 000 cashier reward = 550 000 net profit
+        self.assertIn("550,000", after["net_profit"])
         # Only the salary moves: 200 000 earned - 120 000 already taken.
         self.assertIn("200,000", before["salary"])
         self.assertIn("80,000", after["salary"])

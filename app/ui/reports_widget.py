@@ -680,7 +680,8 @@ class ReportsWidget(QWidget):
         if self._selected_section_id():
             for row in filled_rows:
                 row["expense"] = 0
-                row["net_profit"] = row.get("profit", 0) or 0
+                cashier_reward = (row.get("cashier_reward", 0) or 0)
+                row["net_profit"] = (row.get("profit", 0) or 0) - cashier_reward
             filled = filled_rows
         else:
             filled = self._with_entity_net_profit(filled_rows, start_date, end_date)
@@ -703,7 +704,7 @@ class ReportsWidget(QWidget):
                 "salary": gross_salary - salary_deduction,
                 "salary_deduction": salary_deduction,
             }
-            cashier_totals["net_profit"] = cashier_totals["profit"]
+            cashier_totals["net_profit"] = cashier_totals["profit"] - gross_salary
 
             if "revenue" in self.summary_cards:
                 self.summary_cards["revenue"].setText(self._format_money(cashier_totals["revenue"], currency))
@@ -1104,7 +1105,8 @@ class ReportsWidget(QWidget):
         expenses = self._expense_totals_by_period(start_date, end_date)
         for row in rows:
             row["expense"] = expenses.get(row["label"], 0)
-            row["net_profit"] = (row["profit"] or 0) - (row["expense"] or 0)
+            cashier_reward = row.get("cashier_reward", 0) or 0
+            row["net_profit"] = (row["profit"] or 0) - (row["expense"] or 0) - cashier_reward
         return rows
 
     def _with_net_profit_from_expenses(self, rows, expense_rows, currencies, section_id=None, start_date=None, end_date=None):
@@ -1129,7 +1131,8 @@ class ReportsWidget(QWidget):
             totals[label] = totals.get(label, 0) + (expense["amount"] or 0) * (rates.get(currency, 1) or 1) * ratio
         for row in rows:
             row["expense"] = totals.get(row["label"], 0)
-            row["net_profit"] = (row["profit"] or 0) - (row["expense"] or 0)
+            cashier_reward = row.get("cashier_reward", 0) or 0
+            row["net_profit"] = (row["profit"] or 0) - (row["expense"] or 0) - cashier_reward
         return rows
 
     def _with_entity_net_profit(self, rows, start_date, end_date):
@@ -1138,21 +1141,18 @@ class ReportsWidget(QWidget):
             expenses = self._expense_totals_by_period(start_date, end_date, user_id=entity["id"], include_unassigned=True)
             for row in rows:
                 row["expense"] = expenses.get(row["label"], 0)
-                row["net_profit"] = (row["profit"] or 0) - (row["expense"] or 0)
+                cashier_reward = row.get("cashier_reward", 0) or 0
+                row["net_profit"] = (row["profit"] or 0) - (row["expense"] or 0) - cashier_reward
             return rows
         for row in rows:
             row["expense"] = 0
-            row["net_profit"] = row.get("profit", 0) or 0
+            cashier_reward = row.get("cashier_reward", 0) or 0
+            row["net_profit"] = (row.get("profit", 0) or 0) - cashier_reward
         return rows
 
     @staticmethod
     def _cashier_cost(row):
-        # The full reward the sales earned the cashier. Whether part of it was
-        # already handed over as an expense changes who holds the money, not
-        # what the shop paid, so the deduction is not applied here.
-        if "cashier_reward" in row:
-            return row.get("cashier_reward") or 0
-        return row.get("total_salary", 0) or row.get("salary", 0) or 0
+        return (row.get("cashier_reward", 0) or 0)
 
     def _expense_totals_by_period(self, start_date, end_date, user_id=None, include_unassigned=False):
         rates = {currency["code"]: currency["rate_to_uzs"] or 1 for currency in db.get_currencies()}
@@ -1726,7 +1726,7 @@ class SalesDetailsWidget(QWidget):
         # Deliberately not clamped: when the expenses exceed what the sales have
         # earned so far, the cashier owes the difference back and must see it.
         salary_uzs = gross_salary_uzs - deduction_uzs
-        net_profit_uzs = profit_uzs
+        net_profit_uzs = max(0, profit_uzs - gross_salary_uzs)
 
         if hasattr(self, "summary_cards"):
             if "revenue" in self.summary_cards:

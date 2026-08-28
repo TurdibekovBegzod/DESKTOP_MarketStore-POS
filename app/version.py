@@ -3,7 +3,7 @@ MarketStore POS Application Version and Metadata
 """
 
 APP_NAME = "MarketStore POS"
-APP_VERSION = "1.2.8"
-APP_BUILD = 23
+APP_VERSION = "1.2.9"
+APP_BUILD = 24
 APP_RELEASE_DATE = "2026-08-28"
 APP_AUTHOR = "MarketStore Team"
