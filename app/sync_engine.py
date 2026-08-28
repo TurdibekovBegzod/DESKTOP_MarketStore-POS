@@ -45,6 +45,12 @@ class SyncEngine(QObject):
     """Runs on its own QThread; performs one sync turn at a time."""
 
     applied = pyqtSignal(dict)
+    # Emitted after every completed turn, including one that moved nothing.
+    # `applied` only fires when data actually travelled, so anything waiting for
+    # confirmation that the server has this device's work - the "sending to the
+    # server" notice above all - would otherwise wait for ever.
+    turn_finished = pyqtSignal(dict)
+    turn_failed = pyqtSignal(str)
     state_changed = pyqtSignal(str)
     conflict = pyqtSignal()
     wake_requested = pyqtSignal()
@@ -151,6 +157,7 @@ class SyncEngine(QObject):
         except sync_service.SyncConflict as exc:
             db.record_sync_failure(exc)
             self._set_state("idle")
+            self.turn_failed.emit(str(exc))
             self.conflict.emit()
             self._set_interval(RETRY_INTERVAL_MS)
             return
@@ -163,11 +170,16 @@ class SyncEngine(QObject):
             # request until it succeeds rather than falling back to polling.
             self._pull_requested.set()
             self._set_state("offline")
+            self.turn_failed.emit(f"{type(exc).__name__}: {exc}")
             self._set_interval(RETRY_INTERVAL_MS)
             return
 
         db.record_sync_success(outcome)
         self._set_state("idle")
+        # Say the turn is over before deciding whether anything is worth
+        # reloading: a turn that sent the last queued row and found nothing to
+        # download still means "the server has it now".
+        self.turn_finished.emit(dict(outcome))
         self._set_interval(LOCAL_SETTLE_MS)
         if outcome.get("conflict"):
             self.conflict.emit()

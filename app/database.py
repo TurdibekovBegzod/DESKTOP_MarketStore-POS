@@ -2145,11 +2145,7 @@ def init_db(account_owner=None, seed_defaults=True):
                 for template in session.scalars(select(ProductTemplate).where(ProductTemplate.section_id.is_(None))):
                     template.section_id = default_section_id
 
-            for code, name, rate, is_base in [
-                ("UZS", "O'zbek so'mi", 1, 1),
-                ("USD", "AQSh dollari", 12500, 0),
-                ("EUR", "Yevro", 13500, 0),
-            ]:
+            for code, name, rate, is_base in DEFAULT_CURRENCIES:
                 if not session.scalar(select(Currency).where(Currency.code == code)):
                     session.add(Currency(
                         id=stable_row_id("currencies", code),
@@ -2364,8 +2360,15 @@ def get_sync_status():
         last_dirty = _sync_state_get(conn, "last_dirty_at")
         last_push = _sync_state_get(conn, "last_push_at")
         last_pull = _sync_state_get(conn, "last_pull_at")
-        outbox_count = conn.exec_driver_sql("SELECT COUNT(*) FROM sync_outbox").scalar() or 0
-        tombstone_count = conn.exec_driver_sql("SELECT COUNT(*) FROM sync_tombstones").scalar() if _has_table(conn, "sync_tombstones") else 0
+        clause, params = _unsendable_clause()
+        outbox_count = conn.exec_driver_sql(
+            f"SELECT COUNT(*) FROM sync_outbox{clause}", params
+        ).scalar() or 0
+        tombstone_count = (
+            conn.exec_driver_sql(f"SELECT COUNT(*) FROM sync_tombstones{clause}", params).scalar()
+            if _has_table(conn, "sync_tombstones")
+            else 0
+        )
         pending_count = outbox_count + tombstone_count
         pending = bool(pending_count > 0 or (last_dirty and (not last_push or str(last_dirty) >= str(last_push))))
         record_count = 0
@@ -2415,6 +2418,7 @@ def export_sync_records(incremental=False, with_watermark=False):
     """
     now = _utc_now()
     device_key = get_sync_device_key()
+    undeliverable = get_unsendable_tables()
     records = []
     max_seq = None
     tombstone_ids = []
@@ -2434,6 +2438,10 @@ def export_sync_records(incremental=False, with_watermark=False):
                 local_id = item["local_id"]
                 action = item["action"]
                 if table_name not in SYNC_TABLES or not _has_table(conn, table_name):
+                    continue
+                if table_name in undeliverable:
+                    # Kept in the queue for a newer server; sending it now would
+                    # make the API refuse this whole batch.
                     continue
                 if action == "delete":
                     records.append({
@@ -2468,6 +2476,8 @@ def export_sync_records(incremental=False, with_watermark=False):
                 for tombstone in tombstones:
                     if tombstone["table_name"] not in SYNC_TABLES:
                         continue
+                    if tombstone["table_name"] in undeliverable:
+                        continue
                     tombstone_ids.append((tombstone["table_name"], str(tombstone["local_id"])))
                     records.append({
                         "table_name": tombstone["table_name"],
@@ -2484,7 +2494,7 @@ def export_sync_records(incremental=False, with_watermark=False):
 
         # Full export (when server reseed is required or explicitly requested)
         for table_name in SYNC_TABLES:
-            if not _has_table(conn, table_name):
+            if not _has_table(conn, table_name) or table_name in undeliverable:
                 continue
             quoted = _quote_identifier(table_name)
             if table_name == "users" and _ACTIVE_ACCOUNT_UID:
@@ -2910,22 +2920,39 @@ def mark_sync_pushed(up_to_seq=None, tombstone_ids=None):
     with _get_engine().begin() as conn:
         now = _utc_now()
         _ensure_sync_outbox_table(conn)
+        undeliverable = sorted(get_unsendable_tables())
+        keep = ""
+        keep_params = ()
+        if undeliverable:
+            placeholders = ", ".join("?" for _ in undeliverable)
+            keep = f" AND table_name NOT IN ({placeholders})"
+            keep_params = tuple(undeliverable)
         if up_to_seq is None:
-            conn.exec_driver_sql("DELETE FROM sync_outbox")
+            conn.exec_driver_sql(f"DELETE FROM sync_outbox WHERE 1=1{keep}", keep_params)
         else:
-            conn.exec_driver_sql("DELETE FROM sync_outbox WHERE seq <= ?", (int(up_to_seq),))
+            conn.exec_driver_sql(
+                f"DELETE FROM sync_outbox WHERE seq <= ?{keep}",
+                (int(up_to_seq),) + keep_params,
+            )
         if _has_table(conn, "sync_tombstones"):
             if tombstone_ids is None:
-                conn.exec_driver_sql("DELETE FROM sync_tombstones")
+                conn.exec_driver_sql(
+                    f"DELETE FROM sync_tombstones WHERE 1=1{keep}", keep_params
+                )
             elif tombstone_ids:
                 for table_name, local_id in tombstone_ids:
                     conn.exec_driver_sql(
                         "DELETE FROM sync_tombstones WHERE table_name = ? AND local_id = ?",
                         (table_name, str(local_id)),
                     )
-        remaining = conn.exec_driver_sql("SELECT COUNT(*) FROM sync_outbox").scalar() or 0
+        clause, clause_params = _unsendable_clause()
+        remaining = conn.exec_driver_sql(
+            f"SELECT COUNT(*) FROM sync_outbox{clause}", clause_params
+        ).scalar() or 0
         if _has_table(conn, "sync_tombstones"):
-            remaining += conn.exec_driver_sql("SELECT COUNT(*) FROM sync_tombstones").scalar() or 0
+            remaining += conn.exec_driver_sql(
+                f"SELECT COUNT(*) FROM sync_tombstones{clause}", clause_params
+            ).scalar() or 0
         _sync_state_set(conn, "last_push_at", now)
         _sync_state_set(conn, "last_dirty_at", "" if not remaining else now)
         _sync_state_set(conn, "pending_change_count", str(remaining))
@@ -3112,6 +3139,44 @@ def get_ledger_baseline():
     ))
 
 
+# Tables the connected server build will not accept (its API is older than
+# this desktop). Their queued rows stay in the outbox so nothing is lost, but
+# they must not count as outstanding work: otherwise the sync worker would spin
+# on rows it can never deliver, and no "sent to the server" notice would ever
+# close. Held per process, so an upgraded server is picked up on the next start.
+_UNSENDABLE_TABLES = set()
+_UNSENDABLE_LOCK = threading.Lock()
+
+
+def set_unsendable_tables(tables):
+    with _UNSENDABLE_LOCK:
+        before = set(_UNSENDABLE_TABLES)
+        _UNSENDABLE_TABLES.update(str(name) for name in (tables or ()) if name)
+        changed = _UNSENDABLE_TABLES != before
+        current = sorted(_UNSENDABLE_TABLES)
+    if changed:
+        try:
+            with _get_engine().begin() as conn:
+                _sync_state_set(conn, "unsendable_tables", ",".join(current))
+        except Exception:
+            pass
+    return changed
+
+
+def get_unsendable_tables():
+    with _UNSENDABLE_LOCK:
+        return set(_UNSENDABLE_TABLES)
+
+
+def _unsendable_clause(column="table_name"):
+    """SQL fragment and parameters that leave undeliverable rows out."""
+    tables = sorted(get_unsendable_tables())
+    if not tables:
+        return "", ()
+    placeholders = ", ".join("?" for _ in tables)
+    return f" WHERE {column} NOT IN ({placeholders})", tuple(tables)
+
+
 def count_pending_sync_rows():
     """How many rows are actually queued to go out.
 
@@ -3122,9 +3187,12 @@ def count_pending_sync_rows():
     """
     with _get_engine().begin() as conn:
         _ensure_sync_outbox_table(conn)
-        total = conn.exec_driver_sql("SELECT COUNT(*) FROM sync_outbox").scalar() or 0
+        clause, params = _unsendable_clause()
+        total = conn.exec_driver_sql(f"SELECT COUNT(*) FROM sync_outbox{clause}", params).scalar() or 0
         if _has_table(conn, "sync_tombstones"):
-            total += conn.exec_driver_sql("SELECT COUNT(*) FROM sync_tombstones").scalar() or 0
+            total += conn.exec_driver_sql(
+                f"SELECT COUNT(*) FROM sync_tombstones{clause}", params
+            ).scalar() or 0
     return int(total)
 
 
@@ -3501,6 +3569,48 @@ def clear_sync_outbox():
         _sync_state_set(conn, "pending_change_count", "0")
 
 
+# Nothing in the shop can be priced without these, so they are re-created
+# wherever a synced table is emptied - not only on a fresh database.
+DEFAULT_CURRENCIES = (
+    ("UZS", "O'zbek so'mi", 1, 1),
+    ("USD", "AQSh dollari", 12500, 0),
+    ("EUR", "Yevro", 13500, 0),
+)
+
+
+def ensure_reference_rows():
+    """Put back the rows the shop cannot work without.
+
+    A server purge - and the wholesale "download the server copy" - empties
+    every synchronised table, currencies included, and nothing re-created them.
+    Every currency picker in the application then came back empty and every
+    price fell back to a rate of 1.
+
+    Re-seeding is safe to repeat: the row id is derived from the currency code,
+    so every device lands on the same row instead of inventing its own, and an
+    edited rate that arrives later simply overwrites this default.
+    """
+    created = 0
+    _sync_suspend_token = suspend_sync()
+    _sync_suspend_token.__enter__()
+    try:
+        with session_scope() as session:
+            for code, name, rate, is_base in DEFAULT_CURRENCIES:
+                if session.scalar(select(Currency).where(Currency.code == code)):
+                    continue
+                session.add(Currency(
+                    id=stable_row_id("currencies", code),
+                    code=code,
+                    name=name,
+                    rate_to_uzs=rate,
+                    is_base=is_base,
+                ))
+                created += 1
+    finally:
+        _sync_suspend_token.__exit__(None, None, None)
+    return created
+
+
 def wipe_sync_tables():
     """Empty every synced table, keeping the signed-in account's own user row.
 
@@ -3586,6 +3696,9 @@ def apply_remote_purge(purge_generation, server_generation=None):
         _sync_state_set(conn, "pending_change_count", "0")
         _sync_state_set(conn, "server_bootstrap_required", "0")
         _sync_state_set(conn, "server_reseed_required", "0")
+    # The purge took the currency list with it; without this the price fields
+    # open empty on every device that applies the marker.
+    ensure_reference_rows()
     return Row(
         applied=True,
         purge_generation=purge_generation,
@@ -3598,6 +3711,7 @@ def replace_local_from_records(records):
     """Anki-style "download from server": local content is replaced wholesale."""
     wipe_sync_tables()
     imported = import_sync_records(records)
+    ensure_reference_rows()
     with _get_engine().begin() as conn:
         _sync_state_set(conn, "last_dirty_at", "")
         _sync_state_set(conn, "pending_change_count", "0")

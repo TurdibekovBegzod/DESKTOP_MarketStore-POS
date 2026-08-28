@@ -1292,6 +1292,47 @@ class ProductsWidget(QWidget):
         self._theme = {}
         self._build_ui()
 
+    def _begin_creation_notice(self, kind, language):
+        window = self.window()
+        begin = getattr(window, "begin_server_operation", None)
+        if not callable(begin):
+            return window, None
+        if kind == "section":
+            operation = begin(
+                t("Bo'lim yaratilmoqda...", language),
+                t("Bo'lim serverda saqlandi.", language),
+                t("Bo'limni serverga saqlab bo'lmadi.", language),
+                pending_title=t("Serverga yuborilmoqda", language),
+                success_title=t("Serverda saqlandi", language),
+                failure_title=t("Xatolik", language),
+                actions=("section_added",),
+                tables=("product_sections",),
+            )
+        else:
+            operation = begin(
+                t("Mahsulot yaratilmoqda...", language),
+                t("Mahsulot serverda saqlandi.", language),
+                t("Mahsulotni serverga saqlab bo'lmadi.", language),
+                pending_title=t("Serverga yuborilmoqda", language),
+                success_title=t("Serverda saqlandi", language),
+                failure_title=t("Xatolik", language),
+                actions=("product_added",),
+                tables=("products", "product_attributes", "stock_movements"),
+            )
+        return window, operation
+
+    @staticmethod
+    def _commit_creation_notice(window, operation):
+        commit = getattr(window, "commit_server_operation", None)
+        if operation is not None and callable(commit):
+            commit(operation)
+
+    @staticmethod
+    def _fail_creation_notice(window, operation, error):
+        fail = getattr(window, "fail_server_operation", None)
+        if operation is not None and callable(fail):
+            fail(operation, error)
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._fit_empty_state_panel()
@@ -1842,10 +1883,13 @@ class ProductsWidget(QWidget):
         language = self.property("app_language") or "uz"
         dlg = ProductSectionDialog(self)
         if dlg.exec():
+            window, operation = self._begin_creation_notice("section", language)
             try:
                 db.add_product_section(dlg.name_edit.text().strip())
+                self._commit_creation_notice(window, operation)
                 self._load_sections()
             except db.AppError as exc:
+                self._fail_creation_notice(window, operation, exc)
                 QMessageBox.warning(self, t("Saqlanmadi", language), t(str(exc), language))
 
     def _edit_section(self, section):
@@ -2664,15 +2708,18 @@ class ProductsWidget(QWidget):
             QMessageBox.warning(self, t("Xatolik", language), f"{t('Mahsulot oynasi ochilmadi:', language)}\n{exc}")
             return
         if dlg.exec():
+            window, operation = self._begin_creation_notice("product", language)
             try:
                 product_data = dlg.get_data()
                 product_data["created_by_user_id"] = _row_value(self.user, "id")
                 product_id = db.add_product(product_data)
                 db.save_product_attributes(product_id, dlg.get_attributes())
+                self._commit_creation_notice(window, operation)
                 self.load_data()
                 if dlg.print_barcode_check.isChecked():
                     self._print_product_barcode_by_id(product_id)
             except db.AppError as exc:
+                self._fail_creation_notice(window, operation, exc)
                 QMessageBox.warning(self, t("Saqlanmadi", language), t(str(exc), language))
 
     def _duplicate_product(self, row, table=None):
@@ -2695,15 +2742,18 @@ class ProductsWidget(QWidget):
             QMessageBox.warning(self, t("Xatolik", language), f"{t('Mahsulot oynasi ochilmadi:', language)}\n{exc}")
             return
         if dlg.exec():
+            window, operation = self._begin_creation_notice("product", language)
             try:
                 product_data = dlg.get_data()
                 product_data["created_by_user_id"] = _row_value(self.user, "id")
                 product_id = db.add_product(product_data)
                 db.save_product_attributes(product_id, dlg.get_attributes())
+                self._commit_creation_notice(window, operation)
                 self.load_data()
                 if dlg.print_barcode_check.isChecked():
                     self._print_product_barcode_by_id(product_id)
             except db.AppError as exc:
+                self._fail_creation_notice(window, operation, exc)
                 QMessageBox.warning(self, t("Saqlanmadi", language), t(str(exc), language))
 
     def _product_item(self, row, table=None):

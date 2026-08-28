@@ -46,12 +46,46 @@ class SyncConflictError(ApiClientError):
         self.expected_generation = expected_generation
 
 
+class UnsupportedSyncTableError(ApiClientError):
+    """The server build refuses one or more of the tables in this batch.
+
+    A desktop that ships a new table before the API is deployed used to lose
+    every push: FastAPI validates the whole request body, so one row from an
+    unknown table turned the entire batch - sales, products, everything - into
+    a 422. The tables are reported here so the caller can send what the server
+    does understand instead of nothing at all.
+    """
+
+    def __init__(self, message, tables=()):
+        super().__init__(message)
+        self.tables = {str(name) for name in tables if name}
+
+
 class RemotePurgeRequiredError(ApiClientError):
     """The server erased this account after the desktop's last sync."""
 
     def __init__(self, message, purge_generation=None):
         super().__init__(message)
         self.purge_generation = purge_generation
+
+
+def _unsupported_tables(detail):
+    """Table names a validation error singled out as unknown to this server."""
+    refused = set()
+    if not isinstance(detail, list):
+        return refused
+    for item in detail:
+        if not isinstance(item, dict):
+            continue
+        loc = item.get("loc") or []
+        if "table_name" not in [str(part) for part in loc]:
+            continue
+        if "unsupported sync table" not in str(item.get("msg") or "").lower():
+            continue
+        value = item.get("input")
+        if isinstance(value, str) and value:
+            refused.add(value)
+    return refused
 
 
 def _format_api_detail(detail):
@@ -147,6 +181,13 @@ def _single_request_json(path, payload=None, token=None, timeout=10, method=None
             raise ApiVerificationRequiredError(detail_text) from exc
         if exc.code in (401, 403):
             raise ApiAuthError(detail_text or "Email yoki parol noto'g'ri.") from exc
+        if exc.code == 422:
+            refused = _unsupported_tables(detail)
+            if refused:
+                raise UnsupportedSyncTableError(
+                    "Server bu jadvallarni qabul qilmaydi: " + ", ".join(sorted(refused)),
+                    tables=refused,
+                ) from exc
         if exc.code in (400, 422, 429):
             raise ApiClientError(detail_text or "So'rov qabul qilinmadi. Ma'lumotlarni tekshiring.") from exc
         if exc.code in _SERVER_UNAVAILABLE_CODES:

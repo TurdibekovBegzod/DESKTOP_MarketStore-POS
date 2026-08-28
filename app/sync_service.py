@@ -239,18 +239,40 @@ def push_local_changes(user, batch_size=1000, incremental=True, force=False, gua
     # server reported back. They differ once we start forcing.
     guard = expected
     seen = None
+    sent_count = 0
     try:
         for i in range(0, len(records), batch_size):
             chunk = records[i:i + batch_size]
-            result = api_client.push_sync_records(
-                token,
-                chunk,
-                device_key=device_key,
-                note=f"desktop snapshot ({i + len(chunk)}/{len(records)})",
-                timeout=60,
-                expected_generation=guard,
-                applied_purge_generation=db.get_applied_purge_generation(),
-            )
+            try:
+                result = api_client.push_sync_records(
+                    token,
+                    chunk,
+                    device_key=device_key,
+                    note=f"desktop snapshot ({i + len(chunk)}/{len(records)})",
+                    timeout=60,
+                    expected_generation=guard,
+                    applied_purge_generation=db.get_applied_purge_generation(),
+                )
+            except api_client.UnsupportedSyncTableError as exc:
+                # This server is older than this desktop. One row from a table
+                # it has never heard of makes it refuse the whole batch, which
+                # is how a sale, a product and a section all stop travelling at
+                # once. Remember the refused tables, keep their rows queued, and
+                # deliver everything else now.
+                db.set_unsendable_tables(exc.tables)
+                chunk = [row for row in chunk if row.get("table_name") not in exc.tables]
+                if not chunk:
+                    continue
+                result = api_client.push_sync_records(
+                    token,
+                    chunk,
+                    device_key=device_key,
+                    note=f"desktop snapshot ({i + len(chunk)}/{len(records)})",
+                    timeout=60,
+                    expected_generation=guard,
+                    applied_purge_generation=db.get_applied_purge_generation(),
+                )
+            sent_count += len(chunk)
             total_saved += result.get("saved", 0)
             last_batch_id = result.get("batch_id")
             for row in result.get("rejected") or []:
@@ -294,7 +316,7 @@ def push_local_changes(user, batch_size=1000, incremental=True, force=False, gua
     if generation is not None:
         _apply_generation(generation)
     return {
-        "sent": len(records),
+        "sent": sent_count,
         "saved": total_saved,
         "batch_id": last_batch_id,
         "rejected": rejected,

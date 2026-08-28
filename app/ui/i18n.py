@@ -832,6 +832,28 @@ TRANSLATIONS["ru"].update({
     "Boshlang'ich qarz:": "Начальный долг:",
 })
 
+TRANSLATIONS["en"].update({
+    "Serverga yuborilmoqda": "Sending to server",
+    "Serverda saqlandi": "Saved on server",
+    "Mahsulot yaratilmoqda...": "Creating product...",
+    "Mahsulot serverda saqlandi.": "Product saved on the server.",
+    "Mahsulotni serverga saqlab bo'lmadi.": "The product could not be saved on the server.",
+    "Bo'lim yaratilmoqda...": "Creating section...",
+    "Bo'lim serverda saqlandi.": "Section saved on the server.",
+    "Bo'limni serverga saqlab bo'lmadi.": "The section could not be saved on the server.",
+})
+
+TRANSLATIONS["ru"].update({
+    "Serverga yuborilmoqda": "Отправка на сервер",
+    "Serverda saqlandi": "Сохранено на сервере",
+    "Mahsulot yaratilmoqda...": "Создание товара...",
+    "Mahsulot serverda saqlandi.": "Товар сохранён на сервере.",
+    "Mahsulotni serverga saqlab bo'lmadi.": "Не удалось сохранить товар на сервере.",
+    "Bo'lim yaratilmoqda...": "Создание раздела...",
+    "Bo'lim serverda saqlandi.": "Раздел сохранён на сервере.",
+    "Bo'limni serverga saqlab bo'lmadi.": "Не удалось сохранить раздел на сервере.",
+})
+
 
 def t(text, language="uz"):
     if language == "uz" or not text:

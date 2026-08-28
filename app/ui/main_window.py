@@ -971,6 +971,18 @@ class SyncDialog(QDialog):
         if health.get("last_error"):
             err_label = self.labels.get("sync_last_error", "Oxirgi xatolik")
             lines.append(f"{err_label}: {health['last_error_at']}\n{health['last_error']}")
+        try:
+            refused = sorted(db.get_unsendable_tables())
+        except Exception:
+            refused = []
+        if refused:
+            lines.append(
+                self.labels.get(
+                    "sync_unsupported_tables",
+                    "Serverdagi API eskiroq: quyidagi jadvallar yuborilmayapti - "
+                    "{tables}. Ular navbatda turibdi, server yangilangach o'z-o'zidan ketadi.",
+                ).replace("{tables}", ", ".join(refused))
+            )
         self.quarantine_lbl.setText("\n\n".join(lines))
 
     def _replace_server(self):
@@ -1038,49 +1050,22 @@ class ToastItem(QFrame):
     def __init__(self, message, title=None, level="success", duration_ms=4000, on_dismiss=None, parent=None):
         super().__init__(parent)
         self.on_dismiss = on_dismiss
+        self.dismissed = False
         self.setObjectName("toastItem")
         self.setFixedWidth(self.WIDTH)
-
-        if level == "success":
-            border_color = "#10b981"
-            icon_text = "\u2705"
-            default_title = "Muvaffaqiyatli"
-        elif level == "error":
-            border_color = "#ef4444"
-            icon_text = "\u26a0\ufe0f"
-            default_title = "Xatolik"
-        elif level == "warning":
-            border_color = "#f59e0b"
-            icon_text = "\u26a0\ufe0f"
-            default_title = "Ogohlantirish"
-        else:
-            border_color = "#3b82f6"
-            icon_text = "\u2139\ufe0f"
-            default_title = "Ma'lumot"
-
-        self.setStyleSheet(f"""
-            QFrame#toastItem {{
-                background: #ffffff;
-                border: 1px solid #e2e8f0;
-                border-left: 5px solid {border_color};
-                border-radius: 8px;
-            }}
-            QLabel {{
-                border: none;
-                background: transparent;
-            }}
-        """)
+        config = self._level_config(level)
+        self._apply_level(level)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(10)
         layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
 
-        icon_lbl = QLabel(icon_text)
-        icon_lbl.setFixedWidth(26)
-        icon_lbl.setStyleSheet("font-size: 18px; border: none; background: transparent;")
-        icon_lbl.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
-        layout.addWidget(icon_lbl, 0, Qt.AlignmentFlag.AlignTop)
+        self.icon_lbl = QLabel(config["icon"])
+        self.icon_lbl.setFixedWidth(26)
+        self.icon_lbl.setStyleSheet("font-size: 18px; border: none; background: transparent;")
+        self.icon_lbl.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+        layout.addWidget(self.icon_lbl, 0, Qt.AlignmentFlag.AlignTop)
 
         content_lay = QVBoxLayout()
         content_lay.setSpacing(3)
@@ -1088,7 +1073,7 @@ class ToastItem(QFrame):
 
         text_width = self.WIDTH - self._SIDE_CHROME
 
-        self.title_lbl = QLabel(self._clean(title or default_title))
+        self.title_lbl = QLabel(self._clean(title or config["title"]))
         title_font = QFont(self.font())
         title_font.setPixelSize(13)
         title_font.setBold(True)
@@ -1147,6 +1132,66 @@ class ToastItem(QFrame):
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self.dismiss)
         self._timer.start(max(1200, int(duration_ms)))
+
+    @staticmethod
+    def _level_config(level):
+        return {
+            "success": {
+                "border": "#10b981", "background": "#ecfdf5",
+                "icon": "\u2705", "title": "Muvaffaqiyatli",
+            },
+            "error": {
+                "border": "#ef4444", "background": "#fef2f2",
+                "icon": "\u26a0\ufe0f", "title": "Xatolik",
+            },
+            "warning": {
+                "border": "#f59e0b", "background": "#fffbeb",
+                "icon": "\u23f3", "title": "Yuborilmoqda",
+            },
+            "info": {
+                "border": "#3b82f6", "background": "#eff6ff",
+                "icon": "\u2139\ufe0f", "title": "Ma'lumot",
+            },
+        }.get(level, {
+            "border": "#3b82f6", "background": "#eff6ff",
+            "icon": "\u2139\ufe0f", "title": "Ma'lumot",
+        })
+
+    def _apply_level(self, level):
+        config = self._level_config(level)
+        self.setStyleSheet(f"""
+            QFrame#toastItem {{
+                background: {config['background']};
+                border: 1px solid {config['border']};
+                border-left: 5px solid {config['border']};
+                border-radius: 8px;
+            }}
+            QLabel {{
+                border: none;
+                background: transparent;
+            }}
+        """)
+        if hasattr(self, "icon_lbl"):
+            self.icon_lbl.setText(config["icon"])
+        return config
+
+    def update_content(self, message, title=None, level="success", duration_ms=4000):
+        """Turn one in-flight notification into its final server result."""
+        if self.dismissed:
+            return
+        config = self._apply_level(level)
+        self.title_lbl.setText(self._clean(title or config["title"]))
+        self.title_lbl.setFixedHeight(self._wrapped_height(self.title_lbl, self.title_lbl.width()))
+        full_message = self._clean(message)
+        shown_message = self._fit_message(full_message, self.msg_lbl.width(), self.msg_lbl.font())
+        self.msg_lbl.setText(shown_message)
+        self.msg_lbl.setToolTip(full_message if shown_message != full_message else "")
+        self.msg_lbl.setFixedHeight(self._wrapped_height(self.msg_lbl, self.msg_lbl.width()))
+        self.setFixedHeight(12 + self.title_lbl.height() + 3 + self.msg_lbl.height() + 12)
+        self._timer.start(max(1200, int(duration_ms)))
+        manager = self.parent()
+        if manager is not None and hasattr(manager, "_resize_to_content"):
+            manager._resize_to_content()
 
     @staticmethod
     def _clean(text):
@@ -1211,6 +1256,7 @@ class ToastItem(QFrame):
         return " ".join(pieces).replace(" \u200b ", "\n")
 
     def dismiss(self):
+        self.dismissed = True
         self._timer.stop()
         if self.on_dismiss:
             self.on_dismiss(self)
@@ -1252,6 +1298,7 @@ class ToastManager(QWidget):
         self._resize_to_content()
         self.show()
         self.raise_()
+        return item
 
     def _items(self):
         return [
@@ -1335,6 +1382,7 @@ class MainWindow(QMainWindow):
         self._sync_thread = None
         self._sync_worker = None
         self._pending_page_refresh = None
+        self._pending_server_operations = []
         self._engine_state = "idle"
         # None = not attempted yet, so the tooltip does not accuse the link of
         # being down during the first second of startup.
@@ -1364,6 +1412,12 @@ class MainWindow(QMainWindow):
         self.activity_signal.emit(action, title, message, level, target, badge)
 
     def _handle_activity_toast(self, action, title, message, level, target, badge):
+        if any(
+            action in operation.get("actions", ())
+            for operation in self._pending_server_operations
+        ):
+            self._refresh_notif_badge()
+            return
         self.show_toast(message, title=title, level=level, duration_ms=4000)
         self._refresh_notif_badge()
 
@@ -1375,7 +1429,109 @@ class MainWindow(QMainWindow):
 
     def show_toast(self, message, title=None, level="success", duration_ms=4000):
         if hasattr(self, "toast_manager"):
-            self.toast_manager.show_toast(message, title=title, level=level, duration_ms=duration_ms)
+            return self.toast_manager.show_toast(
+                message, title=title, level=level, duration_ms=duration_ms
+            )
+        return None
+
+    def begin_server_operation(
+        self,
+        pending_message,
+        success_message,
+        failure_message,
+        *,
+        pending_title=None,
+        success_title=None,
+        failure_title=None,
+        actions=(),
+        tables=(),
+    ):
+        """Show one durable toast until the server accepts the local write."""
+        operation = {
+            "toast": self.show_toast(
+                pending_message,
+                title=pending_title,
+                level="warning",
+                duration_ms=60 * 60 * 1000,
+            ),
+            "success_message": success_message,
+            "failure_message": failure_message,
+            "success_title": success_title,
+            "failure_title": failure_title,
+            "actions": set(actions or ()),
+            "tables": set(tables or ()),
+            "committed": False,
+        }
+        self._pending_server_operations.append(operation)
+        return operation
+
+    def commit_server_operation(self, operation):
+        if operation not in self._pending_server_operations:
+            return
+        operation["committed"] = True
+        self._engine_state = "syncing"
+        worker = self._engine_worker
+        if worker is not None:
+            worker.request_turn()
+        self._refresh_sync_status()
+
+    def fail_server_operation(self, operation, error=None):
+        if operation not in self._pending_server_operations:
+            return
+        toast = operation.get("toast")
+        if toast is not None:
+            try:
+                message = operation.get("failure_message") or str(error or "")
+                toast.update_content(
+                    message,
+                    title=operation.get("failure_title"),
+                    level="error",
+                    duration_ms=7000,
+                )
+            except RuntimeError:
+                pass
+        self._pending_server_operations.remove(operation)
+
+    def _settle_server_operations(self, outcome=None):
+        committed = [
+            operation
+            for operation in self._pending_server_operations
+            if operation.get("committed")
+        ]
+        if not committed:
+            return
+
+        rejected_tables = {
+            row.get("table_name")
+            for row in (outcome or {}).get("rejected", ())
+            if row.get("table_name")
+        }
+        for operation in list(committed):
+            if rejected_tables.intersection(operation.get("tables", ())):
+                self.fail_server_operation(operation)
+
+        committed = [
+            operation
+            for operation in self._pending_server_operations
+            if operation.get("committed")
+        ]
+        if not committed or db.count_pending_sync_rows() > 0:
+            return
+
+        for operation in committed:
+            operation["retrying"] = False
+            toast = operation.get("toast")
+            if toast is not None:
+                try:
+                    toast.update_content(
+                        operation.get("success_message") or "",
+                        title=operation.get("success_title"),
+                        level="success",
+                        duration_ms=4500,
+                    )
+                except RuntimeError:
+                    pass
+            self._pending_server_operations.remove(operation)
 
     def eventFilter(self, obj, event):
         if event.type() in self._activity_event_types:
@@ -1387,11 +1543,29 @@ class MainWindow(QMainWindow):
             self._save_user_activity(force=True)
         self._stop_realtime_listener()
         self._stop_sync_engine()
+        self._flush_pending_before_close()
         db.unregister_activity_listener(self._on_database_activity)
         app = QApplication.instance()
         if app:
             app.removeEventFilter(self)
         super().closeEvent(event)
+
+    def _flush_pending_before_close(self):
+        if not self._sync_available():
+            return
+        if not any(
+            operation.get("committed")
+            for operation in self._pending_server_operations
+        ):
+            return
+        try:
+            if db.count_pending_sync_rows() <= 0:
+                return
+            outcome = sync_service.auto_sync_turn(self.user)
+            db.record_sync_success(outcome)
+            self._settle_server_operations(outcome)
+        except Exception as exc:
+            db.record_sync_failure(exc)
 
     def _save_user_activity(self, force=False):
         now = datetime.now()
@@ -1855,15 +2029,19 @@ class MainWindow(QMainWindow):
         if self._realtime_online is False:
             offline_note = self.labels.get("sync_offline_stream", "Realtime aloqa uzildi")
             text = f"{text} - {offline_note}"
-        if not self._is_online():
-            state = "offline"
+        if not self._is_online() or self._engine_state == "offline":
+            # The live stream being up says the tunnel is open, not that this
+            # device's work is landing. A failing upload must not read "Onlayn".
+            visual_state = "offline"
             self.sync_btn.setText(self.labels.get("sync_offline", "Offline"))
         elif self._engine_state == "syncing":
+            visual_state = "working"
             self.sync_btn.setText(self.labels.get("sync_working", "Yangilanmoqda"))
         else:
+            visual_state = "online"
             self.sync_btn.setText(self.labels.get("sync_online", "Onlayn"))
         self.sync_btn.setToolTip(text)
-        self._apply_sync_card_state(state)
+        self._apply_sync_card_state(visual_state)
         self._update_sync_badge(pending_count, remote_pending=remote_pending)
 
     def _update_sync_badge(self, _count=0, remote_pending=False):
@@ -1879,6 +2057,8 @@ class MainWindow(QMainWindow):
 
     def _apply_sync_card_state(self, state):
         palette = {
+            "online": {"bg": "#dcfce7", "border": "#22c55e", "text": "#166534"},
+            "working": {"bg": "#fef3c7", "border": "#f59e0b", "text": "#92400e"},
             "dirty": {"bg": "#fef3c7", "border": "#f59e0b", "text": "#92400e"},
             "clean": {"bg": "#dcfce7", "border": "#22c55e", "text": "#166534"},
             "remote": {"bg": "#dbeafe", "border": "#3b82f6", "text": "#1e40af"},
@@ -2185,6 +2365,8 @@ class MainWindow(QMainWindow):
         self._engine_worker.moveToThread(self._engine_thread)
         self._engine_thread.started.connect(self._engine_worker.start)
         self._engine_worker.applied.connect(self._on_sync_applied)
+        self._engine_worker.turn_finished.connect(self._on_sync_turn_finished)
+        self._engine_worker.turn_failed.connect(self._on_sync_turn_failed)
         self._engine_worker.state_changed.connect(self._on_sync_engine_state)
         # A sale, an expense, a debt: the moment it is written here, the other
         # devices should be hearing about it.
@@ -2211,10 +2393,46 @@ class MainWindow(QMainWindow):
             thread.wait(4000)
 
     @pyqtSlot(dict)
+    def _on_sync_turn_finished(self, outcome):
+        """Every completed exchange, even an empty one.
+
+        A write that reached the server during a turn which downloaded nothing
+        used to leave its "sending to the server" notice on screen for an hour,
+        because only a turn that moved data said anything at all.
+        """
+        self._settle_server_operations(outcome)
+        self._refresh_sync_status()
+
+    @pyqtSlot(str)
+    def _on_sync_turn_failed(self, message):
+        """Tell the person the upload did not go through, instead of waiting."""
+        for operation in self._pending_server_operations:
+            if not operation.get("committed") or operation.get("retrying"):
+                continue
+            toast = operation.get("toast")
+            if toast is None:
+                continue
+            try:
+                toast.update_content(
+                    self.labels.get(
+                        "sync_retry_pending",
+                        "Serverga yuborilmadi - qayta urinilmoqda. Ma'lumot shu qurilmada saqlangan.",
+                    ),
+                    title=operation.get("failure_title"),
+                    level="warning",
+                    duration_ms=60 * 60 * 1000,
+                )
+                operation["retrying"] = True
+            except RuntimeError:
+                pass
+        self._refresh_sync_status()
+
+    @pyqtSlot(dict)
     def _on_sync_applied(self, outcome):
         # The data on screen just moved underneath the person looking at it,
         # so the page is reloaded rather than left showing yesterday's figures.
         self._reload_current_page(outcome.get("tables") or ())
+        self._settle_server_operations(outcome)
         self._refresh_sync_status()
         refused = outcome.get("rejected") or []
         if refused:
