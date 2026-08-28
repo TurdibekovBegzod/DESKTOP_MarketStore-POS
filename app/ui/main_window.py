@@ -1339,8 +1339,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._start_clock()
         self._save_user_activity(force=True)
-        self._start_realtime_listener()
-        self._start_sync_engine()
+        self._start_live_sync()
         # Money is only written where every device can see it.
         db.set_online_check(self._is_online)
         # Every entry in the activity log carries who made it, so the other
@@ -2111,6 +2110,11 @@ class MainWindow(QMainWindow):
     # Realtime change stream
     # ------------------------------------------------------------------
 
+    def _start_live_sync(self):
+        """Start the consumer before the event source can deliver catch-up work."""
+        self._start_sync_engine()
+        self._start_realtime_listener()
+
     def _realtime_token(self):
         return self.user.get("api_access_token") or db.get_user_api_token(self.user.get("id"))
 
@@ -2143,6 +2147,14 @@ class MainWindow(QMainWindow):
         # devices should be hearing about it.
         db.add_change_listener(self._engine_worker.notify_local_change)
         self._engine_thread.start()
+        # A very fast SSE hello may have been handled during startup before an
+        # older build created the worker. Preserve that durable marker as a
+        # recovery path instead of waiting for another server-side change.
+        try:
+            if db.get_remote_change().get("pending"):
+                self._engine_worker.request_turn()
+        except Exception:
+            pass
 
     def _stop_sync_engine(self):
         worker, thread = self._engine_worker, self._engine_thread

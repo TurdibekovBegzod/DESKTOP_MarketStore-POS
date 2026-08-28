@@ -39,6 +39,20 @@ class _WindowStub:
 
 
 class EventDrivenSyncTest(unittest.TestCase):
+    def test_sync_engine_starts_before_realtime_listener(self):
+        calls = []
+
+        class Window:
+            def _start_sync_engine(self):
+                calls.append("engine")
+
+            def _start_realtime_listener(self):
+                calls.append("listener")
+
+        MainWindow._start_live_sync(Window())
+
+        self.assertEqual(calls, ["engine", "listener"])
+
     def test_a_copied_device_key_cannot_hide_newer_server_data(self):
         window = _WindowStub()
         payload = {
