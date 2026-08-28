@@ -47,6 +47,22 @@ class ApiClientPaginationTest(unittest.TestCase):
         self.assertIn("offset=1", request.call_args_list[1].args[0])
         self.assertIn("table_name=sale+items", request.call_args_list[0].args[0])
 
+    def test_pull_filters_several_tables_in_one_bounded_request(self):
+        with patch(
+            "api_client._request_json",
+            return_value={"records": [], "has_more": False, "generation": 7},
+        ) as request:
+            api_client.pull_sync_records(
+                "token",
+                since_seq=4,
+                table_names=["products", "sales", "products"],
+            )
+
+        path = request.call_args.args[0]
+        self.assertIn("tables=products%2Csales", path)
+        self.assertIn("since_seq=4", path)
+        self.assertIn("limit=500", path)
+
 
 if __name__ == "__main__":
     unittest.main()

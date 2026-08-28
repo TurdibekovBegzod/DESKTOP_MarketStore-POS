@@ -798,6 +798,8 @@ class SyncWorker(QObject):
                 res = sync_service.force_upload(self.user)
             elif self.action == "state":
                 res = sync_service.describe_sync(self.user)
+            elif isinstance(self.action, str) and self.action.startswith("page:"):
+                res = sync_service.refresh_page_data(self.user, self.action.split(":", 1)[1])
             else:
                 res = sync_service.synchronize_account_storage(self.user)
             payload = dict(res or {})
@@ -876,17 +878,18 @@ class SyncDialog(QDialog):
         self.adopt_btn = None
         if (getattr(self.parent_window, "user", {}) or {}).get("role") != "admin":
             return
-        self.replace_btn = QPushButton(
-            self.labels.get("sync_replace_server", "Serverni shu qurilmadagiga almashtirish")
-        )
-        self.replace_btn.setObjectName("danger_clear_sync")
-        self.replace_btn.setStyleSheet(
-            "QPushButton{background:#fef2f2;color:#b91c1c;border:1px solid #fecaca;"
-            "border-radius:7px;padding:8px 14px;font-size:12px;}"
-            "QPushButton:hover{background:#fee2e2;border-color:#f87171;}"
-        )
-        self.replace_btn.clicked.connect(self._replace_server)
-        layout.addWidget(self.replace_btn)
+        if not db.is_remote_session_cache():
+            self.replace_btn = QPushButton(
+                self.labels.get("sync_replace_server", "Serverni shu qurilmadagiga almashtirish")
+            )
+            self.replace_btn.setObjectName("danger_clear_sync")
+            self.replace_btn.setStyleSheet(
+                "QPushButton{background:#fef2f2;color:#b91c1c;border:1px solid #fecaca;"
+                "border-radius:7px;padding:8px 14px;font-size:12px;}"
+                "QPushButton:hover{background:#fee2e2;border-color:#f87171;}"
+            )
+            self.replace_btn.clicked.connect(self._replace_server)
+            layout.addWidget(self.replace_btn)
 
         # The mirror action. A device that was switched off for a while keeps
         # rows the others deleted, and a deletion it never heard about cannot
@@ -974,6 +977,8 @@ class SyncDialog(QDialog):
         if not self.parent_window:
             return
         if (self.parent_window.user or {}).get("role") != "admin":
+            return
+        if db.is_remote_session_cache():
             return
         local_records = db.get_sync_status().get("record_count", 0)
         question = self.labels.get(
@@ -1327,6 +1332,9 @@ class MainWindow(QMainWindow):
         self._realtime_worker = None
         self._engine_thread = None
         self._engine_worker = None
+        self._sync_thread = None
+        self._sync_worker = None
+        self._pending_page_refresh = None
         self._engine_state = "idle"
         # None = not attempted yet, so the tooltip does not accuse the link of
         # being down during the first second of startup.
@@ -1780,6 +1788,7 @@ class MainWindow(QMainWindow):
 
         if hasattr(page, "load_data"):
             page.load_data()
+        self._refresh_page_from_server(key)
         set_language(page, self.settings.get("language", "uz"))
         self._apply_page_theme()
         self._refresh_notif_badge()
@@ -1898,6 +1907,33 @@ class MainWindow(QMainWindow):
             refresh(changed_tables or ())
         elif hasattr(current_page, "load_data"):
             current_page.load_data()
+
+    def _refresh_page_from_server(self, key):
+        if (
+            self._engine_worker is None
+            or not self._sync_available()
+            or key not in sync_service.PAGE_DATA_TABLES
+        ):
+            return
+        if self._sync_busy():
+            self._pending_page_refresh = key
+            return
+        self._pending_page_refresh = None
+        self._start_sync_worker(
+            f"page:{key}",
+            lambda result, page_key=key: self._on_page_refresh(page_key, result),
+            show_message=False,
+            handle_conflict=False,
+        )
+
+    def _on_page_refresh(self, key, result):
+        self._cleanup_sync_thread()
+        if self.pages.get(key) is self.stack.currentWidget():
+            self._reload_current_page(result.get("tables") or ())
+        pending = self._pending_page_refresh
+        self._pending_page_refresh = None
+        if pending and pending != key:
+            self._refresh_page_from_server(pending)
 
     def _auto_pull_from_server(self):
         if not self._sync_available():
@@ -2114,6 +2150,13 @@ class MainWindow(QMainWindow):
         """Start the consumer before the event source can deliver catch-up work."""
         self._start_sync_engine()
         self._start_realtime_listener()
+        if not hasattr(self, "stack") or not hasattr(self, "pages"):
+            return
+        current = self.stack.currentWidget()
+        for key, page in self.pages.items():
+            if page is current:
+                QTimer.singleShot(0, lambda page_key=key: self._refresh_page_from_server(page_key))
+                break
 
     def _realtime_token(self):
         return self.user.get("api_access_token") or db.get_user_api_token(self.user.get("id"))

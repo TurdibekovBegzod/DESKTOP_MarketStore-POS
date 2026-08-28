@@ -225,6 +225,17 @@ def _record_version(db: Session, user: User, record: RecordIn) -> int | None:
     )
 
 
+def _parse_requested_tables(table_name: str | None, tables: str | None) -> list[str]:
+    requested = list(dict.fromkeys(name.strip() for name in (tables or "").split(",") if name.strip()))
+    if table_name and requested:
+        raise HTTPException(status_code=422, detail="Use table_name or tables, not both")
+    selected = [table_name] if table_name else requested
+    unsupported = [name for name in selected if name not in ALLOWED_SYNC_TABLES]
+    if unsupported:
+        raise HTTPException(status_code=422, detail=f"Unsupported sync tables: {', '.join(unsupported)}")
+    return selected
+
+
 @router.post("/push", response_model=PushResponse)
 def push(payload: PushRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     _assert_purge_generation(db, current_user, payload.applied_purge_generation)
@@ -309,6 +320,7 @@ def pull(
     since: datetime | None = Query(default=None),
     since_seq: int | None = Query(default=None, ge=0),
     table_name: str | None = Query(default=None),
+    tables: str | None = Query(default=None, max_length=1000),
     include_deleted: bool = True,
     limit: int | None = Query(default=None, ge=1, le=5000),
     offset: int = Query(default=0, ge=0),
@@ -326,8 +338,11 @@ def pull(
         stmt = stmt.where(UserRecord.change_seq > since_seq)
     elif since is not None:
         stmt = stmt.where(UserRecord.updated_at > since)
-    if table_name:
-        stmt = stmt.where(UserRecord.table_name == table_name)
+    requested_tables = _parse_requested_tables(table_name, tables)
+    if len(requested_tables) == 1:
+        stmt = stmt.where(UserRecord.table_name == requested_tables[0])
+    elif requested_tables:
+        stmt = stmt.where(UserRecord.table_name.in_(requested_tables))
     if not include_deleted:
         stmt = stmt.where(UserRecord.deleted_at.is_(None))
     ordered = stmt.order_by(UserRecord.change_seq, UserRecord.id).offset(offset)

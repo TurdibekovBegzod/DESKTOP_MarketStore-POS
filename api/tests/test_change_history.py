@@ -20,8 +20,10 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy.dialects import postgresql
 
 from app.models import UserRecord
-from app.routers.sync import _upsert_record
-from app.schemas import PullResponse, RecordIn, RecordOut, SyncStateOut
+from fastapi import HTTPException
+
+from app.routers.sync import _parse_requested_tables, _upsert_record
+from app.schemas import ALLOWED_SYNC_TABLES, PullResponse, RecordIn, RecordOut, SyncStateOut
 
 
 class _FakeResult:
@@ -136,6 +138,27 @@ class AnswerShapeTest(unittest.TestCase):
 
     def test_the_stored_row_keeps_the_number(self):
         self.assertIn("change_seq", UserRecord.__table__.c)
+
+
+class PageTableFilterTest(unittest.TestCase):
+    def test_several_page_tables_are_deduplicated(self):
+        self.assertEqual(
+            _parse_requested_tables(None, "products,sales,products"),
+            ["products", "sales"],
+        )
+
+    def test_unknown_or_ambiguous_tables_are_refused(self):
+        with self.assertRaises(HTTPException):
+            _parse_requested_tables("products", "sales")
+        with self.assertRaises(HTTPException):
+            _parse_requested_tables(None, "products,not_a_table")
+
+    def test_server_accepts_every_desktop_business_table_added_recently(self):
+        for name in (
+            "login_logs", "sale_returns", "customer_debt_movements", "activity_logs",
+            "notification_reads",
+        ):
+            self.assertIn(name, ALLOWED_SYNC_TABLES)
 
 
 if __name__ == "__main__":

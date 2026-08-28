@@ -474,9 +474,13 @@ def pull_server_changes(user, table_name=None, incremental=False):
     since_seq = None
     since = None
     if incremental and table_name is None:
-        since_seq = db.get_pull_cursor() or None
-        if since_seq is None:
+        if db.is_pull_cursor_initialized():
+            since_seq = db.get_pull_cursor()
+        else:
             since = _overlapped_watermark(db.get_pull_watermark())
+    elif incremental and table_name is not None:
+        if db.is_table_pull_cursor_initialized(table_name):
+            since_seq = db.get_table_pull_cursor(table_name)
     result = api_client.pull_sync_records(
         token,
         since=since,
@@ -519,6 +523,16 @@ def pull_server_changes(user, table_name=None, incremental=False):
         # instead would stop every later download behind one bad row.
         db.set_pull_watermark(result.get("server_time"))
         _remember_cursor(result)
+        if not db.is_remote_session_cache() or not incremental:
+            # A full durable/local download has really seen every table. A
+            # server-mode incremental download has only seen rows changed
+            # after the global cursor, so untouched historical rows must still
+            # be fetched when their page is opened for the first time.
+            db.set_all_table_pull_cursors(int(result.get("generation") or 0))
+    else:
+        # A page-specific read has seen this table through the reported server
+        # generation. Later visits only ask for rows changed above that point.
+        db.set_table_pull_cursor(table_name, int(result.get("generation") or 0))
     return {
         "received": len(records),
         "imported": imported,
@@ -562,6 +576,7 @@ def force_download(user):
     _apply_generation(int(result.get("generation") or 0))
     db.set_pull_watermark(result.get("server_time"))
     _remember_cursor(result)
+    db.set_all_table_pull_cursors(int(result.get("generation") or 0))
     return {
         "direction": "download",
         "received": len(records),
@@ -574,6 +589,10 @@ def force_download(user):
 @_one_at_a_time
 def force_upload(user):
     """Overwrite the server with our copy (after backing the server copy up)."""
+    if db.is_remote_session_cache():
+        raise SyncError(
+            "Server-first rejimda vaqtinchalik kesh bilan server bazasini almashtirib bo'lmaydi."
+        )
     token = _token_for_user(user)
     state = get_server_state(user)
     if state.get("local_purge_applied"):
@@ -636,9 +655,99 @@ def refresh_account_assets(user):
     return pull_server_changes(user, table_name="account_assets")
 
 
+PAGE_DATA_TABLES = {
+    "startup": (
+        "users", "currencies", "app_settings", "account_assets", "debtors",
+        "activity_logs", "notification_reads",
+    ),
+    "sales": (
+        "users", "currencies", "product_sections", "suppliers", "categories",
+        "customers", "product_templates", "product_template_fields", "products",
+        "product_attributes",
+    ),
+    "products": (
+        "users", "currencies", "product_sections", "suppliers", "categories",
+        "customers", "product_templates", "product_template_fields", "products",
+        "product_attributes", "sales", "sale_items", "sale_returns", "stock_movements",
+    ),
+    "finalize_sales": ("users", "currencies", "products", "sales", "sale_items", "sale_returns"),
+    "reports": (
+        "users", "currencies", "product_sections", "products", "sales", "sale_items",
+        "sale_returns", "expense_categories", "expenses", "finance_manual_movements",
+    ),
+    "sales_details": (
+        "users", "currencies", "products", "sales", "sale_items", "sale_returns",
+        "expense_categories", "expenses",
+    ),
+    "finance": (
+        "currencies", "products", "sales", "sale_items", "sale_returns",
+        "expense_categories", "expenses", "finance_manual_movements",
+    ),
+    "supplier_debts": (
+        "users", "currencies", "suppliers", "customers", "supplier_debt_movements",
+        "debtors", "debtor_debt_movements", "customer_debt_movements",
+    ),
+    "expenses": ("users", "currencies", "expense_categories", "expenses"),
+    "users": ("users",),
+    "login_history": ("users", "login_logs"),
+    "checking": (
+        "product_sections", "product_templates", "products", "inventory_check_sessions",
+        "inventory_check_items",
+    ),
+}
+
+
+@_one_at_a_time
+def refresh_page_data(user, page_key):
+    """Fetch one page's server data in one paginated, compressed API stream."""
+    requested = PAGE_DATA_TABLES.get(str(page_key), ())
+    tables = [name for name in db.SYNC_TABLES if name in requested]
+    if not tables:
+        return {"received": 0, "imported": 0, "tables": []}
+    token = _token_for_user(user)
+    cursors = [db.get_table_pull_cursor(name) for name in tables]
+    initialized = all(db.is_table_pull_cursor_initialized(name) for name in tables)
+    since_seq = min(cursors) if cursors and initialized else None
+    result = api_client.pull_sync_records(
+        token,
+        since_seq=since_seq,
+        table_names=tables,
+        include_deleted=True,
+    )
+    purge = apply_server_control(result)
+    if purge.get("purged"):
+        return {"received": 0, "imported": 0, "tables": tables, "purged": True}
+    imported = db.import_sync_records(result.get("records", []))
+    generation = int(result.get("generation") or 0)
+    for table_name in tables:
+        db.set_table_pull_cursor(table_name, generation)
+    return {
+        "received": len(result.get("records", [])),
+        "imported": imported,
+        "tables": tables,
+        "generation": generation,
+    }
+
+
+def bootstrap_remote_session(user):
+    """Load only small global tables before opening the desktop window.
+
+    Historical business tables are intentionally not downloaded here. Their
+    own pages request them in one filtered stream when first opened.
+    """
+    result = refresh_page_data(user, "startup")
+    generation = int(result.get("generation") or 0)
+    db.mark_server_bootstrap_complete()
+    db.set_sync_generation(generation)
+    db.set_pull_cursor(generation)
+    return result
+
+
 def synchronize_account_storage(user):
     if db.is_server_reseed_required():
         return {"direction": "push", **push_local_changes(user, force=True)}
     if db.is_server_bootstrap_required():
+        if db.is_remote_session_cache():
+            return {"direction": "pull", **bootstrap_remote_session(user)}
         return {"direction": "pull", **pull_server_changes(user)}
     return {"direction": "none"}

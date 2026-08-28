@@ -1,4 +1,5 @@
 import base64
+import atexit
 import gzip
 import hashlib
 import json
@@ -8,6 +9,7 @@ import shutil
 import sqlite3
 import sys
 import threading
+import tempfile
 import uuid
 from contextlib import closing, contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
@@ -60,7 +62,15 @@ DATA_DIR = get_app_data_dir()
 LEGACY_DB_PATH = os.path.join(DATA_DIR, "market_pos.db")
 ACCOUNT_DB_ROOT = os.path.join(DATA_DIR, "accounts")
 ACCOUNT_SESSION_PATH = os.path.join(DATA_DIR, "account_session.json")
+LOCAL_PREFERENCES_PATH = os.path.join(DATA_DIR, "local_preferences.json")
 DB_PATH = LEGACY_DB_PATH
+
+# Business rows are a disposable session cache. PostgreSQL remains the durable
+# copy; a new process starts from the API again. Tests and explicit storage
+# roots keep their ordinary file databases so isolation fixtures stay useful.
+REMOTE_DATA_MODE = os.environ.get("MARKETSTORE_DATA_MODE", "server").strip().lower() != "local"
+_SESSION_DB_ROOT = tempfile.mkdtemp(prefix="marketstore-pos-session-")
+atexit.register(lambda: shutil.rmtree(_SESSION_DB_ROOT, ignore_errors=True))
 
 # Expenses filed under this category are taken out of the selected cashier's
 # salary instead of being a plain shop expense.
@@ -94,6 +104,7 @@ _ACTIVE_ACCOUNT_UID = None
 
 SYNC_TABLES = (
     "users",
+    "login_logs",
     "categories",
     "currencies",
     "app_settings",
@@ -119,6 +130,7 @@ SYNC_TABLES = (
     "inventory_check_items",
     "finance_manual_movements",
     "activity_logs",
+    "notification_reads",
 )
 
 
@@ -374,29 +386,47 @@ def _copy_sqlite_database(source_path, target_path):
 def activate_account_database(user_uid, email=None, allow_legacy_import=False, storage_root=None):
     global _ACTIVE_ACCOUNT_UID
     safe_uid = _safe_account_uid(user_uid)
-    target_path = account_database_path(safe_uid, email=email, storage_root=storage_root)
+    persistent_path = account_database_path(safe_uid, email=email, storage_root=storage_root)
+    use_session_cache = REMOTE_DATA_MODE and storage_root is None
+    target_path = (
+        account_database_path(safe_uid, email=email, storage_root=_SESSION_DB_ROOT)
+        if use_session_cache
+        else persistent_path
+    )
     old_uid_path = account_database_path(safe_uid, storage_root=storage_root)
     migration_marker = _account_migration_marker(email, storage_root) if email else None
     can_import_old_database = not migration_marker or not os.path.exists(migration_marker)
     database_existed = os.path.exists(target_path)
     imported_legacy = False
+    persistent_source = None
+    if use_session_cache and not database_existed and os.path.exists(persistent_path):
+        # First server-only run: use the old copy once, reconcile it with the
+        # API, then the login flow retires it only after a successful exchange.
+        _copy_sqlite_database(persistent_path, target_path)
+        imported_legacy = True
+        persistent_source = persistent_path
     if (
         not database_existed
-        and can_import_old_database
+        and not imported_legacy
+        and (use_session_cache or can_import_old_database)
         and os.path.exists(old_uid_path)
         and old_uid_path != target_path
     ):
         _copy_sqlite_database(old_uid_path, target_path)
         imported_legacy = True
+        if use_session_cache:
+            persistent_source = old_uid_path
     elif (
         not database_existed
-        and can_import_old_database
+        and (use_session_cache or can_import_old_database)
         and allow_legacy_import
         and email
         and _legacy_database_matches_account(safe_uid, email)
     ):
         _copy_sqlite_database(LEGACY_DB_PATH, target_path)
         imported_legacy = True
+        if use_session_cache:
+            persistent_source = LEGACY_DB_PATH
     if migration_marker:
         os.makedirs(os.path.dirname(migration_marker), exist_ok=True)
         if not os.path.exists(migration_marker):
@@ -413,7 +443,76 @@ def activate_account_database(user_uid, email=None, allow_legacy_import=False, s
         path=target_path,
         imported_legacy=imported_legacy,
         database_created=not database_existed and not imported_legacy,
+        session_cache=use_session_cache,
+        persistent_source=persistent_source,
     )
+
+
+def retire_persistent_account_database(path):
+    """Remove a reconciled legacy business database, never the live cache."""
+    if not path:
+        return False
+    target = os.path.abspath(str(path))
+    root = os.path.abspath(ACCOUNT_DB_ROOT)
+    legacy = os.path.abspath(LEGACY_DB_PATH)
+    inside_accounts = False
+    try:
+        inside_accounts = os.path.commonpath([target, root]) == root
+    except ValueError:
+        inside_accounts = False
+    if target == os.path.abspath(DB_PATH) or (not inside_accounts and target != legacy):
+        return False
+    removed = False
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        candidate = target + suffix
+        try:
+            if os.path.isfile(candidate):
+                os.remove(candidate)
+                removed = True
+        except OSError:
+            pass
+    account_key = os.path.basename(os.path.dirname(target))
+    if account_key and os.path.isdir(BACKUP_DIR):
+        try:
+            backup_names = os.listdir(BACKUP_DIR)
+        except OSError:
+            backup_names = []
+        for name in backup_names:
+            if not name.startswith(f"{account_key}."):
+                continue
+            try:
+                os.remove(os.path.join(BACKUP_DIR, name))
+                removed = True
+            except OSError:
+                pass
+    if inside_accounts:
+        account_dir = os.path.dirname(target)
+        for name in (
+            "custom_logo.png",
+            f".{os.path.basename(target)}.account_logo_migrated",
+        ):
+            try:
+                os.remove(os.path.join(account_dir, name))
+                removed = True
+            except OSError:
+                pass
+    try:
+        os.rmdir(os.path.dirname(target))
+    except OSError:
+        pass
+    return removed
+
+
+def is_remote_session_cache():
+    """Whether the active SQLite file is this process' disposable API cache."""
+    if not REMOTE_DATA_MODE or not DB_PATH or DB_PATH == ":memory:":
+        return False
+    try:
+        return os.path.commonpath(
+            [os.path.abspath(DB_PATH), os.path.abspath(_SESSION_DB_ROOT)]
+        ) == os.path.abspath(_SESSION_DB_ROOT)
+    except ValueError:
+        return False
 
 
 def _read_account_session():
@@ -433,6 +532,53 @@ def _write_account_session(data):
     with open(temporary_path, "w", encoding="utf-8") as file:
         json.dump(data, file, ensure_ascii=True, indent=2)
     os.replace(temporary_path, ACCOUNT_SESSION_PATH)
+
+
+def _read_local_preferences():
+    try:
+        with open(LOCAL_PREFERENCES_PATH, "r", encoding="utf-8") as file:
+            data = json.load(file)
+    except (OSError, ValueError, TypeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_local_preferences(data):
+    os.makedirs(os.path.dirname(LOCAL_PREFERENCES_PATH), exist_ok=True)
+    temporary_path = LOCAL_PREFERENCES_PATH + ".tmp"
+    with open(temporary_path, "w", encoding="utf-8") as file:
+        json.dump(data, file, ensure_ascii=True, indent=2)
+    os.replace(temporary_path, LOCAL_PREFERENCES_PATH)
+
+
+def _preference_account_key():
+    return _ACTIVE_ACCOUNT_UID or "default"
+
+
+def _local_interface_preferences():
+    data = _read_local_preferences()
+    accounts = data.get("accounts")
+    if not isinstance(accounts, dict):
+        return {}
+    value = accounts.get(_preference_account_key())
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _save_local_interface_preferences(values):
+    allowed = {"theme", "language"}
+    updates = {key: str(value) for key, value in (values or {}).items() if key in allowed}
+    if not updates:
+        return
+    data = _read_local_preferences()
+    accounts = data.setdefault("accounts", {})
+    if not isinstance(accounts, dict):
+        accounts = {}
+        data["accounts"] = accounts
+    current = accounts.get(_preference_account_key())
+    current = dict(current) if isinstance(current, dict) else {}
+    current.update(updates)
+    accounts[_preference_account_key()] = current
+    _write_local_preferences(data)
 
 
 def save_account_session(api_user, access_token):
@@ -2797,14 +2943,27 @@ def get_app_settings(user_id=None):
             for row in rows:
                 if row.value is not None and row.key in {"theme", "language"}:
                     settings[row.key] = row.value
+        local = _local_interface_preferences()
+        if local:
+            settings.update({key: value for key, value in local.items() if key in {"theme", "language"}})
+        elif REMOTE_DATA_MODE:
+            # Preserve the person's existing interface once while moving the
+            # business database out of persistent local storage.
+            _save_local_interface_preferences({
+                "theme": settings.get("theme", "dark_blue"),
+                "language": settings.get("language", "uz"),
+            })
         return settings
 
 
 def save_app_settings(settings, user_id=None):
     allowed = {"app_name", "theme", "language", "currency"}
+    _save_local_interface_preferences(settings)
     with session_scope() as session:
         for key, value in settings.items():
             if key not in allowed:
+                continue
+            if key in {"theme", "language"}:
                 continue
             if key in {"app_name", "currency"} or user_id is None:
                 row = session.get(AppSetting, key) or AppSetting(key=key)
@@ -2910,6 +3069,14 @@ def has_seen_server_account_assets():
 # --------------------------------------------------------------------------
 
 BACKUP_DIR = os.path.join(DATA_DIR, "backups")
+
+
+def _active_backup_dir():
+    # Server mode must not leave business snapshots on disk after the process
+    # exits. Explicit local/test databases retain the old backup behaviour.
+    if is_remote_session_cache():
+        return os.path.join(_SESSION_DB_ROOT, "backups")
+    return BACKUP_DIR
 
 
 def get_sync_generation():
@@ -3050,17 +3217,62 @@ def set_pull_cursor(value):
         number = int(value or 0)
     except (TypeError, ValueError):
         return
-    if number <= 0:
+    if number < 0:
         return
     with _get_engine().begin() as conn:
-        if number <= _sync_state_int(conn, "pull_cursor", 0):
+        initialized = _sync_state_get(conn, "pull_cursor_initialized") == "1"
+        if initialized and number <= _sync_state_int(conn, "pull_cursor", 0):
             return
         _sync_state_set(conn, "pull_cursor", str(number))
+        _sync_state_set(conn, "pull_cursor_initialized", "1")
+
+
+def is_pull_cursor_initialized():
+    with _get_engine().begin() as conn:
+        return _sync_state_get(conn, "pull_cursor_initialized") == "1"
 
 
 def clear_pull_cursor():
     with _get_engine().begin() as conn:
         _sync_state_set(conn, "pull_cursor", "0")
+        _sync_state_set(conn, "pull_cursor_initialized", "0")
+
+
+def get_table_pull_cursor(table_name):
+    if table_name not in SYNC_TABLES:
+        return 0
+    with _get_engine().begin() as conn:
+        return _sync_state_int(conn, f"table_cursor:{table_name}", 0)
+
+
+def is_table_pull_cursor_initialized(table_name):
+    if table_name not in SYNC_TABLES:
+        return False
+    with _get_engine().begin() as conn:
+        return _sync_state_get(conn, f"table_cursor_initialized:{table_name}") == "1"
+
+
+def set_table_pull_cursor(table_name, value):
+    if table_name not in SYNC_TABLES:
+        return
+    try:
+        number = int(value or 0)
+    except (TypeError, ValueError):
+        return
+    if number < 0:
+        return
+    key = f"table_cursor:{table_name}"
+    with _get_engine().begin() as conn:
+        initialized_key = f"table_cursor_initialized:{table_name}"
+        initialized = _sync_state_get(conn, initialized_key) == "1"
+        if not initialized or number > _sync_state_int(conn, key, 0):
+            _sync_state_set(conn, key, str(number))
+        _sync_state_set(conn, initialized_key, "1")
+
+
+def set_all_table_pull_cursors(value):
+    for table_name in SYNC_TABLES:
+        set_table_pull_cursor(table_name, value)
 
 
 def queue_rows_absent_from_server(server_keys):
@@ -3208,10 +3420,11 @@ def create_local_backup(tag="presync"):
     """Snapshot the active account database before a destructive sync choice."""
     if not DB_PATH or DB_PATH == ":memory:" or not os.path.exists(DB_PATH):
         return None
-    os.makedirs(BACKUP_DIR, exist_ok=True)
+    backup_dir = _active_backup_dir()
+    os.makedirs(backup_dir, exist_ok=True)
     account = os.path.basename(os.path.dirname(DB_PATH)) or "account"
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    target = os.path.join(BACKUP_DIR, f"{account}.{tag}_{timestamp}.db")
+    target = os.path.join(backup_dir, f"{account}.{tag}_{timestamp}.db")
     try:
         with _get_engine().begin() as conn:
             conn.exec_driver_sql("PRAGMA wal_checkpoint(FULL)")
@@ -3228,10 +3441,11 @@ def save_server_snapshot_backup(records, tag="server_snapshot"):
     """Persist the server copy to disk before we overwrite it with ours."""
     if not records:
         return None
-    os.makedirs(BACKUP_DIR, exist_ok=True)
+    backup_dir = _active_backup_dir()
+    os.makedirs(backup_dir, exist_ok=True)
     account = os.path.basename(os.path.dirname(DB_PATH)) or "account"
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    target = os.path.join(BACKUP_DIR, f"{account}.{tag}_{timestamp}.json.gz")
+    target = os.path.join(backup_dir, f"{account}.{tag}_{timestamp}.json.gz")
     try:
         payload = json.dumps(
             {"saved_at": _utc_now(), "records": records},
@@ -3328,11 +3542,12 @@ def _remove_account_purge_artifacts():
         os.path.join(account_dir, "custom_logo.png"),
         os.path.join(account_dir, f".{os.path.basename(DB_PATH)}.account_logo_migrated"),
     ]
-    if os.path.isdir(BACKUP_DIR):
+    backup_dir = _active_backup_dir()
+    if os.path.isdir(backup_dir):
         try:
             candidates.extend(
-                os.path.join(BACKUP_DIR, name)
-                for name in os.listdir(BACKUP_DIR)
+                os.path.join(backup_dir, name)
+                for name in os.listdir(backup_dir)
                 if name.startswith(f"{account_key}.")
             )
         except OSError:

@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 from starlette.concurrency import run_in_threadpool
 from pathlib import Path
 
@@ -87,6 +88,7 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.resolved_trusted_hosts())
 _superadmin_static = Path(__file__).resolve().parent / "static" / "superadmin"
 app.mount("/superadmin/assets", StaticFiles(directory=_superadmin_static), name="superadmin-assets")

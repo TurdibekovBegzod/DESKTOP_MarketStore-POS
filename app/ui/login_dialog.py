@@ -782,6 +782,14 @@ class LoginDialog(QDialog):
         # retries the sync itself.
         try:
             sync_result = sync_service.synchronize_account_storage(logged_user)
+            if activation.get("persistent_source"):
+                # Move the last disk-backed business copy through the server
+                # before retiring it. From the next launch onward PostgreSQL is
+                # the durable copy and SQLite is only a disposable session cache.
+                sync_service.reconcile_full(logged_user)
+                sync_service.auto_sync_turn(logged_user)
+                if not db.get_sync_status().get("pending"):
+                    db.retire_persistent_account_database(activation.get("persistent_source"))
             if sync_result.get("direction") == "none":
                 sync_service.refresh_account_assets(logged_user)
         except Exception:

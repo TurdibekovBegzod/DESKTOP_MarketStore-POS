@@ -373,7 +373,15 @@ def iter_sse_events(response):
             data_lines.append(value)
 
 
-def pull_sync_records(token, since=None, since_seq=None, table_name=None, include_deleted=True, timeout=30):
+def pull_sync_records(
+    token,
+    since=None,
+    since_seq=None,
+    table_name=None,
+    table_names=None,
+    include_deleted=True,
+    timeout=30,
+):
     """Download the account's records, optionally only what is new to us.
 
     ``since_seq`` is a position in the account's change history and is the only
@@ -390,10 +398,13 @@ def pull_sync_records(token, since=None, since_seq=None, table_name=None, includ
     purge_requested_at = None
     cursor = 0
     cursor_supported = False
+    # Medium batches keep first paint fast without turning a large account into
+    # dozens of HTTPS round trips. Responses are gzip-compressed by the API.
+    page_size = 500
     while True:
         query = {
             "include_deleted": "true" if include_deleted else "false",
-            "limit": 1000,
+            "limit": page_size,
             "offset": offset,
         }
         if since_seq is not None:
@@ -402,6 +413,8 @@ def pull_sync_records(token, since=None, since_seq=None, table_name=None, includ
             query["since"] = since
         if table_name:
             query["table_name"] = table_name
+        elif table_names:
+            query["tables"] = ",".join(dict.fromkeys(str(name) for name in table_names if name))
         result = _request_json(f"/sync/pull?{urlencode(query)}", token=token, timeout=timeout)
         records.extend(result.get("records", []))
         server_time = result.get("server_time") or server_time

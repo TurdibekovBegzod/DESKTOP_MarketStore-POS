@@ -1,7 +1,7 @@
 from datetime import datetime
 import uuid
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -111,6 +111,13 @@ class UserRecord(Base):
     __table_args__ = (
         UniqueConstraint("user_id", "table_name", "local_id", name="uq_user_records_user_table_local"),
         UniqueConstraint("user_uid", "table_name", "local_id", name="uq_user_records_user_uid_table_local"),
+        Index(
+            "ix_user_records_uid_table_change_seq_id",
+            "user_uid",
+            "table_name",
+            "change_seq",
+            "id",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

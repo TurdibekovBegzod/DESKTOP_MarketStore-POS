@@ -8,10 +8,11 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 ALLOWED_SYNC_TABLES = frozenset({
-    "users", "categories", "currencies", "app_settings", "account_assets", "product_sections",
+    "users", "login_logs", "categories", "currencies", "app_settings", "account_assets", "product_sections",
     "product_templates", "product_template_fields", "products", "product_attributes",
     "customers", "suppliers", "supplier_debt_movements", "debtors",
     "debtor_debt_movements", "expense_categories", "expenses", "sales", "sale_items",
+    "sale_returns", "customer_debt_movements", "activity_logs", "notification_reads",
     "stock_movements", "inventory_check_sessions", "inventory_check_items",
     "finance_manual_movements",
 })

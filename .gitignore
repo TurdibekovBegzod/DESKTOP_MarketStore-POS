@@ -13,6 +13,7 @@ develop-eggs/
 dist/
 app/data/accounts/
 app/data/account_session.json
+app/data/local_preferences.json
 api/credentials.json
 downloads/
 eggs/

@@ -21,7 +21,7 @@ import sync_service
 
 # How long to wait after a local write before sending. A sale writes several
 # rows in a burst; waiting a moment turns that burst into one upload.
-LOCAL_SETTLE_MS = 700
+LOCAL_SETTLE_MS = 100
 # How often the worker checks the local SQLite outbox. This timer never contacts
 # the server by itself; it only recovers a committed local write whose wake-up
 # signal was missed (for example because the app closed immediately afterwards).
@@ -133,7 +133,7 @@ class SyncEngine(QObject):
 
         self._pull_requested.clear()
         self._set_state("syncing")
-        full_due = (
+        full_due = not db.is_remote_session_cache() and (
             self._last_full_at is None
             or (time.monotonic() - self._last_full_at) >= FULL_RECONCILE_SECONDS
         )
