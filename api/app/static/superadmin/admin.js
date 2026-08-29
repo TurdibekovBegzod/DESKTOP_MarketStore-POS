@@ -103,8 +103,14 @@ function menuCell(account) {
   trigger.type = "button";
   trigger.setAttribute("aria-label", `${account.email} amallari`);
   trigger.innerHTML = "&#8942;";
-  const menu = element("div", "action-menu hidden");
-
+  menu.append(actionButton("Loglarni ko'rish", "", () => {
+    closeMenus();
+    switchView("logs");
+    byId("logSearch").value = account.email;
+    logs.query = account.email;
+    logs.before = null;
+    loadLogPage({ reset: true });
+  }));
   menu.append(actionButton(account.is_active ? "Accountni bloklash" : "Accountni faollashtirish", "", () => {
     closeMenus();
     openConfirm(account, "status");
@@ -298,7 +304,13 @@ byId("showPassword").addEventListener("click", () => {
   byId("showPassword").textContent = show ? "Yashirish" : "Ko'rsatish";
 });
 byId("logoutButton").addEventListener("click", () => logout());
-byId("refreshButton").addEventListener("click", loadAccounts);
+byId("refreshButton").addEventListener("click", () => {
+  if (byId("tabLogs").classList.contains("is-active")) {
+    openLogs();
+  } else {
+    loadAccounts();
+  }
+});
 byId("searchInput").addEventListener("input", renderAccounts);
 byId("modalClose").addEventListener("click", closeConfirm);
 byId("modalCancel").addEventListener("click", closeConfirm);
@@ -377,8 +389,10 @@ function logRow(entry) {
 }
 
 function appendLines(entries, { prepend = false } = {}) {
-  if (!entries.length) return;
+  if (!entries || !entries.length) return;
   const view = byId("logView");
+  const emptyMsg = view.querySelector(".log-empty-msg");
+  if (emptyMsg) emptyMsg.remove();
   const stick = !prepend && atBottom(view);
   const fragment = document.createDocumentFragment();
   entries.forEach((entry) => fragment.append(logRow(entry)));
@@ -395,37 +409,41 @@ function appendLines(entries, { prepend = false } = {}) {
 }
 
 async function loadLogMonths() {
-  const result = await apiRequest("/logs/months");
-  logs.current = result.current;
-  if (!logs.month) logs.month = result.current;
-  const select = byId("logMonth");
-  select.textContent = "";
-  const months = result.months.length ? result.months : [{ month: result.current, bytes: 0, archived: false }];
-  months.forEach((item) => {
-    const option = document.createElement("option");
-    const size = item.bytes > 1024 * 1024
-      ? `${(item.bytes / (1024 * 1024)).toFixed(1)} MB`
-      : `${Math.round(item.bytes / 1024)} KB`;
-    option.value = item.month;
-    option.textContent = `${item.month} - ${size}${item.archived ? " (arxiv)" : ""}`;
-    select.append(option);
-  });
-  select.value = logs.month;
+  try {
+    const result = await apiRequest("/logs/months");
+    logs.current = result.current || new Date().toISOString().slice(0, 7);
+    if (!logs.month) logs.month = logs.current;
+    const select = byId("logMonth");
+    select.textContent = "";
+    const months = (result.months && result.months.length) ? result.months : [{ month: logs.current, bytes: 0, archived: false }];
+    months.forEach((item) => {
+      const option = document.createElement("option");
+      const size = item.bytes > 1024 * 1024
+        ? `${(item.bytes / (1024 * 1024)).toFixed(1)} MB`
+        : `${Math.round(item.bytes / 1024)} KB`;
+      option.value = item.month;
+      option.textContent = `${item.month} - ${size}${item.archived ? " (arxiv)" : ""}`;
+      select.append(option);
+    });
+    select.value = logs.month;
 
-  const containers = byId("logContainer");
-  const chosen = logs.container;
-  containers.textContent = "";
-  const all = document.createElement("option");
-  all.value = "";
-  all.textContent = "Barcha konteynerlar";
-  containers.append(all);
-  result.containers.forEach((name) => {
-    const option = document.createElement("option");
-    option.value = name;
-    option.textContent = name.replace(/^marketstore-/, "");
-    containers.append(option);
-  });
-  containers.value = chosen;
+    const containers = byId("logContainer");
+    const chosen = logs.container;
+    containers.textContent = "";
+    const all = document.createElement("option");
+    all.value = "";
+    all.textContent = "Barcha konteynerlar";
+    containers.append(all);
+    (result.containers || []).forEach((name) => {
+      const option = document.createElement("option");
+      option.value = name;
+      option.textContent = name.replace(/^marketstore-/, "");
+      containers.append(option);
+    });
+    containers.value = chosen;
+  } catch (error) {
+    if (!logs.month) logs.month = new Date().toISOString().slice(0, 7);
+  }
 }
 
 async function loadLogPage({ reset = false } = {}) {
@@ -433,26 +451,34 @@ async function loadLogPage({ reset = false } = {}) {
   logs.loading = true;
   const view = byId("logView");
   try {
-    const params = new URLSearchParams({ month: logs.month, limit: "300" });
+    const targetMonth = logs.month || logs.current || new Date().toISOString().slice(0, 7);
+    const params = new URLSearchParams({ month: targetMonth, limit: "300" });
     if (!reset && logs.before !== null) params.set("before", String(logs.before));
     if (logs.container) params.set("container", logs.container);
     if (logs.query) params.set("q", logs.query);
     const page = await apiRequest(`/logs?${params.toString()}`);
     if (reset) view.textContent = "";
-    appendLines(page.lines, { prepend: !reset });
+    const lines = page.lines || [];
+    appendLines(lines, { prepend: !reset });
     logs.before = page.next_before;
     if (reset) {
       logs.offset = page.offset || 0;
       view.scrollTop = view.scrollHeight;
-      if (!page.lines.length) {
+      if (!lines.length) {
         logStatus("Bu oy uchun yozuv yo'q. Yig'uvchi xizmat ishga tushganini tekshiring.");
+        if (!view.children.length) {
+          const empty = document.createElement("div");
+          empty.className = "log-empty-msg";
+          empty.textContent = "Hozircha server loglari mavjud emas.";
+          view.append(empty);
+        }
       }
     }
     byId("logOlder").disabled = !page.has_more;
-    if (page.lines.length || !reset) {
+    if (lines.length || !reset) {
       logStatus(page.has_more
-        ? `${logs.month} - yuqoriga aylantirib eskisini ko'ring`
-        : `${logs.month} - oy boshidan beri hammasi ko'rsatildi`);
+        ? `${targetMonth} - yuqoriga aylantirib eskisini ko'ring`
+        : `${targetMonth} - oy boshidan beri hammasi ko'rsatildi`);
     }
   } catch (error) {
     logStatus(error.message);
@@ -471,7 +497,7 @@ function stopLogStream() {
 function startLogStream() {
   stopLogStream();
   if (!logs.live || logs.month !== logs.current || !state.token) return;
-  const params = new URLSearchParams({ token: state.token, offset: String(logs.offset) });
+  const params = new URLSearchParams({ token: state.token, offset: String(logs.offset || 0) });
   if (logs.container) params.set("container", logs.container);
   const source = new EventSource(`${API_ROOT}/logs/stream?${params.toString()}`);
   logs.source = source;
@@ -489,8 +515,9 @@ function startLogStream() {
     appendLines(entries);
   });
   source.onerror = () => {
-    // EventSource reconnects on its own; say so rather than looking frozen.
-    logStatus(`${logs.month} - aloqa uzildi, qayta ulanmoqda...`);
+    if (logs.live && logs.source) {
+      logStatus(`${logs.month} - aloqa uzildi, qayta ulanmoqda...`);
+    }
   };
 }
 

@@ -286,10 +286,15 @@ tbody tr:hover { background: #fbfcfd; }
 .log-container { color: #7dd3fc; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .log-message { white-space: pre-wrap; word-break: break-word; }
 
-.log-hint {
-  margin: 10px 2px 0;
-  color: #64748b;
-  font-size: 12px;
+.log-empty-msg {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+  color: #94a3b8;
+  font-family: Inter, "Segoe UI", sans-serif;
+  font-size: 13px;
+  font-style: italic;
 }
 
 @media (max-width: 720px) {
