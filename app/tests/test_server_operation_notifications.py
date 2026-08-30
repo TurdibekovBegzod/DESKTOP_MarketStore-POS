@@ -8,7 +8,6 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtWidgets import QApplication
 
-import sync_service
 from ui.main_window import MainWindow, ToastItem
 
 
@@ -30,6 +29,8 @@ class _ToastRecorder:
 
 class _OperationWindow:
     def __init__(self):
+        self.labels = {}
+        self.refreshes = 0
         self.toast = _ToastRecorder()
         self.operation = {
             "toast": self.toast,
@@ -44,6 +45,9 @@ class _OperationWindow:
 
     def fail_server_operation(self, operation, error=None):
         MainWindow.fail_server_operation(self, operation, error)
+
+    def _refresh_sync_status(self):
+        self.refreshes += 1
 
 
 class ServerOperationNotificationTest(unittest.TestCase):
@@ -84,29 +88,15 @@ class ServerOperationNotificationTest(unittest.TestCase):
         self.assertEqual(window.toast.updates[-1]["level"], "error")
         self.assertEqual(window._pending_server_operations, [])
 
-    def test_close_flushes_a_committed_visible_operation(self):
-        class Window:
-            user = {"id": "owner", "api_access_token": "token"}
-            _pending_server_operations = [{"committed": True}]
+    def test_failed_send_is_reported_once_and_not_left_for_retry(self):
+        window = _OperationWindow()
 
-            @staticmethod
-            def _sync_available():
-                return True
+        MainWindow._on_sync_turn_failed(window, "network down")
 
-            def _settle_server_operations(self, outcome):
-                self.settled = outcome
-
-        window = Window()
-        outcome = {"pulled": 0, "pushed": 1}
-        with patch("ui.main_window.db.count_pending_sync_rows", return_value=1), \
-             patch.object(sync_service, "auto_sync_turn", return_value=outcome) as sync, \
-             patch("ui.main_window.db.record_sync_success") as record:
-            MainWindow._flush_pending_before_close(window)
-
-        sync.assert_called_once_with(window.user)
-        record.assert_called_once_with(outcome)
-        self.assertEqual(window.settled, outcome)
-
+        self.assertEqual(window.toast.updates[-1]["level"], "error")
+        self.assertIn("internetga ulanmagansiz", window.toast.updates[-1]["message"])
+        self.assertEqual(window._pending_server_operations, [])
+        self.assertEqual(window.refreshes, 1)
 
 if __name__ == "__main__":
     unittest.main()

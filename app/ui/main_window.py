@@ -15,10 +15,6 @@ import api_client
 import database as db
 import sync_service
 
-# How long a successful exchange keeps counting as "we can reach the others"
-# while the event stream is reconnecting. Long enough to ride out a proxy
-# hiccup, short enough that a real outage is noticed before the next sale.
-ONLINE_GRACE_SECONDS = 20
 from realtime import SyncEventListener
 from sync_engine import SyncEngine
 from updater import is_newer_version
@@ -284,8 +280,8 @@ TEXTS = {
         "sync_status_title": "Sinxronizatsiya holati",
         "sync_conflict_toast": "Sinxronizatsiyani yakunlab bo'lmadi. Sinxronizatsiya holati oynasini oching.",
         "sync_rejected_title": "O'zgartirish saqlanmadi",
-        "sync_offline_note": "Aloqa tiklanganda ular o'zi yuboriladi.",
-        "sync_offline_tip": "Aloqa yo'q \u2014 pul yozuvlari vaqtincha to'xtatilgan",
+        "sync_offline_note": "Offline paytda yangi o'zgarishlar lokalga saqlanmaydi va qayta yuborilmaydi.",
+        "sync_offline_tip": "Aloqa yo'q \u2014 barcha o'zgartirishlar vaqtincha to'xtatilgan",
         "sync_last_ok": "Oxirgi muvaffaqiyatli almashinuv",
         "sync_online": "Onlayn",
         "sync_offline": "Offline",
@@ -359,8 +355,8 @@ TEXTS = {
         "sync_status_title": "Sync status",
         "sync_conflict_toast": "Synchronisation could not finish. Open the sync status panel.",
         "sync_rejected_title": "Change not saved",
-        "sync_offline_note": "They are sent by themselves once the connection is back.",
-        "sync_offline_tip": "No connection \u2014 money entries are paused",
+        "sync_offline_note": "Offline changes are not saved locally or retried later.",
+        "sync_offline_tip": "No connection \u2014 all changes are paused",
         "sync_last_ok": "Last successful exchange",
         "sync_online": "Online",
         "sync_offline": "Offline",
@@ -457,8 +453,8 @@ TEXTS["ru"].update({
     "sync_status_title": "Состояние синхронизации",
     "sync_conflict_toast": "Синхронизация не завершена. Откройте окно состояния синхронизации.",
     "sync_rejected_title": "Изменение не сохранено",
-    "sync_offline_note": "Они отправятся сами, когда связь восстановится.",
-    "sync_offline_tip": "Нет связи \u2014 денежные записи приостановлены",
+    "sync_offline_note": "Офлайн-изменения не сохраняются локально и не отправляются повторно.",
+    "sync_offline_tip": "Нет связи \u2014 все изменения приостановлены",
     "sync_last_ok": "Последний успешный обмен",
     "sync_online": "Онлайн",
     "sync_offline": "Офлайн",
@@ -920,7 +916,7 @@ class SyncDialog(QDialog):
                 f"{pending_label}: {waiting}\n"
                 + self.labels.get(
                     "sync_offline_note",
-                    "Aloqa tiklanganda ular o'zi yuboriladi.",
+                    "Offline paytda o'zgarishlar lokalga saqlanmaydi va qayta yuborilmaydi.",
                 )
             )
             return
@@ -1396,8 +1392,8 @@ class MainWindow(QMainWindow):
         self._start_clock()
         self._save_user_activity(force=True)
         self._start_live_sync()
-        # Money is only written where every device can see it.
-        db.set_online_check(self._is_online)
+        # All business records are writable only while the server link is live.
+        db.set_online_check(self._server_accepts_writes)
         # Every entry in the activity log carries who made it, so the other
         # devices can say "Sardor sold ..." rather than "something changed".
         db.set_activity_actor(lambda: {
@@ -1426,6 +1422,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "toast_manager"):
             self.toast_manager.reposition()
         self._position_release_dot()
+        self._position_pending_sales_badge()
 
     def show_toast(self, message, title=None, level="success", duration_ms=4000):
         if hasattr(self, "toast_manager"):
@@ -1472,7 +1469,8 @@ class MainWindow(QMainWindow):
         self._engine_state = "syncing"
         worker = self._engine_worker
         if worker is not None:
-            worker.request_turn()
+            request_push = getattr(worker, "request_push", None)
+            (request_push or worker.request_turn)()
         self._refresh_sync_status()
 
     def fail_server_operation(self, operation, error=None):
@@ -1519,7 +1517,6 @@ class MainWindow(QMainWindow):
             return
 
         for operation in committed:
-            operation["retrying"] = False
             toast = operation.get("toast")
             if toast is not None:
                 try:
@@ -1543,29 +1540,11 @@ class MainWindow(QMainWindow):
             self._save_user_activity(force=True)
         self._stop_realtime_listener()
         self._stop_sync_engine()
-        self._flush_pending_before_close()
         db.unregister_activity_listener(self._on_database_activity)
         app = QApplication.instance()
         if app:
             app.removeEventFilter(self)
         super().closeEvent(event)
-
-    def _flush_pending_before_close(self):
-        if not self._sync_available():
-            return
-        if not any(
-            operation.get("committed")
-            for operation in self._pending_server_operations
-        ):
-            return
-        try:
-            if db.count_pending_sync_rows() <= 0:
-                return
-            outcome = sync_service.auto_sync_turn(self.user)
-            db.record_sync_success(outcome)
-            self._settle_server_operations(outcome)
-        except Exception as exc:
-            db.record_sync_failure(exc)
 
     def _save_user_activity(self, force=False):
         now = datetime.now()
@@ -1813,9 +1792,11 @@ class MainWindow(QMainWindow):
         self._refresh_sync_status()
         self._refresh_notif_badge()
         self._refresh_release_badge()
+        self._refresh_pending_sales_badge()
         self.sync_status_timer = QTimer(self)
         self.sync_status_timer.timeout.connect(self._refresh_sync_status)
         self.sync_status_timer.timeout.connect(self._refresh_notif_badge)
+        self.sync_status_timer.timeout.connect(self._refresh_pending_sales_badge)
         self.sync_status_timer.start(1000)
         QTimer.singleShot(1500, self._show_startup_notifications)
 
@@ -1898,6 +1879,15 @@ class MainWindow(QMainWindow):
         group_btn.setStyleSheet(self._nav_group_style())
         self._sync_nav_group_icon_colors(group_btn)
         group_btn.clicked.connect(lambda checked, k=group_key: self._toggle_nav_group(k))
+        if group_key == "products_group":
+            self.products_pending_dot_lbl = QLabel(group_btn)
+            self.products_pending_dot_lbl.setFixedSize(10, 10)
+            self.products_pending_dot_lbl.setStyleSheet("""
+                background: #ef4444;
+                border: 1px solid white;
+                border-radius: 5px;
+            """)
+            self.products_pending_dot_lbl.hide()
         nav_layout.addWidget(group_btn)
         self.nav_group_buttons[group_key] = group_btn
 
@@ -1914,6 +1904,12 @@ class MainWindow(QMainWindow):
             btn.setObjectName(f"nav_{child_key}")
             btn.setStyleSheet(self._nav_child_btn_style())
             btn.clicked.connect(lambda checked, k=child_key: self._switch_page(k))
+            if child_key == "finalize_sales":
+                self.finalize_sales_badge_lbl = QLabel(btn)
+                self.finalize_sales_badge_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.finalize_sales_badge_lbl.setFixedHeight(16)
+                self.finalize_sales_badge_lbl.setStyleSheet(self._counter_badge_style())
+                self.finalize_sales_badge_lbl.hide()
             child_layout.addWidget(btn)
             self.nav_buttons[child_key] = btn
         nav_layout.addWidget(child_frame)
@@ -1980,6 +1976,50 @@ class MainWindow(QMainWindow):
                 self.notif_badge_lbl.hide()
         except Exception:
             pass
+
+    def pending_sale_item_count(self):
+        """All product rows currently waiting in Finalize Sales."""
+        return db.count_pending_sale_items(only_cashiers=True)
+
+    def _refresh_pending_sales_badge(self):
+        badge = getattr(self, "finalize_sales_badge_lbl", None)
+        group_dot = getattr(self, "products_pending_dot_lbl", None)
+        button = getattr(self, "nav_buttons", {}).get("finalize_sales")
+        if badge is None or button is None:
+            return
+        try:
+            count = self.pending_sale_item_count()
+        except Exception:
+            return
+        if count <= 0:
+            badge.hide()
+            if group_dot is not None:
+                group_dot.hide()
+            button.setToolTip("")
+            return
+        text = str(count)
+        width = max(16, badge.fontMetrics().horizontalAdvance(text) + 8)
+        badge.setFixedSize(width, 16)
+        badge.setText(text)
+        badge.setStyleSheet(self._counter_badge_style())
+        button.setToolTip(f"{self.labels.get('finalize_sales', 'Sotishni yakunlash')}: {text}")
+        self._position_pending_sales_badge()
+        badge.show()
+        badge.raise_()
+        if group_dot is not None:
+            group_dot.show()
+            group_dot.raise_()
+
+    def _position_pending_sales_badge(self):
+        badge = getattr(self, "finalize_sales_badge_lbl", None)
+        button = getattr(self, "nav_buttons", {}).get("finalize_sales")
+        if badge is not None and button is not None:
+            badge.move(max(button.width() - badge.width() - 8, 0), 10)
+        group_dot = getattr(self, "products_pending_dot_lbl", None)
+        group_button = getattr(self, "nav_group_buttons", {}).get("products_group")
+        if group_dot is not None and group_button is not None:
+            # Leave the right edge to NavGroupButton's expand/collapse arrow.
+            group_dot.move(max(group_button.width() - group_dot.width() - 34, 0), 15)
 
     def _sync_nav_group_icon_colors(self, button=None):
         theme = THEMES.get(self.settings.get("theme"), THEMES["dark_blue"])
@@ -2109,6 +2149,8 @@ class MainWindow(QMainWindow):
 
     def _on_page_refresh(self, key, result):
         self._cleanup_sync_thread()
+        if "account_assets" in (result.get("tables") or ()):
+            self._set_logo_icon()
         if self.pages.get(key) is self.stack.currentWidget():
             self._reload_current_page(result.get("tables") or ())
         pending = self._pending_page_refresh
@@ -2121,9 +2163,6 @@ class MainWindow(QMainWindow):
             self._refresh_sync_status()
             return
         if db.get_sync_status()["pending"]:
-            if db.has_pending_sync_for_table("account_assets"):
-                self._push_to_server(show_message=False)
-                return
             try:
                 result = sync_service.pull_server_changes(self.user, table_name="account_assets")
                 if result.get("imported"):
@@ -2406,33 +2445,25 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot(str)
     def _on_sync_turn_failed(self, message):
-        """Tell the person the upload did not go through, instead of waiting."""
-        for operation in self._pending_server_operations:
-            if not operation.get("committed") or operation.get("retrying"):
+        """Report one failed send and discard it; never queue a retry."""
+        offline_message = "Hozir internetga ulanmagansiz yoki server ishlamayapti."
+        for operation in list(self._pending_server_operations):
+            if not operation.get("committed"):
                 continue
-            toast = operation.get("toast")
-            if toast is None:
-                continue
-            try:
-                toast.update_content(
-                    self.labels.get(
-                        "sync_retry_pending",
-                        "Serverga yuborilmadi - qayta urinilmoqda. Ma'lumot shu qurilmada saqlangan.",
-                    ),
-                    title=operation.get("failure_title"),
-                    level="warning",
-                    duration_ms=60 * 60 * 1000,
-                )
-                operation["retrying"] = True
-            except RuntimeError:
-                pass
+            operation["failure_message"] = offline_message
+            self.fail_server_operation(operation, error=message)
         self._refresh_sync_status()
 
     @pyqtSlot(dict)
     def _on_sync_applied(self, outcome):
         # The data on screen just moved underneath the person looking at it,
         # so the page is reloaded rather than left showing yesterday's figures.
-        self._reload_current_page(outcome.get("tables") or ())
+        changed_tables = outcome.get("tables") or ()
+        if "account_assets" in changed_tables:
+            # The engine may win the race with the dedicated asset refresh.
+            # Refresh the visible logo even if the later asset pull imports 0.
+            self._set_logo_icon()
+        self._reload_current_page(changed_tables)
         self._settle_server_operations(outcome)
         self._refresh_sync_status()
         refused = outcome.get("rejected") or []
@@ -2493,31 +2524,26 @@ class MainWindow(QMainWindow):
         self._refresh_sync_status()
 
     def _is_online(self):
-        """Whether this device can reach the others right now.
+        """True only while both the live server link and sync API are healthy."""
+        return self._realtime_online is True and self._engine_state != "offline"
 
-        The live event stream is the honest answer: it is a connection that is
-        either up or is not, which is why a chat application can show the same
-        thing. A recent successful exchange counts too, so a stream that is
-        merely reconnecting does not stop a sale that would in fact go
-        through. Anything else -- including "not known yet" -- is offline,
-        because writing money on a guess is what has to be avoided.
-        """
-        if self._realtime_online is True:
-            return True
-        if self._engine_state == "offline":
+    def _server_accepts_writes(self):
+        """Verify the API once immediately before any local business commit."""
+        if self._realtime_online is not True:
+            return False
+        token = self._realtime_token()
+        if not token:
             return False
         try:
-            health = db.get_sync_health()
+            # GET only: this proves internet + API availability without
+            # changing server or local data and performs no automatic retries.
+            api_client.get_sync_state(token, timeout=3)
         except Exception:
+            self._engine_state = "offline"
             return False
-        last_ok = health.get("last_ok_at")
-        if not last_ok:
-            return False
-        try:
-            seen = datetime.strptime(str(last_ok), "%Y-%m-%d %H:%M:%S")
-        except (TypeError, ValueError):
-            return False
-        return (datetime.utcnow() - seen).total_seconds() <= ONLINE_GRACE_SECONDS
+        if self._engine_state == "offline":
+            self._engine_state = "idle"
+        return True
 
     def _stop_realtime_listener(self):
         worker = self._realtime_worker
@@ -2535,6 +2561,10 @@ class MainWindow(QMainWindow):
         # Drops and reconnects are routine on shop wifi, so they are reported
         # through the sync button's tooltip rather than as toasts.
         self._realtime_online = bool(online)
+        if online and self._engine_worker is not None:
+            # Verify/catch up by downloading only. request_turn() never uploads
+            # pending local rows, so reconnecting cannot retry a failed send.
+            self._engine_worker.request_turn()
         self._refresh_sync_status()
 
     @pyqtSlot(dict)
@@ -2706,8 +2736,12 @@ class MainWindow(QMainWindow):
         self._pending_asset_check = None
         if checked is not None and not result.get("skipped"):
             self._assets_checked_generation = checked
-        if result.get("imported"):
+        if not result.get("skipped"):
+            # Another sync worker may already have imported the same logo, in
+            # which case this asset-only pull reports imported=0. The cache is
+            # still authoritative and the cashier window must repaint from it.
             self._set_logo_icon()
+        if result.get("imported"):
             self.show_toast(
                 self.labels.get("sync_logo_updated", "Logo boshqa qurilmadan yangilandi."),
                 title=self.labels.get("sync_remote_title", "Yangi o'zgarish"),

@@ -9,6 +9,7 @@ from ui.i18n import set_language
 class UiDatabaseSmokeTest(unittest.TestCase):
     def setUp(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        db.set_online_check(None)
         fd, self.path = tempfile.mkstemp(suffix=".db")
         os.close(fd)
         self.old_path = db.DB_PATH
@@ -16,6 +17,7 @@ class UiDatabaseSmokeTest(unittest.TestCase):
         db.init_db()
 
     def tearDown(self):
+        db.set_online_check(None)
         try:
             db._get_engine().dispose()
         finally:
@@ -58,6 +60,41 @@ class UiDatabaseSmokeTest(unittest.TestCase):
 
         self.assertTrue(reset_custom_logo())
         self.assertIsNone(db.get_account_asset("desktop_logo"))
+
+    def test_pending_sale_count_matches_all_finalize_product_rows(self):
+        cashier_id = db.add_user(
+            "badge-cashier@example.com", role="cashier", username="Badge cashier"
+        )
+        first_product = db.add_product({
+            "barcode": "BADGE-1", "name": "Badge product 1", "price": 1000,
+            "cost": 600, "stock": 5, "unit": "dona",
+        })
+        second_product = db.add_product({
+            "barcode": "BADGE-2", "name": "Badge product 2", "price": 2000,
+            "cost": 1200, "stock": 5, "unit": "dona",
+        })
+        sale_id = db.create_sale(
+            None,
+            cashier_id,
+            [
+                {"product_id": first_product, "quantity": 1, "price": 1000, "subtotal": 1000},
+                {"product_id": second_product, "quantity": 1, "price": 2000, "subtotal": 2000},
+            ],
+            3000,
+            0,
+            3000,
+            "naqd",
+            is_finalized=0,
+        )
+
+        visible_rows = db.get_product_sales_archive(
+            "", None, None, only_cashiers=True, only_pending=True
+        )
+        self.assertEqual(db.count_pending_sale_items(only_cashiers=True), len(visible_rows))
+        self.assertEqual(db.count_pending_sale_items(only_cashiers=True), 2)
+
+        db.finalize_sale(sale_id)
+        self.assertEqual(db.count_pending_sale_items(only_cashiers=True), 0)
 
     def test_all_database_backed_widgets_load(self):
         from PyQt6.QtWidgets import QApplication

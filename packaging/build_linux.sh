@@ -6,6 +6,7 @@ set -e
 
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 cd "$DIR/.."
+PRODUCT_VERSION="$(python -c 'import sys; sys.path.insert(0, "app"); from version import APP_VERSION; print(APP_VERSION)')"
 
 echo "[1/3] PyInstaller bilan Linux binar yig'ilmoqda..."
 pyinstaller --noconfirm --onedir --windowed \
@@ -48,8 +49,8 @@ chmod +x "$APPDIR/AppRun"
 
 echo "[3/3] AppImage yaratilmoqda..."
 if command -v appimagetool &> /dev/null; then
-    appimagetool "$APPDIR" "dist/MarketStore_1.0.0.AppImage"
-    echo "[MUVAFFAQIYAT] dist/MarketStore_1.0.0.AppImage tayyor!"
+    appimagetool "$APPDIR" "dist/MarketStore_${PRODUCT_VERSION}.AppImage"
+    echo "[MUVAFFAQIYAT] dist/MarketStore_${PRODUCT_VERSION}.AppImage tayyor!"
 else
     echo "[OGOHLANTIRISH] appimagetool topilmadi. AppDir tayyor: $APPDIR"
 fi

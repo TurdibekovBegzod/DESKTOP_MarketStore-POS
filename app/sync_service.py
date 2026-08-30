@@ -361,15 +361,11 @@ def auto_sync_turn(user, incremental=True):
     try:
         push = push_local_changes(user, guard_generation=False)
     except SyncConflict:
-        # The server moved while we were preparing to send. Read it once more
-        # and try again; if it still refuses, leave it to the sync button
-        # rather than looping.
-        pull_server_changes(user, incremental=False)
-        try:
-            push = push_local_changes(user, guard_generation=False)
-        except SyncConflict:
-            outcome["conflict"] = True
-            return outcome
+        # Never resend an operation automatically. The current server copy is
+        # downloaded by the normal remote-change path; this turn only reports
+        # that its single delivery attempt was rejected.
+        outcome["conflict"] = True
+        return outcome
     outcome["pushed"] = int(push.get("sent") or 0)
     outcome["rejected"] = list(push.get("rejected") or [])
     if outcome["rejected"]:

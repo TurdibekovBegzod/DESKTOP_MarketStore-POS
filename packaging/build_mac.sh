@@ -6,6 +6,7 @@ set -e
 
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 cd "$DIR/.."
+PRODUCT_VERSION="$(python -c 'import sys; sys.path.insert(0, "app"); from version import APP_VERSION; print(APP_VERSION)')"
 
 echo "[1/2] PyInstaller bilan macOS .app yig'ilmoqda..."
 pyinstaller --noconfirm --windowed \
@@ -26,9 +27,9 @@ if command -v create-dmg &> /dev/null; then
         --window-size 600 400 \
         --icon-size 100 \
         --app-drop-link 420 185 \
-        "dist/MarketStore_1.0.0.dmg" \
+        "dist/MarketStore_${PRODUCT_VERSION}.dmg" \
         "dist/MarketStore POS.app"
-    echo "[MUVAFFAQIYAT] dist/MarketStore_1.0.0.dmg tayyor!"
+    echo "[MUVAFFAQIYAT] dist/MarketStore_${PRODUCT_VERSION}.dmg tayyor!"
 else
     echo "dist/MarketStore POS.app tayyor. DMG yaratish uchun 'brew install create-dmg' o'rnating."
 fi

@@ -8,7 +8,7 @@
 ; General Definitions
 !define PRODUCT_NAME "MarketStore POS"
 !ifndef PRODUCT_VERSION
-!define PRODUCT_VERSION "1.2.9"
+!define PRODUCT_VERSION "1.3.0"
 !endif
 !define PRODUCT_PUBLISHER "MarketStore Team"
 !define PRODUCT_WEB_SITE "https://marketstore.uz"
@@ -21,6 +21,22 @@ OutFile "..\dist\MarketStore_Setup_${PRODUCT_VERSION}.exe"
 InstallDir "$PROGRAMFILES64\MarketStore POS"
 InstallDirRegKey HKLM "Software\MarketStore POS" "InstallDir"
 RequestExecutionLevel admin
+Unicode true
+ManifestDPIAware true
+CRCCheck on
+SetDateSave on
+ShowInstDetails show
+ShowUninstDetails show
+BrandingText "MarketStore POS"
+
+; Windows Explorer and Add/Remove Programs metadata.
+VIProductVersion "${PRODUCT_VERSION}.0"
+VIAddVersionKey /LANG=1033 "ProductName" "${PRODUCT_NAME}"
+VIAddVersionKey /LANG=1033 "ProductVersion" "${PRODUCT_VERSION}"
+VIAddVersionKey /LANG=1033 "CompanyName" "${PRODUCT_PUBLISHER}"
+VIAddVersionKey /LANG=1033 "FileDescription" "${PRODUCT_NAME} Installer"
+VIAddVersionKey /LANG=1033 "FileVersion" "${PRODUCT_VERSION}.0"
+VIAddVersionKey /LANG=1033 "LegalCopyright" "Copyright 2026 ${PRODUCT_PUBLISHER}"
 
 ; Compression
 SetCompressor /SOLID lzma
@@ -53,16 +69,13 @@ SetCompressor /SOLID lzma
 ; Installation Section
 ; -------------------------------------------------------------------------
 Section "MainSection" SEC01
+    SetShellVarContext all
+    SetRegView 64
     SetOutPath "$INSTDIR"
     SetOverwrite on
 
-    ; Close the running application.
-    ;
-    ; Ask first, so a cashier mid-sale gets the chance to finish rather than
-    ; losing the window from under them. /T is deliberately absent: it kills
-    ; the whole process tree, and if this installer were ever launched as a
-    ; child of the application it would take itself down with it -- which is
-    ; exactly how the update used to end in "cancelled".
+    ; Close the running application. /T is deliberately absent: an updater
+    ; launched by the app must not terminate its own installer process tree.
     DetailPrint "Eski dastur nusxasi yopilmoqda..."
     nsExec::Exec 'taskkill /IM "${PRODUCT_EXE}"'
     Sleep 1500
@@ -85,11 +98,16 @@ Section "MainSection" SEC01
 
     ; Write Registry Keys for Windows Add/Remove Programs
     WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "DisplayName" "${PRODUCT_NAME}"
-    WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "UninstallString" "$INSTDIR\Uninstall.exe"
-    WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "DisplayIcon" "$INSTDIR\${PRODUCT_EXE}"
+    WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "UninstallString" '$\"$INSTDIR\Uninstall.exe$\"'
+    WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "QuietUninstallString" '$\"$INSTDIR\Uninstall.exe$\" /S'
+    WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "InstallLocation" "$INSTDIR"
+    WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "DisplayIcon" "$INSTDIR\${PRODUCT_EXE},0"
     WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "DisplayVersion" "${PRODUCT_VERSION}"
     WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "URLInfoAbout" "${PRODUCT_WEB_SITE}"
     WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "Publisher" "${PRODUCT_PUBLISHER}"
+    WriteRegDWORD ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "NoModify" 1
+    WriteRegDWORD ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "NoRepair" 1
+    WriteRegStr HKLM "Software\MarketStore POS" "InstallDir" "$INSTDIR"
 
     ; Estimated Size
     ${GetSize} "$INSTDIR" "/S=0K" $0 $1 $2
@@ -101,6 +119,9 @@ SectionEnd
 ; Uninstallation Section
 ; -------------------------------------------------------------------------
 Section Uninstall
+    SetShellVarContext all
+    SetRegView 64
+
     ; Terminate running app
     nsExec::Exec 'taskkill /F /IM "${PRODUCT_EXE}"'
 

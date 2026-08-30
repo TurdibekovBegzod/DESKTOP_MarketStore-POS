@@ -778,8 +778,8 @@ class LoginDialog(QDialog):
         logged_user["api_user_uid"] = user_uid
 
         # Credentials are already proven at this point. A sync hiccup must never
-        # turn a valid login into "wrong e-mail or password" - the main window
-        # retries the sync itself.
+        # turn a valid login into "wrong e-mail or password"; the main window
+        # reports the connection state without retrying a failed data upload.
         try:
             sync_result = sync_service.synchronize_account_storage(logged_user)
             if activation.get("persistent_source"):

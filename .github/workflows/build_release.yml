@@ -68,10 +68,25 @@ jobs:
           choco install nsis -y
           $nsisExe = "C:\Program Files (x86)\NSIS\makensis.exe"
           if (-not (Test-Path $nsisExe)) { $nsisExe = "makensis" }
-          $version = "${{ github.ref_name }}".TrimStart("v")
+          $appVersion = python -c "import sys; sys.path.insert(0, 'app'); from version import APP_VERSION; print(APP_VERSION)"
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $version = "${{ github.ref_name }}".TrimStart("v")
+            if ($version -notmatch '^\d+\.\d+\.\d+$') {
+              throw "Release tag must use vMAJOR.MINOR.PATCH format; received '${{ github.ref_name }}'."
+            }
+            if ($appVersion.Trim() -ne $version) {
+              throw "Tag version $version does not match app/version.py ($appVersion)."
+            }
+          } else {
+            $version = $appVersion.Trim()
+          }
           Set-Location packaging
           & $nsisExe "/DPRODUCT_VERSION=$version" installer.nsi
+          $nsisExit = $LASTEXITCODE
           Set-Location ..
+          if ($nsisExit -ne 0) { throw "NSIS failed with exit code $nsisExit." }
+          $setup = "dist/MarketStore_Setup_$version.exe"
+          if (-not (Test-Path $setup)) { throw "Expected installer was not created: $setup" }
 
       - name: Sign and Verify Windows Setup
         shell: pwsh

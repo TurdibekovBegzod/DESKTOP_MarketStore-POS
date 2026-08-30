@@ -198,7 +198,7 @@ class AutoSyncTest(unittest.TestCase):
         self.assertEqual(pushes, [])
         self.assertEqual(outcome["pushed"], 0)
 
-    def test_a_conflict_is_re_read_and_retried_once(self):
+    def test_a_conflict_is_not_automatically_resent(self):
         db.add_product({"barcode": "MINE", "name": "Meniki", "price": 1,
                         "cost": 1, "stock": 1, "unit": "dona"})
         attempts = {"push": 0}
@@ -215,8 +215,8 @@ class AutoSyncTest(unittest.TestCase):
                           return_value={"generation": 3, "purge_generation": 0}):
             outcome = sync_service.auto_sync_turn(self.owner)
 
-        self.assertEqual(attempts["push"], 2)
-        self.assertFalse(outcome["conflict"])
+        self.assertEqual(attempts["push"], 1)
+        self.assertTrue(outcome["conflict"])
 
     # -- applying a download in pieces ------------------------------------
     def test_a_large_download_is_applied_in_bounded_pieces(self):
@@ -235,8 +235,8 @@ class AutoSyncTest(unittest.TestCase):
         self.assertEqual(imported, 450)
         self.assertEqual(len(db.get_all_products()), 450)
 
-    # -- writing money needs the server -----------------------------------
-    def test_money_is_refused_while_the_server_is_unreachable(self):
+    # -- all business writes need the server ------------------------------
+    def test_business_writes_are_refused_while_the_server_is_unreachable(self):
         product = db.add_product({"barcode": "P1", "name": "Mahsulot", "price": 1000,
                                   "cost": 600, "stock": 10, "unit": "dona"})
         cashier = db.add_user("k@example.com", role="cashier", username="K")
@@ -246,10 +246,14 @@ class AutoSyncTest(unittest.TestCase):
         try:
             with self.assertRaises(db.AppError) as refused:
                 db.create_sale(None, cashier, cart, 1000, 0, 1000, "naqd")
-            self.assertIn("Internet", str(refused.exception))
+            self.assertIn("internetga ulanmagansiz yoki server ishlamayapti", str(refused.exception).lower())
 
             with self.assertRaises(db.AppError):
                 db.add_expense(None, 5000, "UZS", "Ijara", user_id=cashier)
+            with self.assertRaises(db.AppError):
+                db.add_stock(product, 1, "offline")
+            with self.assertRaises(db.AppError):
+                db.add_customer("Offline", "+99890", "offline@example.com")
         finally:
             db.set_online_check(None)
 
@@ -257,8 +261,8 @@ class AutoSyncTest(unittest.TestCase):
         sale_id = db.create_sale(None, cashier, cart, 1000, 0, 1000, "naqd")
         self.assertTrue(db.is_row_uuid(sale_id))
 
-    def test_stock_and_reports_still_work_while_offline(self):
-        """Only writing money is blocked; looking things up is not."""
+    def test_reads_and_reports_still_work_while_offline(self):
+        """All writes are blocked, but looking things up is not."""
         db.add_product({"barcode": "P2", "name": "Mahsulot", "price": 1000,
                         "cost": 600, "stock": 10, "unit": "dona"})
         db.set_online_check(lambda: False)

@@ -141,10 +141,11 @@ UUID_KEYED_TABLES = frozenset(
 )
 
 
-# Money must be written where every device can see it. A sale rung up with no
-# way to reach the server cannot be reconciled with what the other devices did
-# in the meantime, so it is refused rather than written and argued about later.
-# Unset means unrestricted, and "not known to be offline" counts as online.
+# Business data must only be changed while this device has a verified live
+# connection to the server. Otherwise some screens would accept offline writes
+# while sales rejected them, leaving the user unable to predict which action
+# works. Unset remains unrestricted for database initialisation and tests that
+# do not run the desktop connection monitor.
 _ONLINE_CHECK = None
 
 
@@ -185,16 +186,16 @@ def is_online():
     try:
         return bool(_ONLINE_CHECK())
     except Exception:
-        return True
+        # A broken connectivity check is not proof of a working connection.
+        return False
 
 
 def require_online(action=None):
     if is_online():
         return
-    what = f" ({action})" if action else ""
     raise AppError(
-        "Internet aloqasi yo'q, shuning uchun bu amalni bajarib bo'lmaydi"
-        f"{what}.\n\nAloqa tiklanganda qayta urinib ko'ring."
+        "Hozir internetga ulanmagansiz yoki server ishlamayapti.\n\n"
+        "Aloqa tiklangach qayta urinib ko'ring."
     )
 
 
@@ -215,6 +216,35 @@ class Row(dict):
             return self[key]
         except KeyError as exc:
             raise AttributeError(key) from exc
+
+
+def _is_synced_model_instance(obj):
+    return getattr(obj, "__tablename__", None) in SYNC_TABLES
+
+
+@event.listens_for(Session, "before_flush")
+def _require_online_for_synced_writes(session, _flush_context, _instances):
+    """Reject every local business-data mutation before SQLite is changed.
+
+    Server downloads and startup reconciliation run inside ``suspend_sync``;
+    they are already backed by a live API request and must remain able to fill
+    the local session cache. Every ordinary insert, edit, and delete goes
+    through this one guard, including future features that forget to call
+    ``require_online`` themselves.
+    """
+    if _is_sync_suspended():
+        return
+    has_synced_write = any(_is_synced_model_instance(obj) for obj in session.new)
+    if not has_synced_write:
+        has_synced_write = any(
+            _is_synced_model_instance(obj)
+            and session.is_modified(obj, include_collections=False)
+            for obj in session.dirty
+        )
+    if not has_synced_write:
+        has_synced_write = any(_is_synced_model_instance(obj) for obj in session.deleted)
+    if has_synced_write:
+        require_online("ma'lumotlarni saqlash")
 
 
 @event.listens_for(Session, "before_flush")
@@ -265,6 +295,11 @@ def _mark_session_writes(session, _flush_context):
 @event.listens_for(Session, "do_orm_execute")
 def _mark_bulk_writes(execute_state):
     if execute_state.is_delete or execute_state.is_update:
+        if not _is_sync_suspended():
+            mapper = getattr(execute_state, "bind_mapper", None)
+            table_name = getattr(getattr(mapper, "class_", None), "__tablename__", None)
+            if table_name in SYNC_TABLES:
+                require_online("ma'lumotlarni saqlash")
         execute_state.session.info["has_writes"] = True
 
 
@@ -5392,6 +5427,28 @@ def get_product_sales_archive(query="", start_date=None, end_date=None, only_cas
                 customer_phone=sale.customer_phone or customer_phone,
             )))
         return result
+
+
+def count_pending_sale_items(only_cashiers=True):
+    """Count active product rows waiting for sale finalization."""
+    with session_scope() as session:
+        stmt = (
+            select(func.count(SaleItem.id))
+            .join(Sale, Sale.id == SaleItem.sale_id)
+            .outerjoin(User, User.id == Sale.cashier_id)
+            .where(
+                SaleItem.quantity > func.coalesce(SaleItem.returned_quantity, 0),
+                func.coalesce(Sale.is_finalized, 0) == 0,
+            )
+        )
+        if only_cashiers:
+            stmt = stmt.where(
+                or_(
+                    User.role == "cashier",
+                    and_(User.role != "admin", User.id.isnot(None)),
+                )
+            )
+        return int(session.scalar(stmt) or 0)
 
 
 def get_finance_rows(start_date, end_date):

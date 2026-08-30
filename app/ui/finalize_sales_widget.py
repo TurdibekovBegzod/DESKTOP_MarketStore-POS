@@ -314,6 +314,7 @@ class FinalizeSalesWidget(QWidget):
         self.period_combo.addItem("Haftalik", "week")
         self.period_combo.addItem("Oylik", "month")
         self.period_combo.addItem("Barchasi", "all")
+        self.period_combo.setCurrentIndex(self.period_combo.findData("month"))
         self.period_combo.currentIndexChanged.connect(lambda: self.load_data())
         toolbar.addWidget(self.period_combo)
 
