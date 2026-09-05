@@ -1,3 +1,5 @@
+import math
+import re
 from datetime import date, timedelta
 
 from PyQt6.QtWidgets import (
@@ -5,90 +7,437 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QDateEdit, QComboBox,
     QGridLayout, QFrame, QSizePolicy, QCalendarWidget
 )
-from PyQt6.QtCore import Qt, QDate, QPointF
-from PyQt6.QtGui import QPainter, QPen, QColor, QFont
+from PyQt6.QtCore import Qt, QDate, QPointF, QRectF, QVariantAnimation, QEasingCurve
+from PyQt6.QtGui import (
+    QPainter, QPen, QColor, QFont, QPainterPath, QLinearGradient, QBrush
+)
 import database as db
 from ui.async_loader import AsyncDataLoader, make_progress_bar
 from ui.i18n import set_language, t
 
 
+def _is_dark(color):
+    """Chart palette follows the page it sits on, not the sidebar."""
+    if not color:
+        return False
+    shade = QColor(color)
+    if not shade.isValid():
+        return False
+    return shade.lightness() < 128
+
+
+def _short_number(value):
+    """Compact axis label: 1250000 -> 1.25M."""
+    magnitude = abs(value)
+    if magnitude >= 1_000_000_000:
+        return f"{value / 1_000_000_000:.2f}".rstrip("0").rstrip(".") + "B"
+    if magnitude >= 1_000_000:
+        return f"{value / 1_000_000:.2f}".rstrip("0").rstrip(".") + "M"
+    if magnitude >= 1_000:
+        return f"{value / 1_000:.1f}".rstrip("0").rstrip(".") + "K"
+    if float(value).is_integer():
+        return f"{int(value)}"
+    return f"{value:.1f}"
+
+
+def _nice_step(raw_step):
+    """Smallest 1/2/2.5/5 x 10^n step that is at least raw_step."""
+    if raw_step <= 0:
+        return 1.0
+    exponent = math.floor(math.log10(raw_step))
+    magnitude = 10.0 ** exponent
+    for factor in (1, 2, 2.5, 5):
+        if factor * magnitude >= raw_step - 1e-12:
+            return factor * magnitude
+    return 10.0 * magnitude
+
+
+def _nice_bounds(min_value, max_value, ticks):
+    """Round the axis so gridlines land on human numbers."""
+    ticks = max(ticks, 1)
+    if max_value <= min_value:
+        max_value = min_value + 1
+    step = _nice_step((max_value - min_value) / ticks)
+    low = math.floor(min_value / step) * step if min_value < 0 else 0.0
+    # widening the step is cheaper than adding gridlines the caller did not ask for
+    while low + step * ticks < max_value - 1e-9:
+        step = _nice_step(step * 1.0001)
+        if min_value < 0:
+            low = math.floor(min_value / step) * step
+    return low, low + step * ticks
+
+
+class CountUpLabel(QLabel):
+    """Summary value that counts from its previous figure up to the new one.
+
+    setText() keeps its normal signature, so callers pass the already formatted
+    string ("1 250 000 so'm", "12", "45.50 USD") and the label works out which
+    part is the number, animating that while the prefix and suffix stay put.
+    """
+
+    DURATION_MS = 750
+    # a number with optional sign, thousands separators and decimals; the group
+    # must end on a digit so a trailing space stays with the suffix (" so'm")
+    NUMBER = re.compile(r"[-+]?\d(?:[\d\s ,]*\d)?(?:\.\d+)?")
+
+    def __init__(self, text="0", parent=None):
+        super().__init__(text, parent)
+        self._animation = None
+        self._value = 0.0
+        self._prefix = ""
+        self._suffix = ""
+        self._decimals = 0
+        self._separator = ","
+        self._target = 0.0
+        self._final_text = text
+        self._enabled = True
+
+    def setAnimationEnabled(self, enabled):
+        self._enabled = bool(enabled)
+
+    def replay(self):
+        """Count the figure already on screen up again, from zero.
+
+        The page loads its data before the user ever opens it, so on that first
+        visit setText() sees no change and nothing moves. Replaying on show is
+        what makes the figures animate when the page is actually looked at.
+        """
+        text = self._final_text or self.text()
+        if not self._enabled or self._parse(text) is None:
+            return
+        self._stop()
+        self._value = 0.0
+        self.setText(text)
+
+    def text(self):
+        """The figure this label stands for, not the frame it happens to show.
+
+        While counting, the visible string is a step along the way. Anything
+        asking the label what it says wants the settled value.
+        """
+        if self._animation is not None:
+            return self._final_text
+        return super().text()
+
+    def setText(self, text):
+        text = "" if text is None else str(text)
+        parsed = self._parse(text)
+        # kept on every path, so replay() always has the caller's latest string
+        self._final_text = text
+        if not self._enabled or parsed is None:
+            self._stop()
+            self._value = parsed[0] if parsed else 0.0
+            super().setText(text)
+            return
+
+        target, prefix, suffix, decimals, separator = parsed
+        start = self._value
+        self._prefix, self._suffix = prefix, suffix
+        self._decimals, self._separator = decimals, separator
+
+        # nothing to watch: same figure, or a jump so small the tween is invisible
+        if abs(target - start) < 10 ** -(decimals + 1):
+            self._stop()
+            self._value = target
+            super().setText(text)
+            return
+
+        self._stop()
+        # held on self rather than captured in a lambda, so the animation keeps
+        # no extra reference to this label while it runs
+        self._target = target
+        animation = QVariantAnimation(self)
+        animation.setStartValue(float(start))
+        animation.setEndValue(float(target))
+        animation.setDuration(self.DURATION_MS)
+        animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        animation.valueChanged.connect(self._on_step)
+        # land on the caller's exact string, never on our re-rendering of it
+        animation.finished.connect(self._finish)
+        self._animation = animation
+        animation.start()
+
+    def _finish(self):
+        self._value = self._target
+        self._animation = None
+        super().setText(self._final_text)
+
+    def _on_step(self, value):
+        self._value = float(value)
+        super().setText(f"{self._prefix}{self._render(self._value)}{self._suffix}")
+
+    def _render(self, value):
+        text = f"{value:,.{self._decimals}f}"
+        if self._separator != ",":
+            text = text.replace(",", self._separator)
+        return text
+
+    def _stop(self):
+        if self._animation is not None:
+            self._animation.stop()
+            self._animation = None
+
+    def _parse(self, text):
+        """Split "1 250 000 so'm" into value, prefix, suffix and number format."""
+        match = self.NUMBER.search(text)
+        if not match:
+            return None
+        raw = match.group(0)
+        # the first grouping character in the number decides how we re-render it
+        separator = next((char for char in raw if char in ",  "), ",")
+        cleaned = re.sub(r"[\s ,]", "", raw)
+        try:
+            value = float(cleaned)
+        except ValueError:
+            return None
+        decimals = len(cleaned.split(".")[1]) if "." in cleaned else 0
+        return value, text[:match.start()], text[match.end():], decimals, separator
+
+
 class LineChart(QWidget):
+    """Smooth-curve chart. Every point of the period fits in one view."""
+
+    PADDING = 18
+    DURATION_MS = 750
+
     def __init__(self, title="Grafik", color="#3b82f6"):
         super().__init__()
         self.title = title
         self.color = color
         self.points = []
         self.series = []
-        self.view_start = 0
-        self.visible_count = 14
-        self.drag_start_x = None
-        self.drag_start_view = 0
+        self.dark = False
+        self.hover_index = None
+        self._plotted = []
+        self._chart_rect = QRectF()
+        self._progress = 1.0
+        self._animation = None
+        self._animate = True
         self.setMinimumHeight(190)
-        self.setCursor(Qt.CursorShape.OpenHandCursor)
-        self.setStyleSheet("background:white;border:1px solid #e2e8f0;border-radius:8px;")
+        self.setMouseTracking(True)
+        self.setStyleSheet("background:transparent;border:none;")
 
-    def set_data(self, points):
+    # ---------- data ----------
+
+    def set_data(self, points, animate=True):
         self.points = points
         self.series = []
-        self.view_start = min(self.view_start, self._max_view_start())
-        self.update()
+        self.hover_index = None
+        self._restart(animate)
 
-    def set_series(self, series):
+    def set_series(self, series, animate=True):
         self.series = series
         self.points = series[0]["points"] if series else []
-        self.view_start = min(self.view_start, self._max_view_start())
+        self.hover_index = None
+        self._restart(animate)
+
+    def set_dark(self, dark):
+        self.dark = bool(dark)
         self.update()
 
+    def setAnimationEnabled(self, enabled):
+        self._animate = bool(enabled)
+
+    def replay(self):
+        """Draw the curve in again from the left, keeping the current data."""
+        if self.points:
+            self._restart(True)
+
+    # ---------- reveal animation ----------
+
+    def _restart(self, animate):
+        self._stop()
+        if not (animate and self._animate) or len(self.points) < 2:
+            self._progress = 1.0
+            self.update()
+            return
+        self._progress = 0.0
+        animation = QVariantAnimation(self)
+        animation.setStartValue(0.0)
+        animation.setEndValue(1.0)
+        animation.setDuration(self.DURATION_MS)
+        animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        animation.valueChanged.connect(self._on_progress)
+        animation.finished.connect(self._on_revealed)
+        self._animation = animation
+        animation.start()
+
+    def _on_progress(self, value):
+        self._progress = float(value)
+        self.update()
+
+    def _on_revealed(self):
+        self._progress = 1.0
+        self._animation = None
+        self.update()
+
+    def _stop(self):
+        if self._animation is not None:
+            self._animation.stop()
+            self._animation = None
+
+    # ---------- palette ----------
+
+    def _palette(self):
+        if self.dark:
+            return {
+                "card": QColor("#1b1b33"),
+                "card_edge": QColor("#2f2f52"),
+                "title": QColor("#f1f5f9"),
+                "axis": QColor("#94a3b8"),
+                "grid": QColor(148, 163, 184, 46),
+                "dot_edge": QColor("#1b1b33"),
+                "tooltip": QColor(9, 9, 24, 238),
+                "tooltip_text": QColor("#f8fafc"),
+            }
+        return {
+            "card": QColor("#ffffff"),
+            "card_edge": QColor("#e2e8f0"),
+            "title": QColor("#1e293b"),
+            "axis": QColor("#64748b"),
+            "grid": QColor(148, 163, 184, 58),
+            "dot_edge": QColor("#ffffff"),
+            "tooltip": QColor(15, 23, 42, 238),
+            "tooltip_text": QColor("#f8fafc"),
+        }
+
+    # ---------- geometry ----------
+
+    def _all_series(self):
+        if self.series:
+            return self.series
+        label = self.title.split(":")[-1].strip() or self.title
+        return [{"label": label, "color": self.color, "points": self.points}]
+
+    @staticmethod
+    def _smooth_path(points, close_to=None):
+        """Monotone cubic through the points: smooth, but never past the data.
+
+        A plain Catmull-Rom spline overshoots after a steep drop, which dips the
+        curve below zero between two zero days and reads as negative takings.
+        Slopes are clamped the Fritsch-Carlson way, so a run of equal values
+        stays perfectly flat and the curve never leaves the range of its
+        neighbouring points.
+        """
+        path = QPainterPath()
+        if not points:
+            return path
+        path.moveTo(points[0])
+        count = len(points)
+        if count == 1:
+            return path
+
+        # secant slope of each segment
+        secants = []
+        for index in range(count - 1):
+            run = points[index + 1].x() - points[index].x()
+            rise = points[index + 1].y() - points[index].y()
+            secants.append(rise / run if run else 0.0)
+
+        # tangent at each point, averaged from the segments either side
+        tangents = [secants[0]]
+        for index in range(1, count - 1):
+            before, after = secants[index - 1], secants[index]
+            # a local peak, trough or flat run gets a flat tangent
+            tangents.append(0.0 if before * after <= 0 else (before + after) / 2.0)
+        tangents.append(secants[-1])
+
+        # clamp so no segment can bulge outside the values that bound it
+        for index, secant in enumerate(secants):
+            if secant == 0:
+                tangents[index] = 0.0
+                tangents[index + 1] = 0.0
+                continue
+            alpha = tangents[index] / secant
+            beta = tangents[index + 1] / secant
+            size = math.hypot(alpha, beta)
+            if size > 3.0:
+                scale = 3.0 / size
+                tangents[index] = scale * alpha * secant
+                tangents[index + 1] = scale * beta * secant
+
+        for index in range(count - 1):
+            p1, p2 = points[index], points[index + 1]
+            run = (p2.x() - p1.x()) / 3.0
+            c1 = QPointF(p1.x() + run, p1.y() + run * tangents[index])
+            c2 = QPointF(p2.x() - run, p2.y() - run * tangents[index + 1])
+            path.cubicTo(c1, c2, p2)
+
+        if close_to is not None:
+            path.lineTo(points[-1].x(), close_to)
+            path.lineTo(points[0].x(), close_to)
+            path.closeSubpath()
+        return path
+
+    def _label_step(self, labels, chart_width, painter):
+        """Skip labels so they never collide, however dense the period is."""
+        count = len(labels)
+        if count <= 1:
+            return 1
+        widest = max((painter.fontMetrics().horizontalAdvance(text) for text in labels), default=30)
+        slot = chart_width / count
+        needed = (widest + 14) / max(slot, 1)
+        step = int(needed)
+        return max(1, step + (1 if needed > step else 0))
+
+    # ---------- painting ----------
+
     def paintEvent(self, event):
-        super().paintEvent(event)
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        palette = self._palette()
 
-        rect = self.rect().adjusted(18, 12, -18, -12)
-        painter.setPen(QColor("#4b5563"))
-        painter.setFont(QFont("Segoe UI", 11, QFont.Weight.Normal))
-        painter.drawText(rect.left(), rect.top(), rect.width(), 24, Qt.AlignmentFlag.AlignCenter, self.title)
+        card = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        painter.setPen(QPen(palette["card_edge"], 1))
+        painter.setBrush(palette["card"])
+        painter.drawRoundedRect(card, 12, 12)
 
-        grid_lines = 5
-        chart_series = self._visible_series()
-        all_points = [point for series in chart_series for point in series["points"]]
+        rect = self.rect().adjusted(self.PADDING, 12, -self.PADDING, -12)
+        painter.setPen(palette["title"])
+        painter.setFont(QFont("Segoe UI", 11, QFont.Weight.DemiBold))
+        painter.drawText(rect.left(), rect.top(), rect.width(), 24,
+                         Qt.AlignmentFlag.AlignCenter, self.title)
 
+        chart_series = self._all_series()
+        all_points = [point for item in chart_series for point in item["points"]]
         if not all_points:
-            chart = rect.adjusted(54, 38, -14, -92)
-            painter.setPen(QColor("#94a3b8"))
-            painter.drawText(chart, Qt.AlignmentFlag.AlignCenter, "Ma'lumot yo'q")
+            painter.setPen(palette["axis"])
+            painter.setFont(QFont("Segoe UI", 10))
+            painter.drawText(rect.adjusted(54, 38, -14, -92),
+                             Qt.AlignmentFlag.AlignCenter, "Ma'lumot yo'q")
+            self._plotted = []
             return
 
+        grid_lines = 5
         values = [value for _, value in all_points]
-        min_value = min(0, min(values))
-        max_value = max(0, max(values))
-        if max_value == 0 and min_value < 0:
-            max_value = 0
-        elif min_value == 0 and max_value > 0:
-            min_value = 0
+        min_value, max_value = _nice_bounds(min(0, min(values)), max(0, max(values)), grid_lines)
         value_range = (max_value - min_value) or 1
 
         painter.setFont(QFont("Segoe UI", 8))
-        y_axis_labels = [f"{max_value - (step / grid_lines) * value_range:,.0f}" for step in range(grid_lines + 1)]
-        y_label_width = max(painter.fontMetrics().horizontalAdvance(label) for label in y_axis_labels)
-        chart = rect.adjusted(y_label_width + 18, 38, -14, -92)
+        y_axis_labels = [
+            _short_number(max_value - (step / grid_lines) * value_range)
+            for step in range(grid_lines + 1)
+        ]
+        y_label_width = max(painter.fontMetrics().horizontalAdvance(text) for text in y_axis_labels)
+        chart = QRectF(rect.adjusted(y_label_width + 18, 38, -14, -92))
+        self._chart_rect = chart
 
-        painter.setPen(QPen(QColor("#d9d9d9"), 1))
+        painter.setPen(QPen(palette["grid"], 1))
         for step in range(grid_lines + 1):
             y = chart.top() + (step / grid_lines) * chart.height()
-            painter.drawLine(chart.left(), int(y), chart.right(), int(y))
+            painter.drawLine(QPointF(chart.left(), y), QPointF(chart.right(), y))
 
-        painter.setPen(QColor("#4b5563"))
+        painter.setPen(palette["axis"])
         for step in range(grid_lines + 1):
             y = chart.top() + (step / grid_lines) * chart.height()
-            painter.drawText(
-                chart.left() - y_label_width - 8,
-                int(y) - 8,
-                y_label_width,
-                16,
-                Qt.AlignmentFlag.AlignRight,
-                y_axis_labels[step],
-            )
+            painter.drawText(QRectF(chart.left() - y_label_width - 8, y - 8, y_label_width, 16),
+                             Qt.AlignmentFlag.AlignRight, y_axis_labels[step])
+
+        # baseline the curve grows out of: the zero line when it is in view,
+        # otherwise the floor of the chart
+        baseline = chart.bottom() - ((0 - min_value) / value_range) * chart.height()
+        baseline = max(chart.top(), min(chart.bottom(), baseline))
 
         plotted_by_series = []
         for item in chart_series:
@@ -99,105 +448,171 @@ class LineChart(QWidget):
                 x = chart.left() + (index / count) * chart.width()
                 y = chart.bottom() - ((value - min_value) / value_range) * chart.height()
                 plotted.append(QPointF(x, y))
-
-            color = QColor(item["color"])
-            painter.setPen(QPen(color, 2.5))
-            for index in range(1, len(plotted)):
-                painter.drawLine(plotted[index - 1], plotted[index])
-
-            painter.setBrush(color)
-            painter.setPen(QPen(QColor("#ffffff"), 1.5))
-            for point in plotted:
-                painter.drawEllipse(point, 4.5, 4.5)
             plotted_by_series.append((item, plotted))
 
-        label_points = chart_series[0]["points"]
-        label_plotted = plotted_by_series[0][1] if plotted_by_series else []
-        painter.setPen(QColor("#374151"))
-        painter.setFont(QFont("Segoe UI", 7))
-        for index, (label, _) in enumerate(label_points):
-            x = label_plotted[index].x()
-            if len(label_points) > 12:
-                painter.save()
-                painter.translate(x - 4, chart.bottom() + 30)
-                painter.rotate(-45)
-                painter.drawText(0, 0, label)
-                painter.restore()
-            else:
-                painter.drawText(int(x - 22), chart.bottom() + 22, 44, 14, Qt.AlignmentFlag.AlignCenter, label)
+        # hover must hit the settled positions, never a frame of the animation
+        self._plotted = plotted_by_series
 
+        # the whole curve rises out of the baseline, keeping its shape as it grows
+        if self._progress < 1.0:
+            grown = []
+            for item, plotted in plotted_by_series:
+                grown.append((item, [
+                    QPointF(point.x(), baseline + (point.y() - baseline) * self._progress)
+                    for point in plotted
+                ]))
+        else:
+            grown = plotted_by_series
+
+        # Every series gets a wash of its own colour under it. With several on
+        # the chart the washes overlap, so they are drawn fainter, and all of
+        # them go down before any line, leaving no line buried under a fill.
+        alpha = 130 if self.dark else 105
+        if len(grown) > 1:
+            # the more washes stack up, the lighter each has to be
+            alpha = max(30, alpha // len(grown))
+        for item, plotted in grown:
+            if len(plotted) < 2:
+                continue
+            color = QColor(item["color"])
+            fill = self._smooth_path(plotted, close_to=chart.bottom())
+            gradient = QLinearGradient(0.0, chart.top(), 0.0, chart.bottom())
+            top = QColor(color)
+            top.setAlpha(alpha)
+            bottom = QColor(color)
+            bottom.setAlpha(0)
+            gradient.setColorAt(0.0, top)
+            gradient.setColorAt(1.0, bottom)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(gradient))
+            painter.drawPath(fill)
+
+        for item, plotted in grown:
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(QColor(item["color"]), 2.6, Qt.PenStyle.SolidLine,
+                                Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+            painter.drawPath(self._smooth_path(plotted))
+
+        # markers shrink then vanish as the period gets denser, so the curve stays clean
+        dot_radius = 4.2 if len(self.points) <= 16 else (2.6 if len(self.points) <= 32 else 0)
+        if dot_radius:
+            for item, plotted in grown:
+                painter.setBrush(QColor(item["color"]))
+                painter.setPen(QPen(palette["dot_edge"], 1.5))
+                for point in plotted:
+                    painter.drawEllipse(point, dot_radius, dot_radius)
+
+        label_points = chart_series[0]["points"]
+        label_plotted = plotted_by_series[0][1]
+
+        painter.setFont(QFont("Segoe UI", 7))
+        labels = [str(label) for label, _ in label_points]
+        step = self._label_step(labels, chart.width(), painter)
+        painter.setPen(palette["axis"])
+        last = len(labels) - 1
+        shown = [index for index in range(0, last + 1, step)]
+        if shown and shown[-1] != last:
+            # the period's final tick always shows; drop the previous one if they would touch
+            if last - shown[-1] <= step / 2:
+                shown.pop()
+            shown.append(last)
+        for index in shown:
+            x = label_plotted[index].x()
+            painter.drawText(QRectF(x - 26, chart.bottom() + 8, 52, 14),
+                             Qt.AlignmentFlag.AlignCenter, labels[index])
+
+        self._draw_legend(painter, rect, chart_series, palette)
+        self._draw_hover(painter, chart, chart_series, plotted_by_series, palette)
+
+    def _draw_legend(self, painter, rect, chart_series, palette):
         painter.setFont(QFont("Segoe UI", 8))
         legend_items = []
         for item in chart_series:
             label = item["label"]
             if len(label) > 20:
                 label = label[:17] + "..."
-            legend_items.append((label, item["color"], painter.fontMetrics().horizontalAdvance(label) + 42))
+            legend_items.append((label, item["color"],
+                                 painter.fontMetrics().horizontalAdvance(label) + 42))
         total_width = sum(width for _, _, width in legend_items) + max(0, len(legend_items) - 1) * 10
         legend_x = rect.center().x() - total_width / 2
         legend_y = rect.bottom() - 12
         for label, color, width in legend_items:
-            painter.setPen(QPen(QColor(color), 2.5))
-            painter.drawLine(int(legend_x), legend_y, int(legend_x + 24), legend_y)
+            painter.setPen(QPen(QColor(color), 2.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            painter.drawLine(QPointF(legend_x, legend_y), QPointF(legend_x + 24, legend_y))
             painter.setBrush(QColor(color))
-            painter.setPen(QPen(QColor("#ffffff"), 1.5))
+            painter.setPen(QPen(palette["dot_edge"], 1.5))
             painter.drawEllipse(QPointF(legend_x + 12, legend_y), 4, 4)
-            painter.setPen(QColor("#4b5563"))
-            painter.drawText(int(legend_x + 32), legend_y - 8, int(width - 32), 16, Qt.AlignmentFlag.AlignLeft, label)
+            painter.setPen(palette["axis"])
+            painter.drawText(QRectF(legend_x + 32, legend_y - 8, width - 32, 16),
+                             Qt.AlignmentFlag.AlignLeft, label)
             legend_x += width + 10
 
-        total_points = len(self.points)
-        visible_points = len(label_points)
-        if total_points > self.visible_count:
-            painter.setPen(QColor("#94a3b8"))
-            painter.setFont(QFont("Segoe UI", 8))
-            text = f"{self.view_start + 1}-{self.view_start + visible_points} / {total_points}"
-            painter.drawText(rect.right() - 90, rect.top() + 4, 86, 18, Qt.AlignmentFlag.AlignRight, text)
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton and len(self.points) > self.visible_count:
-            self.drag_start_x = event.position().x()
-            self.drag_start_view = self.view_start
-            self.setCursor(Qt.CursorShape.ClosedHandCursor)
-            event.accept()
+    def _draw_hover(self, painter, chart, chart_series, plotted_by_series, palette):
+        index = self.hover_index
+        if index is None or not plotted_by_series:
             return
-        super().mousePressEvent(event)
+        first_points = chart_series[0]["points"]
+        if index >= len(first_points):
+            return
+        x = plotted_by_series[0][1][index].x()
+
+        guide = QColor(palette["axis"])
+        guide.setAlpha(120)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(guide, 1, Qt.PenStyle.DashLine))
+        painter.drawLine(QPointF(x, chart.top()), QPointF(x, chart.bottom()))
+
+        lines = [str(first_points[index][0])]
+        for item, plotted in plotted_by_series:
+            if index >= len(item["points"]):
+                continue
+            painter.setBrush(QColor(item["color"]))
+            painter.setPen(QPen(palette["dot_edge"], 2))
+            painter.drawEllipse(plotted[index], 5.5, 5.5)
+            value = item["points"][index][1]
+            prefix = f"{item['label']}: " if len(plotted_by_series) > 1 else ""
+            lines.append(prefix + f"{value:,.0f}".replace(",", " "))
+
+        painter.setFont(QFont("Segoe UI", 8))
+        metrics = painter.fontMetrics()
+        line_height = metrics.height() + 2
+        box_width = max(metrics.horizontalAdvance(line) for line in lines) + 20
+        box_height = len(lines) * line_height + 10
+        box_x = min(max(x + 12, chart.left()), max(chart.left(), chart.right() - box_width))
+        box = QRectF(box_x, chart.top() + 6, box_width, box_height)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(palette["tooltip"])
+        painter.drawRoundedRect(box, 6, 6)
+        painter.setPen(palette["tooltip_text"])
+        for row, line in enumerate(lines):
+            painter.drawText(QRectF(box.left() + 10, box.top() + 5 + row * line_height,
+                                    box_width - 20, line_height),
+                             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, line)
+
+    # ---------- interaction ----------
 
     def mouseMoveEvent(self, event):
-        if self.drag_start_x is None or len(self.points) <= self.visible_count:
-            super().mouseMoveEvent(event)
-            return
-        width_per_point = max(self.width() / max(self.visible_count, 1), 24)
-        delta = event.position().x() - self.drag_start_x
-        steps = int(delta / width_per_point)
-        self.view_start = max(0, min(self.drag_start_view - steps, self._max_view_start()))
-        self.update()
-        event.accept()
+        index = self._nearest_index(event.position().x())
+        if index != self.hover_index:
+            self.hover_index = index
+            self.update()
+        super().mouseMoveEvent(event)
 
-    def mouseReleaseEvent(self, event):
-        if self.drag_start_x is not None:
-            self.drag_start_x = None
-            self.setCursor(Qt.CursorShape.OpenHandCursor)
-            event.accept()
-            return
-        super().mouseReleaseEvent(event)
+    def leaveEvent(self, event):
+        if self.hover_index is not None:
+            self.hover_index = None
+            self.update()
+        super().leaveEvent(event)
 
-    def _visible_series(self):
-        source = self.series or [{"label": self.title.split(":")[-1].strip() or self.title, "color": self.color, "points": self.points}]
-        if len(self.points) <= self.visible_count:
-            return source
-        end = self.view_start + self.visible_count
-        return [
-            {
-                "label": item["label"],
-                "color": item["color"],
-                "points": item["points"][self.view_start:end],
-            }
-            for item in source
-        ]
-
-    def _max_view_start(self):
-        return max(0, len(self.points) - self.visible_count)
+    def _nearest_index(self, x):
+        if not self._plotted or self._chart_rect.isEmpty():
+            return None
+        if x < self._chart_rect.left() - 12 or x > self._chart_rect.right() + 12:
+            return None
+        plotted = self._plotted[0][1]
+        if not plotted:
+            return None
+        return min(range(len(plotted)), key=lambda i: abs(plotted[i].x() - x))
 
 
 class ReportsWidget(QWidget):
@@ -209,6 +624,7 @@ class ReportsWidget(QWidget):
         self.detail_metric = "count" if self.cashier_only else "revenue"
         self.selected_entity_id = None
         self._async_loader = None
+        self._replay_on_load = False
         self._build_ui()
 
     def _build_ui(self):
@@ -332,8 +748,10 @@ class ReportsWidget(QWidget):
             title_lbl = QLabel(title)
             title_lbl.setObjectName("summary_title")
             title_lbl.setStyleSheet("color:#64748b;font-size:11px;background:transparent;border:none;")
-            value_lbl = QLabel("0")
+            value_lbl = CountUpLabel("0")
             value_lbl.setObjectName("summary_value")
+            # the figure is data, never a phrase to translate mid-count
+            value_lbl.setProperty("i18n_skip", True)
             value_lbl.setProperty("accent_color", color)
             value_lbl.setStyleSheet(f"color:{color};font-size:14px;font-weight:bold;background:transparent;border:none;")
             value_lbl.setWordWrap(False)
@@ -409,7 +827,9 @@ class ReportsWidget(QWidget):
         chart_layout.setSpacing(8)
 
         self.detail_chart = LineChart("Tanlangan hisobot grafigi", "#3b82f6")
-        self.detail_chart.setMinimumHeight(330)
+        # low minimum: the chart shrinks with the window instead of forcing a scrollbar
+        self.detail_chart.setMinimumHeight(200)
+        self.detail_chart.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         chart_layout.addWidget(self.detail_chart, 1)
 
         period_controls = QHBoxLayout()
@@ -433,6 +853,7 @@ class ReportsWidget(QWidget):
 
     def apply_theme(self, theme):
         self.setStyleSheet(f"background:{theme['content']};")
+        self.detail_chart.set_dark(_is_dark(theme.get("content")))
         field_style = f"""
             QDateEdit, QComboBox {{
                 background:{theme['topbar']};
@@ -504,6 +925,33 @@ class ReportsWidget(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        # the page loads its data before it is ever shown, so opening it would
+        # otherwise reveal figures that are already final and perfectly still
+        self._replay_on_load = True
+        # tells the window this page has already loaded itself for this switch
+        self.setProperty("_load_done", True)
+        self.load_data()
+
+    def _replay_animations(self):
+        """Run the cards and the curve again, for someone who just arrived."""
+        for label in self.summary_cards.values():
+            label.replay()
+        self.detail_chart.replay()
+
+    # Only a finalized sale moves the figures on this page. Everything else a
+    # sync brings down (a renamed product, a new customer, a stock movement)
+    # leaves every total and every point on the curve exactly where it was, so
+    # reloading for it would just restart the animations for no reason.
+    SYNC_TABLES_OF_INTEREST = frozenset({
+        "sales", "sale_items", "sale_returns",
+        "expenses", "expense_categories",
+        "currencies",
+    })
+
+    def refresh_from_sync(self, changed_tables=()):
+        changed = set(changed_tables or ())
+        if changed and changed.isdisjoint(self.SYNC_TABLES_OF_INTEREST):
+            return
         self.load_data()
 
     def load_data(self):
@@ -584,6 +1032,9 @@ class ReportsWidget(QWidget):
         self.overall_rows = filled
         self._refresh_report_panel(start_date, end_date, filled)
         set_language(self, self.property("app_language") or "uz")
+        if self._replay_on_load:
+            self._replay_on_load = False
+            self._replay_animations()
 
     def _apply_salary_card_hint(self, deduction, currency):
         """Show, on the salary card, how much was taken back through expenses."""
@@ -1517,8 +1968,13 @@ class SalesDetailsWidget(QWidget):
                 title_lbl = QLabel(title)
                 title_lbl.setObjectName("summary_title")
                 title_lbl.setStyleSheet("color:#64748b;font-size:11px;background:transparent;border:none;")
-                value_lbl = QLabel("0")
+                value_lbl = CountUpLabel("0")
                 value_lbl.setObjectName("summary_value")
+                # counting up belongs to the reports page; here the figures are
+                # read alongside a table of rows and should just be there
+                value_lbl.setAnimationEnabled(False)
+                # the figure is data, never a phrase to translate mid-count
+                value_lbl.setProperty("i18n_skip", True)
                 value_lbl.setProperty("accent_color", color)
                 value_lbl.setStyleSheet(f"color:{color};font-size:14px;font-weight:bold;background:transparent;border:none;")
                 value_lbl.setWordWrap(False)
@@ -1590,6 +2046,8 @@ class SalesDetailsWidget(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        # tells the window this page has already loaded itself for this switch
+        self.setProperty("_load_done", True)
         self.load_data()
 
     def load_data(self, *_args):

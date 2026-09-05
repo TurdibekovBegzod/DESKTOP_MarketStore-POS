@@ -988,7 +988,7 @@ class SyncDialog(QDialog):
             return
         if db.is_remote_session_cache():
             return
-        local_records = db.get_sync_status().get("record_count", 0)
+        local_records = db.get_sync_status(with_record_count=True).get("record_count", 0)
         question = self.labels.get(
             "sync_replace_server_q",
             "Serverdagi ma'lumot O'CHIRILADI va shu qurilmadagi nusxa bilan almashtiriladi.\n\n"
@@ -1359,13 +1359,16 @@ class MainWindow(QMainWindow):
         self.labels = TEXTS.get(self.settings["language"], TEXTS["uz"])
         self._last_activity_saved_at = None
         self._logging_out = False
-        self._activity_event_types = {
-            QEvent.Type.MouseButtonPress,
-            QEvent.Type.MouseButtonRelease,
-            QEvent.Type.KeyPress,
-            QEvent.Type.Wheel,
-            QEvent.Type.TouchBegin,
-        }
+        # Stored as plain ints: the event filter runs for every event in the
+        # application, and comparing raw values skips rebuilding an enum member
+        # on each call.
+        self._activity_event_types = frozenset({
+            int(QEvent.Type.MouseButtonPress),
+            int(QEvent.Type.MouseButtonRelease),
+            int(QEvent.Type.KeyPress),
+            int(QEvent.Type.Wheel),
+            int(QEvent.Type.TouchBegin),
+        })
         self.setWindowTitle(self.settings["app_name"])
         self.setWindowIcon(QIcon(APP_ICON_PATH))
         self.setMinimumSize(1280, 780)
@@ -1400,6 +1403,9 @@ class MainWindow(QMainWindow):
             "id": (self.user or {}).get("id"),
             "name": (self.user or {}).get("username") or (self.user or {}).get("email"),
         })
+        # The filter has to sit on the application so clicks and keystrokes in
+        # nested widgets still count as activity. It therefore runs for every
+        # event Qt delivers, so eventFilter below stays as cheap as possible.
         app = QApplication.instance()
         if app:
             app.installEventFilter(self)
@@ -1531,7 +1537,7 @@ class MainWindow(QMainWindow):
             self._pending_server_operations.remove(operation)
 
     def eventFilter(self, obj, event):
-        if event.type() in self._activity_event_types:
+        if int(event.type()) in self._activity_event_types:
             self._save_user_activity()
         return super().eventFilter(obj, event)
 
@@ -1788,7 +1794,7 @@ class MainWindow(QMainWindow):
 
         self._apply_theme()
         self.toast_manager = ToastManager(self)
-        self._switch_page("sales")
+        self._switch_page("sales", force=True)
         self._refresh_sync_status()
         self._refresh_notif_badge()
         self._refresh_release_badge()
@@ -1934,10 +1940,41 @@ class MainWindow(QMainWindow):
     def _is_group_child(self, key):
         return any(key in items for items in self.nav_group_items.values())
 
-    def _switch_page(self, key):
+    def _switch_page(self, key, force=False):
         if key not in self.pages:
             key = "sales"
 
+        # Clicking the nav button for the page already open is not a request to
+        # reload it. Only the checked state is re-synced, so a group button that
+        # collapsed the tree still lights up correctly. `force` is for the
+        # opening call, where the first page is already current but has never
+        # been loaded.
+        if not force and self.pages[key] is self.stack.currentWidget():
+            self._sync_nav_selection(key)
+            return
+
+        self._sync_nav_selection(key)
+
+        page = self.pages[key]
+        # A page with a showEvent loads itself the moment it becomes current,
+        # and setCurrentWidget delivers that event before it returns. Marking
+        # the load here lets us tell whether the page already did the work, so
+        # one click never runs the same query twice. Pages with no showEvent
+        # (and the case where the window itself is still hidden) leave the
+        # marker untouched and are loaded below as before.
+        page.setProperty("_load_done", False)
+        self.stack.setCurrentWidget(page)
+        self.page_title_lbl.setText(self.labels.get(key, key))
+
+        if hasattr(page, "load_data") and not page.property("_load_done"):
+            page.load_data()
+        self._refresh_page_from_server(key)
+        set_language(page, self.settings.get("language", "uz"))
+        self._apply_page_theme()
+        self._refresh_notif_badge(force=True)
+
+    def _sync_nav_selection(self, key):
+        """Light up the nav button for `key` and open the group holding it."""
         for k, btn in self.nav_buttons.items():
             btn.setChecked(k == key)
         for group_key, group_btn in self.nav_group_buttons.items():
@@ -1952,22 +1989,17 @@ class MainWindow(QMainWindow):
                 group_btn.setExpanded(self.nav_group_widgets[group_key].isVisible())
             self._sync_nav_group_icon_colors(group_btn)
 
-        page = self.pages[key]
-        self.stack.setCurrentWidget(page)
-        self.page_title_lbl.setText(self.labels.get(key, key))
-
-        if hasattr(page, "load_data"):
-            page.load_data()
-        self._refresh_page_from_server(key)
-        set_language(page, self.settings.get("language", "uz"))
-        self._apply_page_theme()
-        self._refresh_notif_badge()
-
-    def _refresh_notif_badge(self):
+    def _refresh_notif_badge(self, force=False):
         if not hasattr(self, "notif_badge_lbl"):
             return
         try:
             unread_count = db.get_unread_notifications_count(user_id=self.user.get("id"))
+            # Also on the one-second timer, so an unchanged count must not
+            # re-show and re-raise the label. Switching pages passes force, so
+            # the badge is lifted back above a freshly stacked widget.
+            if not force and getattr(self, "_notif_badge_count", None) == unread_count:
+                return
+            self._notif_badge_count = unread_count
             if unread_count > 0:
                 self.notif_badge_lbl.setText(str(unread_count) if unread_count < 100 else "99+")
                 self.notif_badge_lbl.show()
@@ -1992,16 +2024,21 @@ class MainWindow(QMainWindow):
         except Exception:
             return
         if count <= 0:
+            self._pending_sales_badge_count = 0
             badge.hide()
             if group_dot is not None:
                 group_dot.hide()
             button.setToolTip("")
             return
         text = str(count)
-        width = max(16, badge.fontMetrics().horizontalAdvance(text) + 8)
-        badge.setFixedSize(width, 16)
-        badge.setText(text)
-        badge.setStyleSheet(self._counter_badge_style())
+        # Same reason as the sync card: this runs every second, and restyling an
+        # unchanged badge repaints it for nothing.
+        if getattr(self, "_pending_sales_badge_count", None) != count:
+            self._pending_sales_badge_count = count
+            width = max(16, badge.fontMetrics().horizontalAdvance(text) + 8)
+            badge.setFixedSize(width, 16)
+            badge.setText(text)
+            badge.setStyleSheet(self._counter_badge_style())
         button.setToolTip(f"{self.labels.get('finalize_sales', 'Sotishni yakunlash')}: {text}")
         self._position_pending_sales_badge()
         badge.show()
@@ -2096,6 +2133,12 @@ class MainWindow(QMainWindow):
             self.sync_badge_lbl.hide()
 
     def _apply_sync_card_state(self, state):
+        # Restyling repaints the widget, and this runs on a one-second timer,
+        # so an unchanged state must not reach setStyleSheet: that repeated
+        # repaint is what makes the status area flicker.
+        if getattr(self, "_sync_card_state", None) == state:
+            return
+        self._sync_card_state = state
         palette = {
             "online": {"bg": "#dcfce7", "border": "#22c55e", "text": "#166534"},
             "working": {"bg": "#fef3c7", "border": "#f59e0b", "text": "#92400e"},
@@ -2175,7 +2218,9 @@ class MainWindow(QMainWindow):
             result = sync_service.pull_server_changes(self.user)
             if result.get("imported"):
                 self._set_logo_icon()
-                self._reload_current_page()
+                # pass on what changed: a page that the change does not concern
+                # can then leave itself alone instead of reloading on a timer
+                self._reload_current_page(result.get("tables") or ())
         except Exception:
             pass
         self._refresh_sync_status()

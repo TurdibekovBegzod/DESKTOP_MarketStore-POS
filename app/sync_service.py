@@ -558,6 +558,9 @@ def pull_server_changes(user, table_name=None, incremental=False):
         "rejected": stats["rejected"],
         "server_time": result.get("server_time"),
         "generation": result.get("generation"),
+        # which tables this download actually touched, so a page can decide
+        # whether the change is any of its business before reloading
+        "tables": stats["tables"],
     }
 
 

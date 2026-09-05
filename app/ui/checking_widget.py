@@ -4,9 +4,26 @@ from PyQt6.QtWidgets import (
     QComboBox
 )
 from PyQt6.QtCore import Qt
+from datetime import date, datetime
 import database as db
 from ui.async_loader import AsyncDataLoader, make_progress_bar
 from ui.i18n import set_language, t
+
+
+def _short_time(value):
+    """A scan today shows just the clock; older ones keep a short date."""
+    if not value:
+        return ""
+    text = str(value)
+    for pattern in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            stamp = datetime.strptime(text[:26] if "." in text else text[:19], pattern)
+        except ValueError:
+            continue
+        if stamp.date() == date.today():
+            return stamp.strftime("%H:%M:%S")
+        return stamp.strftime("%d.%m %H:%M")
+    return text
 
 
 class CheckingWidget(QWidget):
@@ -83,13 +100,14 @@ class CheckingWidget(QWidget):
         checked_layout = checked_panel.layout()
         self.checked_table = self._create_table(include_time=True)
         checked_layout.addWidget(self.checked_table)
-        tables_row.addWidget(checked_panel, 1)
+        # this table has one column more than the other, so it gets more room
+        tables_row.addWidget(checked_panel, 6)
 
         unchecked_panel = self._panel("Tekshiruvdan o'tmaganlar")
         unchecked_layout = unchecked_panel.layout()
         self.unchecked_table = self._create_table(include_time=False)
         unchecked_layout.addWidget(self.unchecked_table)
-        tables_row.addWidget(unchecked_panel, 1)
+        tables_row.addWidget(unchecked_panel, 5)
 
         layout.addLayout(tables_row, 1)
 
@@ -113,19 +131,24 @@ class CheckingWidget(QWidget):
             headers.extend(["Sanaldi", "Qoldi"])
         table.setColumnCount(len(headers))
         table.setHorizontalHeaderLabels(headers)
-        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header = table.horizontalHeader()
+        header.setMinimumSectionSize(52)
+        # The name takes whatever the other columns leave over. They keep their
+        # own sensible widths but stay shrinkable, so a narrow window squeezes
+        # every column a little instead of pushing the table into a scrollbar.
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         for column in range(1, len(headers)):
-            table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
-        table.setColumnWidth(1, 130)
-        table.setColumnWidth(2, 80)
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
+        table.setColumnWidth(1, 110)
+        table.setColumnWidth(2, 68)
+        table.setColumnWidth(3, 68)
+        table.setColumnWidth(4, 60)
         if include_time:
-            table.setColumnWidth(3, 80)
-            table.setColumnWidth(4, 80)
-            table.setColumnWidth(5, 145)
-        else:
-            table.setColumnWidth(3, 80)
-            table.setColumnWidth(4, 80)
+            table.setColumnWidth(5, 104)
         table.verticalHeader().setDefaultSectionSize(42)
+        # a long product name should elide, not shove the other columns aside
+        table.setWordWrap(False)
+        table.setTextElideMode(Qt.TextElideMode.ElideRight)
         table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.setAlternatingRowColors(True)
@@ -266,7 +289,7 @@ class CheckingWidget(QWidget):
                 values.extend([
                     f"{checked}",
                     f"{max(0, expected - checked)}",
-                    item["checked_at"] or "",
+                    _short_time(item["checked_at"]),
                 ])
             else:
                 expected = item["expected_stock"] or 0
@@ -279,6 +302,9 @@ class CheckingWidget(QWidget):
                 cell = QTableWidgetItem(value)
                 if column in (2, 3, 4):
                     cell.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                if column == 0:
+                    # the column elides, so the full name lives in the tooltip
+                    cell.setToolTip(value)
                 table.setItem(row_index, column, cell)
             table.setRowHeight(row_index, 42)
 

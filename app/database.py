@@ -2389,7 +2389,13 @@ def _flush_session_outbox(session):
     return True
 
 
-def get_sync_status():
+def get_sync_status(with_record_count=False):
+    """Sync state for the status bar.
+
+    ``record_count`` walks every synced table with a COUNT(*), which is far too
+    expensive for the once-a-second status refresh, so it is only totalled when
+    a caller actually needs the number.
+    """
     with _get_engine().begin() as conn:
         _ensure_sync_outbox_table(conn)
         last_dirty = _sync_state_get(conn, "last_dirty_at")
@@ -2407,11 +2413,12 @@ def get_sync_status():
         pending_count = outbox_count + tombstone_count
         pending = bool(pending_count > 0 or (last_dirty and (not last_push or str(last_dirty) >= str(last_push))))
         record_count = 0
-        for table_name in SYNC_TABLES:
-            if not _has_table(conn, table_name):
-                continue
-            quoted = _quote_identifier(table_name)
-            record_count += conn.exec_driver_sql(f"SELECT COUNT(*) FROM {quoted}").scalar() or 0
+        if with_record_count:
+            for table_name in SYNC_TABLES:
+                if not _has_table(conn, table_name):
+                    continue
+                quoted = _quote_identifier(table_name)
+                record_count += conn.exec_driver_sql(f"SELECT COUNT(*) FROM {quoted}").scalar() or 0
         return Row(
             pending=pending,
             last_dirty_at=last_dirty,
