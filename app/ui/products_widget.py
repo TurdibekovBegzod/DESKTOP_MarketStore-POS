@@ -1752,7 +1752,11 @@ class ProductsWidget(QWidget):
             top.addWidget(menu_btn, alignment=Qt.AlignmentFlag.AlignTop)
         layout.addLayout(top)
 
-        products_count = len(db.get_all_products(section_id=section["id"]))
+        products_count = sum(
+            1
+            for product in db.get_all_products(section_id=section["id"])
+            if self._available_quantity(product) > 0
+        )
         templates_count = len(db.get_templates(section["id"]))
         language = self.property("app_language") or "uz"
         metrics = QFrame()

@@ -1,0 +1,38 @@
+feat(auth): give the main section a password of its own
+
+Until now the main section was unlocked with the account's e-mail
+password, so a cashier who once saw the owner sign in could walk
+straight into the admin pages. Worse, signing in landed there directly:
+the e-mail password was the admin pages.
+
+The two passwords now start out identical - a new account writes the
+same digest into both - and go their separate ways the moment either is
+changed. `users.admin_password_hash` NULL means the account predates
+this split, so every existing account keeps opening exactly as before
+until its owner sets a password.
+
+Signing in no longer opens the admin pages at all. The account row stays
+an admin, but the session starts at the till, the way a restored session
+already did; the main section is entered from there with its own
+password.
+
+Changing either password is proven by a code mailed to the account's own
+address; `password_reset_codes.purpose` keeps the two kinds of code
+apart, so a code handed out for the main section cannot be spent on the
+account itself. Both changes live in the owner's own row in the
+Kassirlar section, and the unlock prompt carries the same "Parolni
+unutdingizmi?" link as the login screen - a password nobody remembers
+must not lock the owner out of their own shop.
+
+That row also stops offering to demote the account holder. The database
+already refused it; the dialog now says so up front by showing Admin as
+plain text instead of a dropdown, and greys out the delete action, so
+the answer arrives before the click rather than as an error after it.
+
+Kept deliberately server-side: nothing about the password is cached on
+the device, so every till agrees on it and unlocking needs a live
+connection, the same rule signing in already follows.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01R9JF7KY5GJv27gNAXVn6aF
+
