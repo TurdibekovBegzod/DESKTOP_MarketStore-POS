@@ -772,7 +772,12 @@ class LoginDialog(QDialog):
         db.remove_foreign_online_accounts(user["id"], user_uid)
         db.save_account_session(api_user, token)
         logged_user = dict(user)
-        # role is already correctly set by sync_online_user (admin for account owners)
+        # The account row stays an admin - that is who owns the shop. The
+        # session, though, always opens at the till: signing in proves the
+        # e-mail, not the main-section password, and the main section is
+        # entered from there with a password of its own. A restored session
+        # already lands this way; a fresh sign-in now does too.
+        logged_user["role"] = "cashier"
         logged_user["api_access_token"] = token
         logged_user["api_user_id"] = api_user.get("id")
         logged_user["api_user_uid"] = user_uid

@@ -32,7 +32,7 @@ from ui.finance_widget import FinanceWidget
 from ui.checking_widget import CheckingWidget
 from ui.notifications_widget import NotificationsWidget
 from ui.updater_dialog import UpdaterDialog
-from ui.security_dialogs import change_account_password, change_admin_password
+from ui.security_dialogs import change_admin_password
 from ui.i18n import set_language
 
 
@@ -273,8 +273,6 @@ TEXTS = {
         "forgot_password": "Parolni unutdingizmi?",
         "forgot_password_title": "Parolni tiklash",
         "forgot_password_q": "Asosiy oyna parolini tiklashni boshlaysizmi? Emailingizga tasdiqlash kodi yuboriladi.",
-        "change_account_password": "Gmail parolini o'zgartirish",
-        "change_admin_password": "Asosiy oyna parolini o'zgartirish",
         "session_missing": "Sessiya topilmadi. Dasturdan chiqib, qayta kiring.",
         "sync_clean": "Sinxron", "sync_dirty": "Yuborilmagan o'zgarish bor",
         "sync_push": "Yuborish", "sync_pull": "Olish",
@@ -354,8 +352,6 @@ TEXTS = {
         "forgot_password": "Forgot your password?",
         "forgot_password_title": "Reset password",
         "forgot_password_q": "Start resetting the main section password? A verification code will be sent to your email.",
-        "change_account_password": "Change email password",
-        "change_admin_password": "Change main section password",
         "session_missing": "Session was not found. Please sign out and sign in again.",
         "sync_clean": "Synced", "sync_dirty": "Unsynced changes",
         "sync_push": "Upload", "sync_pull": "Download",
@@ -456,8 +452,6 @@ TEXTS["ru"].update({
     "forgot_password": "Забыли пароль?",
     "forgot_password_title": "Восстановление пароля",
     "forgot_password_q": "Начать восстановление пароля основного раздела? На вашу почту будет отправлен код подтверждения.",
-    "change_account_password": "Изменить пароль Gmail",
-    "change_admin_password": "Изменить пароль основного раздела",
     "session_missing": "Сессия не найдена. Выйдите и войдите снова.",
     "sync_clean": "Синхронизировано",
     "sync_dirty": "Локальные изменения",
@@ -2968,21 +2962,6 @@ class MainWindow(QMainWindow):
             mode_text = self.labels.get("main_mode", "Asosiy")
             mode_callback = self._unlock_main_area
         menu.addAction(self._menu_button_action(menu, mode_text, mode_callback, theme, width=action_width))
-        if self._is_account_owner():
-            menu.addAction(self._menu_button_action(
-                menu,
-                self.labels.get("change_account_password", "Gmail parolini o'zgartirish"),
-                lambda: self._change_account_password(),
-                theme,
-                width=action_width,
-            ))
-            menu.addAction(self._menu_button_action(
-                menu,
-                self.labels.get("change_admin_password", "Asosiy oyna parolini o'zgartirish"),
-                lambda: self._change_admin_password(),
-                theme,
-                width=action_width,
-            ))
         menu.addAction(self._menu_button_action(menu, self.labels["settings"], self._open_settings, theme, width=action_width))
         menu.addAction(self._menu_button_action(
             menu,
@@ -3058,23 +3037,6 @@ class MainWindow(QMainWindow):
         """The session token this device signed in with."""
         token = (self.user.get("api_access_token") or "").strip()
         return token or (db.get_user_api_token(self.user.get("id")) or "")
-
-    def _is_account_owner(self):
-        """True for the person who owns the account, in either mode.
-
-        The cashiers listed in the Cashiers section are names on receipts, not
-        sign-ins: the only user this window ever runs as is the account owner,
-        and the owner is the only one allowed near the passwords.
-        """
-        return bool((self.user.get("email") or "").strip() and self._account_api_token())
-
-    def _change_account_password(self):
-        change_account_password(
-            self,
-            (self.user.get("email") or "").strip(),
-            THEMES.get(self.settings.get("theme"), THEMES["dark_blue"]),
-            language=self.settings.get("language", "uz"),
-        )
 
     def _change_admin_password(self, send_on_open=False, recovery=False):
         return change_admin_password(
