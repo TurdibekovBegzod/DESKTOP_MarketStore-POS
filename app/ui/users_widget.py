@@ -1,11 +1,12 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTableWidget,
-    QTableWidgetItem, QDialog, QFormLayout, QLineEdit, QComboBox,
-    QMessageBox, QHeaderView, QMenu
+    QTableWidgetItem, QDialog, QFormLayout, QLabel, QLineEdit, QComboBox,
+    QMessageBox, QHeaderView, QFrame, QMenu
 )
 from PyQt6.QtCore import Qt
 import database as db
 from ui.async_loader import AsyncDataLoader, make_progress_bar
+from ui.security_dialogs import change_account_password, change_admin_password
 from ui.i18n import set_language, t
 
 
@@ -13,6 +14,10 @@ class UserDialog(QDialog):
     def __init__(self, parent=None, user=None):
         super().__init__(parent)
         self.user = user
+        # The e-mail that owns the shop is an admin by definition. It is listed
+        # here so its passwords can be reached, not so it can be demoted to a
+        # till operator - the database refuses that anyway.
+        self.is_owner = bool(user and user.get("is_account_owner"))
         self.language = parent.property("app_language") if parent else "uz"
         self.language = self.language or "uz"
         title = "Kassir qo'shish" if not user else "Foydalanuvchini tahrirlash"
@@ -39,15 +44,33 @@ class UserDialog(QDialog):
         self.full_name_edit.setPlaceholderText("Ism Familiya")
         form.addRow("To'liq ism *:", self.full_name_edit)
 
-        self.role_combo = QComboBox()
-        self.role_combo.addItem(t("Kassir", self.language), "cashier")
-        self.role_combo.addItem(t("Admin", self.language), "admin")
-        if self.user:
-            idx = self.role_combo.findData(self.user["role"])
-            if idx >= 0:
-                self.role_combo.setCurrentIndex(idx)
-        form.addRow("Rol:", self.role_combo)
+        if self.is_owner:
+            self.role_combo = None
+            role_lbl = QLabel(t("Admin", self.language))
+            role_lbl.setStyleSheet("color:#0f172a;font-size:13px;font-weight:bold;")
+            form.addRow("Rol:", role_lbl)
+        else:
+            self.role_combo = QComboBox()
+            self.role_combo.addItem(t("Kassir", self.language), "cashier")
+            self.role_combo.addItem(t("Admin", self.language), "admin")
+            if self.user:
+                idx = self.role_combo.findData(self.user["role"])
+                if idx >= 0:
+                    self.role_combo.setCurrentIndex(idx)
+            form.addRow("Rol:", self.role_combo)
         layout.addLayout(form)
+
+        if self.is_owner:
+            layout.addWidget(self._separator())
+            passwords_lbl = QLabel("Parollar")
+            passwords_lbl.setStyleSheet("color:#64748b;font-size:12px;font-weight:bold;")
+            layout.addWidget(passwords_lbl)
+            layout.addWidget(self._password_button(
+                "Gmail parolini o'zgartirish", self._change_gmail_password
+            ))
+            layout.addWidget(self._password_button(
+                "Asosiy oyna parolini o'zgartirish", self._change_admin_password
+            ))
 
         btn_row = QHBoxLayout()
         cancel_btn = QPushButton("Bekor")
@@ -61,6 +84,45 @@ class UserDialog(QDialog):
         layout.addLayout(btn_row)
         set_language(self, self.language)
 
+    @staticmethod
+    def _separator():
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setStyleSheet("color:#e2e8f0;")
+        return line
+
+    def _password_button(self, text, callback):
+        button = QPushButton(text)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setStyleSheet(
+            "QPushButton{background:#f8fafc;color:#1e293b;border:1px solid #cbd5e1;"
+            "border-radius:6px;padding:9px 12px;font-size:13px;text-align:left;}"
+            "QPushButton:hover{background:#eff6ff;border-color:#3b82f6;}"
+        )
+        button.clicked.connect(lambda _=False: callback())
+        return button
+
+    def _owner_email(self):
+        return (self.user.get("email") or "").strip() if self.user else ""
+
+    def _change_gmail_password(self):
+        email = self._owner_email()
+        if not email:
+            QMessageBox.warning(self, "Email", "Bu account uchun email topilmadi.")
+            return
+        change_account_password(self, email, language=self.language)
+
+    def _change_admin_password(self):
+        # The main-section password lives on the server, so this needs the
+        # session token the account signed in with.
+        token = db.get_user_api_token(self.user.get("id")) if self.user else None
+        if not token:
+            QMessageBox.warning(
+                self, "Sessiya", "Sessiya topilmadi. Dasturdan chiqib, qayta kiring."
+            )
+            return
+        change_admin_password(self, token, self._owner_email(), language=self.language)
+
     def _save(self):
         if not self.full_name_edit.text().strip():
             QMessageBox.warning(self, "Xatolik", "To'liq ismni kiriting!")
@@ -70,7 +132,7 @@ class UserDialog(QDialog):
     def get_data(self):
         return {
             "full_name": self.full_name_edit.text().strip(),
-            "role": self.role_combo.currentData(),
+            "role": "admin" if self.role_combo is None else self.role_combo.currentData(),
         }
 
 
@@ -172,6 +234,12 @@ class UsersWidget(QWidget):
         edit_action.triggered.connect(lambda _=False, r=row: self._edit_user(r))
         del_action = menu.addAction(f"🗑️ {delete_label}")
         del_action.triggered.connect(lambda _=False, r=row: self._delete_user(r))
+        # The account owner cannot be removed from here; greying the action out
+        # says so before the click instead of after it.
+        item = self.table.item(row, 0)
+        user = item.data(Qt.ItemDataRole.UserRole) if item else None
+        if user and user.get("is_account_owner"):
+            del_action.setEnabled(False)
         return menu
 
     def _show_user_actions_menu(self, row, button):

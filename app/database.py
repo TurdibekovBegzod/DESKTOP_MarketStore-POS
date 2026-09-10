@@ -7588,8 +7588,23 @@ def clear_login_logs():
 
 def get_users():
     with session_scope() as session:
+        # The owner marker travels with the row so the Kassirlar section can
+        # tell the account holder apart from the staff it lists beside them.
+        owner_ids = set(session.scalars(
+            select(UserSetting.user_id).where(UserSetting.key == "api_user_uid")
+        ).all())
         rows = session.scalars(select(User).order_by(User.role, User.email, User.username)).all()
-        return [Row(dict(id=u.id, username=u.username, email=u.email, role=u.role, created_at=u.created_at)) for u in rows]
+        return [
+            Row(dict(
+                id=u.id,
+                username=u.username,
+                email=u.email,
+                role=u.role,
+                created_at=u.created_at,
+                is_account_owner=u.id in owner_ids,
+            ))
+            for u in rows
+        ]
 
 
 def get_staff_users():

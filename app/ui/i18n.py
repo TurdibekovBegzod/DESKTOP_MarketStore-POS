@@ -855,6 +855,19 @@ TRANSLATIONS["ru"].update({
 })
 
 
+TRANSLATIONS["en"].update({
+    "Parollar": "Passwords",
+    "Gmail parolini o'zgartirish": "Change email password",
+    "Asosiy oyna parolini o'zgartirish": "Change main section password",
+})
+
+TRANSLATIONS["ru"].update({
+    "Parollar": "Пароли",
+    "Gmail parolini o'zgartirish": "Изменить пароль Gmail",
+    "Asosiy oyna parolini o'zgartirish": "Изменить пароль основного раздела",
+})
+
+
 def t(text, language="uz"):
     if language == "uz" or not text:
         return text

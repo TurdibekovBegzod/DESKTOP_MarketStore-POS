@@ -3073,6 +3073,7 @@ class MainWindow(QMainWindow):
             self,
             (self.user.get("email") or "").strip(),
             THEMES.get(self.settings.get("theme"), THEMES["dark_blue"]),
+            language=self.settings.get("language", "uz"),
         )
 
     def _change_admin_password(self, send_on_open=False, recovery=False):
@@ -3083,6 +3084,7 @@ class MainWindow(QMainWindow):
             THEMES.get(self.settings.get("theme"), THEMES["dark_blue"]),
             send_on_open=send_on_open,
             recovery=recovery,
+            language=self.settings.get("language", "uz"),
         )
 
     def _unlock_main_area(self):
