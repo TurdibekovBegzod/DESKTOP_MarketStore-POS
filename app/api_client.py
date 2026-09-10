@@ -112,6 +112,12 @@ def _format_api_detail(detail):
             return "Email yoki parol noto'g'ri."
         if "invalid or expired" in lower:
             return "Tasdiqlash kodi noto'g'ri yoki muddati tugagan."
+        if "invalid verification code" in lower:
+            return "Tasdiqlash kodi noto'g'ri yoki muddati tugagan."
+        if "invalid password" in lower:
+            return "Parol noto'g'ri."
+        if "invalid token" in lower or "user not found" in lower:
+            return "Sessiya muddati tugagan. Dasturdan chiqib, qayta kiring."
         if "not waiting for verification" in lower:
             return "Akkaunt tasdiqlash kutayotgan holatda emas."
         if "email verification is required" in lower:
@@ -312,6 +318,49 @@ def confirm_password_reset(email, code, new_password):
             "code": "".join(ch for ch in str(code or "") if ch.isdigit()),
             "new_password": new_password,
         },
+        timeout=AUTH_TIMEOUT,
+    )
+
+
+def verify_admin_password(token, password):
+    """Check the password that opens the main (admin) section.
+
+    Separate from the account password: they start out identical, and from the
+    first change onward only this one opens the main section. It is never
+    cached on the device, so this needs a live connection.
+    """
+    if not token:
+        raise ApiClientError("Sessiya topilmadi. Qayta kiring.")
+    if not password:
+        raise ApiClientError("Parolni kiriting.")
+    return _request_json(
+        "/auth/admin-password/verify",
+        {"password": password},
+        token=token,
+        timeout=AUTH_TIMEOUT,
+        retries=AUTH_RETRIES,
+    )
+
+
+def request_admin_password_code(token):
+    """Mail a verification code for changing the main section password."""
+    if not token:
+        raise ApiClientError("Sessiya topilmadi. Qayta kiring.")
+    return _request_json(
+        "/auth/admin-password/request", {}, token=token, timeout=AUTH_TIMEOUT
+    )
+
+
+def confirm_admin_password(token, code, new_password):
+    if not token:
+        raise ApiClientError("Sessiya topilmadi. Qayta kiring.")
+    return _request_json(
+        "/auth/admin-password/confirm",
+        {
+            "code": "".join(ch for ch in str(code or "") if ch.isdigit()),
+            "new_password": new_password,
+        },
+        token=token,
         timeout=AUTH_TIMEOUT,
     )
 

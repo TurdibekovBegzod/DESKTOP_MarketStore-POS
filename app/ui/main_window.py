@@ -32,6 +32,7 @@ from ui.finance_widget import FinanceWidget
 from ui.checking_widget import CheckingWidget
 from ui.notifications_widget import NotificationsWidget
 from ui.updater_dialog import UpdaterDialog
+from ui.security_dialogs import change_account_password, change_admin_password
 from ui.i18n import set_language
 
 
@@ -269,6 +270,12 @@ TEXTS = {
         "password": "Parol", "open": "Ochish",
         "email_missing": "Bu account uchun email topilmadi.",
         "password_required": "Parol kiriting.",
+        "forgot_password": "Parolni unutdingizmi?",
+        "forgot_password_title": "Parolni tiklash",
+        "forgot_password_q": "Asosiy oyna parolini tiklashni boshlaysizmi? Emailingizga tasdiqlash kodi yuboriladi.",
+        "change_account_password": "Gmail parolini o'zgartirish",
+        "change_admin_password": "Asosiy oyna parolini o'zgartirish",
+        "session_missing": "Sessiya topilmadi. Dasturdan chiqib, qayta kiring.",
         "sync_clean": "Sinxron", "sync_dirty": "Yuborilmagan o'zgarish bor",
         "sync_push": "Yuborish", "sync_pull": "Olish",
         "sync_replace_server": "Serverni shu qurilmadagiga almashtirish",
@@ -344,6 +351,12 @@ TEXTS = {
         "password": "Password", "open": "Open",
         "email_missing": "Email was not found for this account.",
         "password_required": "Enter password.",
+        "forgot_password": "Forgot your password?",
+        "forgot_password_title": "Reset password",
+        "forgot_password_q": "Start resetting the main section password? A verification code will be sent to your email.",
+        "change_account_password": "Change email password",
+        "change_admin_password": "Change main section password",
+        "session_missing": "Session was not found. Please sign out and sign in again.",
         "sync_clean": "Synced", "sync_dirty": "Unsynced changes",
         "sync_push": "Upload", "sync_pull": "Download",
         "sync_replace_server": "Replace the server with this device",
@@ -440,6 +453,12 @@ TEXTS["ru"].update({
     "open": "Открыть",
     "email_missing": "Email для этого аккаунта не найден.",
     "password_required": "Введите пароль.",
+    "forgot_password": "Забыли пароль?",
+    "forgot_password_title": "Восстановление пароля",
+    "forgot_password_q": "Начать восстановление пароля основного раздела? На вашу почту будет отправлен код подтверждения.",
+    "change_account_password": "Изменить пароль Gmail",
+    "change_admin_password": "Изменить пароль основного раздела",
+    "session_missing": "Сессия не найдена. Выйдите и войдите снова.",
     "sync_clean": "Синхронизировано",
     "sync_dirty": "Локальные изменения",
     "sync_push": "Отправить",
@@ -669,12 +688,16 @@ class SettingsDialog(QDialog):
 
 
 class AdminPasswordDialog(QDialog):
+    # A third way out, next to Accepted and Rejected: the owner does not know
+    # the password and wants the e-mailed-code route instead.
+    FORGOT = 2
+
     def __init__(self, parent=None, theme=None, labels=None):
         super().__init__(parent)
         self.theme = theme or THEMES["dark_blue"]
         self.labels = labels or TEXTS["uz"]
         self.setWindowTitle(self.labels.get("main_mode", "Asosiy"))
-        self.setFixedSize(380, 245)
+        self.setFixedSize(380, 285)
         self._build_ui()
 
     def _build_ui(self):
@@ -725,6 +748,17 @@ class AdminPasswordDialog(QDialog):
                 background: {theme['topbar']};
                 color: {theme['title']};
             }}
+            QPushButton#link {{
+                background: transparent;
+                border: none;
+                padding: 0;
+                color: {theme['accent']};
+                font-size: 12px;
+                text-align: left;
+            }}
+            QPushButton#link:hover {{
+                text-decoration: underline;
+            }}
         """)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 18)
@@ -745,6 +779,14 @@ class AdminPasswordDialog(QDialog):
         layout.addWidget(title)
         layout.addWidget(hint)
         layout.addWidget(self.password_edit)
+        # Same escape hatch as the login screen: a password nobody remembers
+        # must not lock the owner out of their own main section.
+        self.forgot_btn = QPushButton(self.labels.get("forgot_password", "Parolni unutdingizmi?"))
+        self.forgot_btn.setObjectName("link")
+        self.forgot_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.forgot_btn.setFlat(True)
+        self.forgot_btn.clicked.connect(lambda: self.done(self.FORGOT))
+        layout.addWidget(self.forgot_btn)
         layout.addWidget(self.error_lbl)
         btns = QHBoxLayout()
         btns.addStretch()
@@ -762,8 +804,15 @@ class AdminPasswordDialog(QDialog):
         return self.password_edit.text().strip()
 
     def set_error(self, text):
+        self.error_lbl.setStyleSheet("color:#dc2626;font-size:12px;background:transparent;")
         self.error_lbl.setText(text)
         self.password_edit.selectAll()
+        self.password_edit.setFocus()
+
+    def set_info(self, text):
+        self.error_lbl.setStyleSheet("color:#16a34a;font-size:12px;background:transparent;")
+        self.error_lbl.setText(text)
+        self.password_edit.clear()
         self.password_edit.setFocus()
 
 
@@ -2919,6 +2968,21 @@ class MainWindow(QMainWindow):
             mode_text = self.labels.get("main_mode", "Asosiy")
             mode_callback = self._unlock_main_area
         menu.addAction(self._menu_button_action(menu, mode_text, mode_callback, theme, width=action_width))
+        if self._is_account_owner():
+            menu.addAction(self._menu_button_action(
+                menu,
+                self.labels.get("change_account_password", "Gmail parolini o'zgartirish"),
+                lambda: self._change_account_password(),
+                theme,
+                width=action_width,
+            ))
+            menu.addAction(self._menu_button_action(
+                menu,
+                self.labels.get("change_admin_password", "Asosiy oyna parolini o'zgartirish"),
+                lambda: self._change_admin_password(),
+                theme,
+                width=action_width,
+            ))
         menu.addAction(self._menu_button_action(menu, self.labels["settings"], self._open_settings, theme, width=action_width))
         menu.addAction(self._menu_button_action(
             menu,
@@ -2990,6 +3054,37 @@ class MainWindow(QMainWindow):
         action.setDefaultWidget(btn)
         return action
 
+    def _account_api_token(self):
+        """The session token this device signed in with."""
+        token = (self.user.get("api_access_token") or "").strip()
+        return token or (db.get_user_api_token(self.user.get("id")) or "")
+
+    def _is_account_owner(self):
+        """True for the person who owns the account, in either mode.
+
+        The cashiers listed in the Cashiers section are names on receipts, not
+        sign-ins: the only user this window ever runs as is the account owner,
+        and the owner is the only one allowed near the passwords.
+        """
+        return bool((self.user.get("email") or "").strip() and self._account_api_token())
+
+    def _change_account_password(self):
+        change_account_password(
+            self,
+            (self.user.get("email") or "").strip(),
+            THEMES.get(self.settings.get("theme"), THEMES["dark_blue"]),
+        )
+
+    def _change_admin_password(self, send_on_open=False, recovery=False):
+        return change_admin_password(
+            self,
+            self._account_api_token(),
+            (self.user.get("email") or "").strip(),
+            THEMES.get(self.settings.get("theme"), THEMES["dark_blue"]),
+            send_on_open=send_on_open,
+            recovery=recovery,
+        )
+
     def _unlock_main_area(self):
         email = (self.user.get("email") or "").strip()
         if not email:
@@ -2999,18 +3094,32 @@ class MainWindow(QMainWindow):
                 self.labels.get("email_missing", "Bu account uchun email topilmadi."),
             )
             return
+        token = self._account_api_token()
+        if not token:
+            QMessageBox.warning(
+                self,
+                self.labels.get("main_mode", "Asosiy"),
+                self.labels.get("session_missing", "Sessiya topilmadi. Dasturdan chiqib, qayta kiring."),
+            )
+            return
         dlg = AdminPasswordDialog(self, THEMES.get(self.settings.get("theme"), THEMES["dark_blue"]), self.labels)
         while True:
-            if dlg.exec() != QDialog.DialogCode.Accepted:
+            result = dlg.exec()
+            if result == AdminPasswordDialog.FORGOT:
+                if self._recover_admin_password():
+                    dlg.set_info(self.labels.get("password_required", "Parol kiriting."))
+                continue
+            if result != QDialog.DialogCode.Accepted:
                 return
             password = dlg.password()
             if not password:
                 dlg.set_error(self.labels.get("password_required", "Parol kiriting."))
                 continue
             try:
-                # The password is only ever checked by the server; nothing is
-                # cached locally, so this needs a live connection.
-                api_client.login(email, password)
+                # The main section has a password of its own, kept on the
+                # server so every device agrees on it. Nothing is cached here,
+                # so this needs a live connection.
+                api_client.verify_admin_password(token, password)
                 break
             except api_client.ApiOfflineError:
                 dlg.set_error(self.labels.get(
@@ -3026,6 +3135,21 @@ class MainWindow(QMainWindow):
         self.next_window.showMaximized()
         self._logging_out = True
         self.close()
+
+    def _recover_admin_password(self):
+        """The 'forgot password' route out of the unlock prompt."""
+        answer = QMessageBox.question(
+            self,
+            self.labels.get("forgot_password_title", "Parolni tiklash"),
+            self.labels.get(
+                "forgot_password_q",
+                "Asosiy oyna parolini tiklashni boshlaysizmi? "
+                "Emailingizga tasdiqlash kodi yuboriladi.",
+            ),
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return False
+        return bool(self._change_admin_password(send_on_open=True, recovery=True))
 
     def _switch_to_cashier_mode(self):
         self.user["role"] = "cashier"

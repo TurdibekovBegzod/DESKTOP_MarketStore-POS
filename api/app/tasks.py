@@ -1,7 +1,12 @@
 import smtplib
 
 from app.celery_app import celery_app
-from app.email_service import EmailNotConfiguredError, send_password_reset_code, send_signup_verification_code
+from app.email_service import (
+    EmailNotConfiguredError,
+    send_admin_password_reset_code,
+    send_password_reset_code,
+    send_signup_verification_code,
+)
 
 
 TRANSIENT_EMAIL_ERRORS = (OSError, TimeoutError, ConnectionError, smtplib.SMTPException)
@@ -17,6 +22,18 @@ TRANSIENT_EMAIL_ERRORS = (OSError, TimeoutError, ConnectionError, smtplib.SMTPEx
 )
 def send_password_reset_code_task(to_email: str, code: str) -> None:
     send_password_reset_code(to_email, code)
+
+
+@celery_app.task(
+    name="send_admin_password_reset_code",
+    autoretry_for=TRANSIENT_EMAIL_ERRORS,
+    dont_autoretry_for=(EmailNotConfiguredError,),
+    retry_backoff=True,
+    retry_jitter=True,
+    retry_kwargs={"max_retries": 5},
+)
+def send_admin_password_reset_code_task(to_email: str, code: str) -> None:
+    send_admin_password_reset_code(to_email, code)
 
 
 @celery_app.task(

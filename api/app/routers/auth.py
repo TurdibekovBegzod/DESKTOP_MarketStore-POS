@@ -13,6 +13,8 @@ from app.database import get_db
 from app.deps import get_current_user
 from app.models import EmailVerificationCode, PasswordResetCode, User
 from app.schemas import (
+    AdminPasswordConfirm,
+    AdminPasswordVerify,
     LoginRequest,
     MessageOut,
     PasswordResetConfirm,
@@ -27,7 +29,18 @@ from app.schemas import (
     normalize_email,
 )
 from app.security import create_access_token, hash_password, hash_secret, verify_password
-from app.tasks import send_password_reset_code_task, send_signup_verification_code_task
+from app.tasks import (
+    send_admin_password_reset_code_task,
+    send_password_reset_code_task,
+    send_signup_verification_code_task,
+)
+
+
+# A reset code is mailed out for one job only. "account" opens the e-mail
+# login, "admin" the desktop's main section - a code handed out for one must
+# never be spendable on the other.
+PURPOSE_ACCOUNT = "account"
+PURPOSE_ADMIN = "admin"
 
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -52,6 +65,66 @@ def _new_signup_code(db: Session, user: User, now: datetime) -> tuple[str, datet
     return code, expires_at, code_row
 
 
+def _reset_code_on_cooldown(db: Session, user: User, purpose: str, now: datetime) -> bool:
+    """True while the last code for this purpose is too fresh to replace."""
+    settings = get_settings()
+    return bool(
+        db.scalar(
+            select(PasswordResetCode)
+            .where(
+                PasswordResetCode.user_id == user.id,
+                PasswordResetCode.purpose == purpose,
+                PasswordResetCode.used_at.is_(None),
+                PasswordResetCode.created_at > now - timedelta(seconds=settings.password_reset_cooldown_seconds),
+            )
+            .order_by(PasswordResetCode.created_at.desc())
+            .limit(1)
+        )
+    )
+
+
+def _new_reset_code(db: Session, user: User, purpose: str, now: datetime) -> tuple[str, PasswordResetCode]:
+    """Mint a code for one purpose, retiring the account's earlier ones."""
+    settings = get_settings()
+    code = f"{secrets.randbelow(900000) + 100000}"
+    db.execute(
+        update(PasswordResetCode)
+        .where(
+            PasswordResetCode.user_id == user.id,
+            PasswordResetCode.purpose == purpose,
+            PasswordResetCode.used_at.is_(None),
+        )
+        .values(used_at=now)
+    )
+    code_row = PasswordResetCode(
+        user_id=user.id,
+        code_hash=hash_secret(code),
+        purpose=purpose,
+        expires_at=now + timedelta(minutes=settings.password_reset_code_minutes),
+    )
+    db.add(code_row)
+    return code, code_row
+
+
+def _spend_reset_code(db: Session, user: User, purpose: str, code: str, now: datetime) -> PasswordResetCode:
+    code_row = db.scalar(
+        select(PasswordResetCode)
+        .where(
+            PasswordResetCode.user_id == user.id,
+            PasswordResetCode.purpose == purpose,
+            PasswordResetCode.code_hash == hash_secret(code),
+            PasswordResetCode.used_at.is_(None),
+            PasswordResetCode.expires_at > now,
+        )
+        .order_by(PasswordResetCode.created_at.desc())
+        .limit(1)
+    )
+    if not code_row:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid verification code")
+    code_row.used_at = now
+    return code_row
+
+
 def _enqueue_email_or_invalidate(db: Session, code_row, task, *args) -> None:
     try:
         task.delay(*args)
@@ -62,6 +135,13 @@ def _enqueue_email_or_invalidate(db: Session, code_row, task, *args) -> None:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Email service is temporarily unavailable. Please try again.",
         ) from exc
+
+
+def _set_signup_password(user: User, password: str) -> None:
+    """A brand new account starts with one password used in both places."""
+    digest = hash_password(password)
+    user.password_hash = digest
+    user.admin_password_hash = digest
 
 
 def _registration_challenge(expires_at: datetime, resend_after_seconds: int, now: datetime) -> RegistrationChallengeOut:
@@ -124,9 +204,11 @@ def register(payload: UserCreate, db: Session = Depends(get_db)):
         raise HTTPException(status_code=409, detail="Email already exists")
 
     if user is None:
+        digest = hash_password(payload.password)
         user = User(
             email=payload.email,
-            password_hash=hash_password(payload.password),
+            password_hash=digest,
+            admin_password_hash=digest,
             display_name=payload.display_name,
             role="admin",
             is_active=False,
@@ -138,7 +220,7 @@ def register(payload: UserCreate, db: Session = Depends(get_db)):
             db.rollback()
             raise HTTPException(status_code=409, detail="Email already exists") from exc
     else:
-        user.password_hash = hash_password(payload.password)
+        _set_signup_password(user, payload.password)
         user.display_name = payload.display_name
 
     latest_code = db.scalar(
@@ -210,7 +292,7 @@ def confirm_registration(payload: RegistrationVerify, db: Session = Depends(get_
         raise HTTPException(status_code=400, detail="Invalid or expired verification code")
 
     if payload.password:
-        user.password_hash = hash_password(payload.password)
+        _set_signup_password(user, payload.password)
     user.is_active = True
     user.email_verified_at = now
     code_row.used_at = now
@@ -244,29 +326,11 @@ def request_password_reset(payload: PasswordResetRequest, db: Session = Depends(
     if not user:
         return generic_response
 
-    settings = get_settings()
-    recent_code = db.scalar(
-        select(PasswordResetCode)
-        .where(
-            PasswordResetCode.user_id == user.id,
-            PasswordResetCode.used_at.is_(None),
-            PasswordResetCode.created_at > datetime.now(timezone.utc) - timedelta(seconds=settings.password_reset_cooldown_seconds),
-        )
-        .order_by(PasswordResetCode.created_at.desc())
-        .limit(1)
-    )
-    if recent_code:
+    now = datetime.now(timezone.utc)
+    if _reset_code_on_cooldown(db, user, PURPOSE_ACCOUNT, now):
         return generic_response
 
-    code = f"{secrets.randbelow(900000) + 100000}"
-    expires_at = datetime.now(timezone.utc) + timedelta(minutes=settings.password_reset_code_minutes)
-    db.execute(
-        update(PasswordResetCode)
-        .where(PasswordResetCode.user_id == user.id, PasswordResetCode.used_at.is_(None))
-        .values(used_at=datetime.now(timezone.utc))
-    )
-    code_row = PasswordResetCode(user_id=user.id, code_hash=hash_secret(code), expires_at=expires_at)
-    db.add(code_row)
+    code, code_row = _new_reset_code(db, user, PURPOSE_ACCOUNT, now)
     db.commit()
 
     _enqueue_email_or_invalidate(db, code_row, send_password_reset_code_task, user.email, code)
@@ -280,24 +344,67 @@ def confirm_password_reset(payload: PasswordResetConfirm, db: Session = Depends(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid verification code")
 
     now = datetime.now(timezone.utc)
-    code_row = db.scalar(
-        select(PasswordResetCode)
-        .where(
-            PasswordResetCode.user_id == user.id,
-            PasswordResetCode.code_hash == hash_secret(payload.code),
-            PasswordResetCode.used_at.is_(None),
-            PasswordResetCode.expires_at > now,
-        )
-        .order_by(PasswordResetCode.created_at.desc())
-        .limit(1)
-    )
-    if not code_row:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid verification code")
+    _spend_reset_code(db, user, PURPOSE_ACCOUNT, payload.code, now)
 
+    # Only the e-mail password. Once the main section has a password of its own
+    # it stays put; before that it follows this one, which is what "the two are
+    # the same until you change one" means.
     user.password_hash = hash_password(payload.new_password)
-    code_row.used_at = now
     db.commit()
     return MessageOut(message="Password has been updated.")
+
+
+@router.post("/admin-password/verify", response_model=MessageOut)
+def verify_admin_password(
+    payload: AdminPasswordVerify,
+    current_user: User = Depends(get_current_user),
+):
+    """Check the password that opens the desktop's main section.
+
+    An account that has never set one is still opened by its e-mail password -
+    that is the state every account starts in and every older account is in.
+    """
+    expected = current_user.admin_password_hash or current_user.password_hash
+    if not verify_password(payload.password, expected):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid password")
+    return MessageOut(message="Password accepted.")
+
+
+@router.post("/admin-password/request", response_model=MessageOut)
+def request_admin_password_code(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Mail a code to the account's own address, for changing or recovering
+    the main-section password."""
+    now = datetime.now(timezone.utc)
+    generic_response = MessageOut(message="Verification code has been sent.")
+    if _reset_code_on_cooldown(db, current_user, PURPOSE_ADMIN, now):
+        return generic_response
+
+    code, code_row = _new_reset_code(db, current_user, PURPOSE_ADMIN, now)
+    db.commit()
+
+    _enqueue_email_or_invalidate(
+        db, code_row, send_admin_password_reset_code_task, current_user.email, code
+    )
+    return generic_response
+
+
+@router.post("/admin-password/confirm", response_model=MessageOut)
+def confirm_admin_password(
+    payload: AdminPasswordConfirm,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    now = datetime.now(timezone.utc)
+    _spend_reset_code(db, current_user, PURPOSE_ADMIN, payload.code, now)
+
+    # From here the two passwords are independent: the main section answers to
+    # this value alone, whatever the e-mail password later becomes.
+    current_user.admin_password_hash = hash_password(payload.new_password)
+    db.commit()
+    return MessageOut(message="Main section password has been updated.")
 
 
 @router.get("/me", response_model=UserOut)

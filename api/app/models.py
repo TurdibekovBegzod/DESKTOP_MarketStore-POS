@@ -15,6 +15,10 @@ class User(Base):
     uid: Mapped[str] = mapped_column(String(36), unique=True, index=True, nullable=False, default=lambda: str(uuid.uuid4()))
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    # The desktop's main (admin) section has its own password. A new account
+    # gets the same value here as in ``password_hash``; NULL means the account
+    # predates the split and the e-mail password still opens the main section.
+    admin_password_hash: Mapped[str | None] = mapped_column(String(255))
     display_name: Mapped[str | None] = mapped_column(String(120))
     role: Mapped[str] = mapped_column(String(20), default="cashier", nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
@@ -40,6 +44,9 @@ class PasswordResetCode(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
     code_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    # "account" opens the e-mail login, "admin" the desktop's main section.
+    # A code is only ever accepted by the flow it was mailed out for.
+    purpose: Mapped[str] = mapped_column(String(20), default="account", server_default="account", nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

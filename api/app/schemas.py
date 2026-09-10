@@ -74,6 +74,27 @@ class PasswordResetConfirm(BaseModel):
         return code
 
 
+class AdminPasswordVerify(BaseModel):
+    """Unlock attempt for the desktop's main section."""
+
+    password: str = Field(min_length=1, max_length=128)
+
+
+class AdminPasswordConfirm(BaseModel):
+    """Set a new main-section password, proven by a mailed code."""
+
+    code: str = Field(min_length=6, max_length=12)
+    new_password: str = Field(min_length=6, max_length=128)
+
+    @field_validator("code")
+    @classmethod
+    def normalize_code(cls, value: str) -> str:
+        code = "".join(ch for ch in value.strip() if ch.isdigit())
+        if len(code) != 6:
+            raise ValueError("Verification code must be 6 digits")
+        return code
+
+
 class RegistrationStart(BaseModel):
     email: str = Field(min_length=5, max_length=255)
     display_name: str | None = Field(default=None, max_length=120)
