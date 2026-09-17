@@ -1011,8 +1011,27 @@ class ProductDialog(QDialog):
 
         barcode_value = "" if self.duplicate else (self.product["barcode"] if self.product and self.product["barcode"] else "")
         self.barcode_edit = QLineEdit(barcode_value)
-        self.barcode_edit.setPlaceholderText("Ixtiyoriy")
-        form.addRow("Shtrix-kod:", self.barcode_edit)
+        self.barcode_edit.setPlaceholderText("Shtrix-kodni skanerlang yoki yarating")
+        self.generate_barcode_btn = QPushButton("Yaratish")
+        self.generate_barcode_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.generate_barcode_btn.setToolTip(
+            "Shu kompyuterda hech qachon ishlatilmagan yangi shtrix-kod (internetsiz ishlaydi)"
+        )
+        self.generate_barcode_btn.setStyleSheet("""
+            QPushButton { background: #e2e8f0; color: #1e293b; border: none;
+                          border-radius: 6px; padding: 6px 14px; font-weight: 600; }
+            QPushButton:hover { background: #cbd5e1; }
+        """)
+        self.generate_barcode_btn.clicked.connect(lambda: self._generate_barcode())
+        barcode_row = QHBoxLayout()
+        barcode_row.setSpacing(8)
+        barcode_row.addWidget(self.barcode_edit)
+        barcode_row.addWidget(self.generate_barcode_btn)
+        form.addRow("Shtrix-kod:", barcode_row)
+        if not barcode_value:
+            # A new product opens with a code ready to print. Anyone who has a
+            # supplier's own barcode to hand can still type over it.
+            self._generate_barcode(silent=True)
 
         self.name_edit = QLineEdit(self.product["name"] if self.product else "")
         self.name_edit.setPlaceholderText("Mahsulot nomi *")
@@ -1138,6 +1157,21 @@ class ProductDialog(QDialog):
         btn_row.addWidget(cancel_btn)
         btn_row.addWidget(save_btn)
         layout.addLayout(btn_row)
+
+    def _generate_barcode(self, silent=False):
+        """Draw a code that has never been used here.
+
+        The check runs against this computer's own database only -- nothing is
+        asked of the server and nothing is sent to it -- so it works the same
+        whether or not the shop is online.
+        """
+        try:
+            code = db.generate_unique_barcode()
+        except Exception as exc:
+            if not silent:
+                QMessageBox.warning(self, t("Xatolik", self.language), str(exc))
+            return
+        self.barcode_edit.setText(code)
 
     def _save(self):
         barcode = self.barcode_edit.text().strip()

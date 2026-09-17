@@ -711,10 +711,9 @@ PAGE_DATA_TABLES = {
     "expenses": ("users", "currencies", "expense_categories", "expenses"),
     "users": ("users",),
     "login_history": ("users", "login_logs"),
-    "checking": (
-        "product_sections", "product_templates", "products", "inventory_check_sessions",
-        "inventory_check_items",
-    ),
+    # The stocktake itself never leaves this device (db.LOCAL_ONLY_TABLES).
+    # Only the catalogue it counts against is worth refreshing here.
+    "checking": ("product_sections", "product_templates", "products"),
 }
 
 

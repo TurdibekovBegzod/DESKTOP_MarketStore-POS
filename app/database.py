@@ -126,11 +126,25 @@ SYNC_TABLES = (
     "sale_returns",
     "customer_debt_movements",
     "stock_movements",
-    "inventory_check_sessions",
-    "inventory_check_items",
     "finance_manual_movements",
     "activity_logs",
     "notification_reads",
+)
+
+
+# Tables that live on this device only. They are deliberately absent from
+# SYNC_TABLES, which is what keeps them out of every direction of sync at once:
+# the online guard before a write, the outbox that carries rows to the server,
+# and the import that writes the server's rows back.
+#
+# A stocktake is one person walking one shop with one scanner. Sending every
+# scan to the server made the till refuse to count anything while the line was
+# down, and made a count in progress on one device appear on another. Counting
+# is now local work, so it keeps working with the internet off.
+LOCAL_ONLY_TABLES = (
+    "inventory_check_sessions",
+    "inventory_check_items",
+    "local_barcode_issues",
 )
 
 
@@ -1279,6 +1293,24 @@ class NotificationRead(Base):
     read_at = Column(String, nullable=False)
 
 
+class LocalBarcodeIssue(Base):
+    """Every barcode this device has handed out.
+
+    Deliberately outside ``SYNC_TABLES``: nothing here is ever sent to the
+    server or filled from it, so generating a code works with the network down
+    and asks nobody's permission.
+
+    ``products`` on its own cannot answer "has this code ever existed?". A
+    product can be deleted and later purged, and a code already printed on a
+    label must never come back on a different item. So a code is recorded here
+    the moment it is drawn, whether or not the product is ever saved.
+    """
+
+    __tablename__ = "local_barcode_issues"
+    code = Column(String, primary_key=True)
+    created_at = Column(String, server_default=text("CURRENT_TIMESTAMP"))
+
+
 MIGRATIONS = (
     ("001_create_missing_tables", "Create any missing tables from the current SQLAlchemy models."),
     ("002_add_missing_columns", "Add columns introduced after earlier releases."),
@@ -1294,6 +1326,8 @@ MIGRATIONS = (
     ("012_uuid_row_identity", "Give every row a UUID so two devices can never claim the same id."),
     ("013_money_ledger", "Derive every money figure from rows that are never rewritten."),
     ("014_activity_feed", "Record what each device does so the others can be told."),
+    ("015_local_barcode_issues", "Remember every barcode generated on this device."),
+    ("016_local_stocktake", "Keep the stocktake on this device instead of the server."),
 )
 
 
@@ -1947,6 +1981,43 @@ def _migration_activity_feed(conn):
     _sync_state_set(conn, "activity_seen_at", _utc_now())
 
 
+def _migration_local_stocktake(conn):
+    """Let go of stocktake rows the previous build queued for the server.
+
+    They can never be delivered now that the tables are device-local, and a
+    queue entry that is never sent is counted as unsent work for ever -- the
+    status bar would claim this device is behind and never stop.
+    """
+    _ensure_sync_state_table(conn)
+    for table_name in ("inventory_check_sessions", "inventory_check_items"):
+        if _has_table(conn, "sync_outbox"):
+            conn.exec_driver_sql("DELETE FROM sync_outbox WHERE table_name = ?", (table_name,))
+        if _has_table(conn, "sync_tombstones"):
+            conn.exec_driver_sql("DELETE FROM sync_tombstones WHERE table_name = ?", (table_name,))
+        conn.exec_driver_sql(
+            "DELETE FROM sync_state WHERE key IN (?, ?)",
+            (f"table_cursor:{table_name}", f"table_cursor_initialized:{table_name}"),
+        )
+    _sync_state_set(conn, "pending_change_count", "0")
+
+
+def _migration_local_barcode_issues(conn):
+    Base.metadata.create_all(bind=conn, tables=[LocalBarcodeIssue.__table__])
+    # Codes already carried by a product were issued before this log existed.
+    # Seeding them keeps a future draw from handing out one of them again.
+    conn.exec_driver_sql(
+        "INSERT OR IGNORE INTO local_barcode_issues (code, created_at) "
+        "SELECT barcode, CURRENT_TIMESTAMP FROM products "
+        "WHERE barcode IS NOT NULL AND TRIM(barcode) <> '' "
+        "AND substr(barcode, 1, 10) <> '__deleted_'"
+    )
+    conn.exec_driver_sql(
+        "INSERT OR IGNORE INTO local_barcode_issues (code, created_at) "
+        "SELECT original_barcode, CURRENT_TIMESTAMP FROM products "
+        "WHERE original_barcode IS NOT NULL AND TRIM(original_barcode) <> ''"
+    )
+
+
 MIGRATION_FUNCTIONS = {
     "001_create_missing_tables": _migration_create_missing_tables,
     "002_add_missing_columns": _migration_add_missing_columns,
@@ -1962,6 +2033,8 @@ MIGRATION_FUNCTIONS = {
     "012_uuid_row_identity": _migration_uuid_row_identity,
     "013_money_ledger": _migration_money_ledger,
     "014_activity_feed": _migration_activity_feed,
+    "015_local_barcode_issues": _migration_local_barcode_issues,
+    "016_local_stocktake": _migration_local_stocktake,
 }
 
 
@@ -3677,6 +3750,16 @@ def wipe_sync_tables():
                     )
                 else:
                     conn.exec_driver_sql(f"DELETE FROM {quoted}")
+            # Device-local tables are not in the loop above, but erasing an
+            # account has to clear them too -- otherwise a finished stocktake
+            # outlives the data it counted.
+            for table_name in LOCAL_ONLY_TABLES:
+                if table_name == "local_barcode_issues":
+                    # Codes already handed out stay out of circulation: the
+                    # labels are on the shelves whatever happens to the account.
+                    continue
+                if _has_table(conn, table_name):
+                    conn.exec_driver_sql(f"DELETE FROM {_quote_identifier(table_name)}")
             if _has_table(conn, "sync_tombstones"):
                 conn.exec_driver_sql("DELETE FROM sync_tombstones")
             _ensure_sync_outbox_table(conn)
@@ -4075,6 +4158,77 @@ def get_product_by_barcode(barcode):
         return _product_row(*row) if row else None
 
 
+# Six characters out of letters and digits is 56 billion codes -- more than a
+# shop will ever print, and still short enough to read off a label by eye.
+GENERATED_BARCODE_LENGTH = 6
+GENERATED_BARCODE_ALPHABET = (
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "abcdefghijklmnopqrstuvwxyz"
+    "0123456789"
+)
+
+
+def _barcode_exists(session, code):
+    """Has this device ever seen the code? Answered without touching the network.
+
+    Three places have to agree: the log of codes handed out here, the barcode a
+    product carries now, and the barcode a deleted product used to carry --
+    deletion renames the column, so ``original_barcode`` is where the printed
+    code survives.
+    """
+    if session.scalar(select(LocalBarcodeIssue.code).where(LocalBarcodeIssue.code == code)):
+        return True
+    used = session.scalar(
+        select(Product.id)
+        .where(or_(Product.barcode == code, Product.original_barcode == code))
+        .limit(1)
+    )
+    return used is not None
+
+
+def _remember_barcode(session, code):
+    """Record a code so no future draw can produce it."""
+    clean = (code or "").strip()
+    if not clean or clean.startswith("__deleted_"):
+        return
+    if session.scalar(select(LocalBarcodeIssue.code).where(LocalBarcodeIssue.code == clean)):
+        return
+    session.add(LocalBarcodeIssue(code=clean, created_at=_utc_now()))
+
+
+def is_barcode_taken(barcode):
+    """Local-only check, used before accepting a hand-typed code."""
+    code = (barcode or "").strip()
+    if not code:
+        return False
+    with session_scope() as session:
+        return _barcode_exists(session, code)
+
+
+def generate_unique_barcode(length=GENERATED_BARCODE_LENGTH):
+    """Hand out a code nothing on this device has ever used.
+
+    Entirely offline on purpose: the products table is already a full local
+    copy of the account, and the issue log covers the rest -- codes whose
+    product was deleted, and codes drawn for a product that was never saved.
+    The code is recorded before it is returned, so two clicks can never hand
+    out the same one.
+    """
+    for _ in range(64):
+        code = "".join(secrets.choice(GENERATED_BARCODE_ALPHABET) for _ in range(length))
+        try:
+            with session_scope() as session:
+                if _barcode_exists(session, code):
+                    continue
+                session.add(LocalBarcodeIssue(code=code, created_at=_utc_now()))
+            return code
+        except IntegrityError:
+            # Another window drew the same code between the check and the
+            # insert. Vanishingly rare; the next attempt settles it.
+            continue
+    raise AppError("Yangi shtrix-kod yaratilmadi. Qayta urinib ko'ring.")
+
+
 def get_product_by_id(product_id):
     with session_scope() as session:
         row = session.execute(_product_select().where(Product.id == product_id)).first()
@@ -4315,6 +4469,7 @@ def add_product(data: dict):
                     quantity=opening,
                     note="Mahsulot qo'shildi",
                 ))
+            _remember_barcode(session, product.barcode)
             p_id = product.id
             p_name = product.name
             p_barcode = product.barcode or "-"
@@ -4357,6 +4512,7 @@ def update_product(product_id, data: dict):
                         note="Mahsulot tahrirlashda qo'lda tuzatildi",
                     )
                     session.refresh(product)
+            _remember_barcode(session, product.barcode)
             p_name = product.name
             p_barcode = product.barcode or "-"
             p_price = float(product.price or 0)
