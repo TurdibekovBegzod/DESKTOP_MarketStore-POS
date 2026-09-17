@@ -33,6 +33,21 @@ class Settings(BaseSettings):
     release_ping_secret: str | None = None
     release_poll_seconds: int = 600
     app_releases_dir: str = "releases"
+    # Instagram webhook. The verify token is ours to invent - Meta only checks
+    # that the value it sends back matches what the dashboard was given. The app
+    # secret is what signs every delivery. Either one unset means the callback
+    # answers 503 rather than accepting unverified traffic.
+    instagram_verify_token: str | None = None
+    instagram_app_secret: str | None = None
+    # Account token from the dashboard's "Generate access tokens". Needed only
+    # to send; receiving works without it.
+    instagram_access_token: str | None = None
+    instagram_graph_url: str = "https://graph.instagram.com/v23.0"
+    # Kill switch. Off means messages are still received and logged, just not
+    # answered - the way to stop the bot without touching the subscription.
+    instagram_auto_reply: bool = True
+    gemini_api_key: str | None = None
+    gemini_model: str = "gemini-3.7-flash"
     ngrok_domain: str | None = None
     trusted_hosts: str = "localhost,127.0.0.1,testserver,api"
     # Bearer token the metrics scraper must present. The tunnel exposes every

@@ -1,0 +1,22 @@
+release: v1.5.0 avtomatik shtrix-kod va oflayn tekshiruv
+
+Mahsulotga shtrix-kodni dastur o'zi yaratadi, Tekshiruv bo'limi esa
+internetsiz, faqat shu kompyuterda ishlaydi.
+
+- Yangi mahsulot oynasida shtrix-kod maydoni avtomatik to'ladi, yonida
+  "Yaratish" tugmasi bor. Kod 6 ta belgi: katta va kichik harf hamda
+  raqam.
+- Kod hech qachon takrorlanmaydi. Tekshiruv shu qurilmaning bazasidan
+  boradi: berilgan kodlar jurnali, mahsulotdagi shtrix-kod va
+  o'chirilgan mahsulotning eski kodi. Internet talab qilinmaydi.
+- Tekshiruv (Checking) bo'limi endi butunlay lokal. Sanoq serverga
+  yuborilmaydi va serverdan olinmaydi, shuning uchun aloqa uzilganda
+  ham skaner ishlayveradi.
+- Tekshiruv har bir kompyuterda alohida: bir kassada boshlangan sanoq
+  boshqasida ko'rinmaydi.
+- Yakunlashda qoldiqni tuzatish hamon internet talab qiladi - u ombor
+  harakatini yozadi.
+- Eski buildlar navbatga qo'ygan tekshiruv yozuvlari tozalanadi.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_015VRKTW56yrZiy1J115KA5T

@@ -1,0 +1,17 @@
+MarketStore POS v1.5.0
+
+Avtomatik shtrix-kod va oflayn tekshiruv.
+
+- Yangi mahsulot oynasida shtrix-kod maydoni avtomatik to'ladi, yonida
+  "Yaratish" tugmasi bor. Kod 6 ta belgi: katta va kichik harf hamda
+  raqam.
+- Kod hech qachon takrorlanmaydi. Tekshiruv shu qurilmaning bazasidan
+  boradi: berilgan kodlar jurnali, mahsulotdagi shtrix-kod va
+  o'chirilgan mahsulotning eski kodi.
+- Tekshiruv (Checking) bo'limi butunlay lokal bo'ldi. Sanoq serverga
+  yuborilmaydi va serverdan olinmaydi, shuning uchun internet uzilganda
+  ham skaner ishlayveradi.
+- Tekshiruv har bir kompyuterda alohida: bir kassada boshlangan sanoq
+  boshqasida ko'rinmaydi.
+- Yakunlashda qoldiqni tuzatish hamon internet talab qiladi, chunki u
+  ombor harakatini yozadi.
