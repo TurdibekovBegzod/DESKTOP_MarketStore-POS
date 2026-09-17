@@ -74,6 +74,15 @@ services:
       SUPERADMIN_USERNAME: ${SUPERADMIN_USERNAME:-superadmin}
       SUPERADMIN_PASSWORD: ${SUPERADMIN_PASSWORD:-}
       SUPERADMIN_TOKEN_EXPIRE_MINUTES: ${SUPERADMIN_TOKEN_EXPIRE_MINUTES:-15}
+      # Instagram webhook and the DM agent behind it. The api container verifies
+      # and queues; the worker is what actually answers - both are listed in both
+      # services so a value moved between them never goes missing.
+      INSTAGRAM_VERIFY_TOKEN: ${INSTAGRAM_VERIFY_TOKEN:-}
+      INSTAGRAM_APP_SECRET: ${INSTAGRAM_APP_SECRET:-}
+      INSTAGRAM_ACCESS_TOKEN: ${INSTAGRAM_ACCESS_TOKEN:-}
+      INSTAGRAM_AUTO_REPLY: ${INSTAGRAM_AUTO_REPLY:-true}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.7-flash}
       LOG_ARCHIVE_DIR: /var/log/marketstore
       LOG_POLL_SECONDS: ${LOG_POLL_SECONDS:-2}
       LOG_RETENTION_MONTHS: ${LOG_RETENTION_MONTHS:-0}
@@ -113,6 +122,12 @@ services:
       SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
       CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
       CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
+      INSTAGRAM_VERIFY_TOKEN: ${INSTAGRAM_VERIFY_TOKEN:-}
+      INSTAGRAM_APP_SECRET: ${INSTAGRAM_APP_SECRET:-}
+      INSTAGRAM_ACCESS_TOKEN: ${INSTAGRAM_ACCESS_TOKEN:-}
+      INSTAGRAM_AUTO_REPLY: ${INSTAGRAM_AUTO_REPLY:-true}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.7-flash}
     depends_on:
       redis:
         condition: service_healthy
