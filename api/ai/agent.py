@@ -27,15 +27,17 @@ MAX_REPLY_CHARS = 900
 MAX_INCOMING_CHARS = 1500
 
 
-def reply_to(text: str | None) -> str:
+def reply_to(text: str | None, timeout: float | None = None) -> str:
     """The reply to send back, or "" meaning: say nothing.
 
     A photo-only or sticker-only DM arrives with no text at all, and an empty
-    answer from the model means it had nothing safe to say.
+    answer from the model means it had nothing safe to say. ``timeout`` is for
+    callers that answer a waiting request rather than a background job.
     """
     message = (text or "").strip()
     if not message:
         return ""
 
-    answer = generate(message[:MAX_INCOMING_CHARS], system_instruction=SYSTEM_PROMPT)
+    kwargs = {} if timeout is None else {"timeout": timeout}
+    answer = generate(message[:MAX_INCOMING_CHARS], system_instruction=SYSTEM_PROMPT, **kwargs)
     return answer[:MAX_REPLY_CHARS].strip()

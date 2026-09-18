@@ -15,7 +15,7 @@ from app.config import get_settings
 from app.database import SessionLocal
 from app.events import broker
 from app.releases import broadcast_release, fetch_latest_from_github, get_release, store_release
-from app.routers import auth, health, instagram, metrics, superadmin, sync, updates
+from app.routers import assistant, auth, health, instagram, metrics, superadmin, sync, updates
 
 
 settings = get_settings()
@@ -108,6 +108,7 @@ app.include_router(health.router)
 app.include_router(superadmin.page_router)
 app.include_router(auth.router, prefix=settings.api_prefix)
 app.include_router(superadmin.router, prefix=settings.api_prefix)
+app.include_router(assistant.router, prefix=settings.api_prefix)
 app.include_router(instagram.router, prefix=settings.api_prefix)
 app.include_router(sync.router, prefix=settings.api_prefix)
 app.include_router(updates.router, prefix=settings.api_prefix)
