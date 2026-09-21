@@ -2,7 +2,7 @@ import smtplib
 
 import httpx
 
-from ai.agent import reply_to
+from ai.agent import reply_in_conversation
 from ai.gemini import GeminiNotConfiguredError
 from app.celery_app import celery_app
 from app.email_service import (
@@ -69,7 +69,7 @@ def reply_to_instagram_dm_task(recipient_id: str, text: str | None) -> None:
     answers slowly makes Meta redeliver the whole batch and eventually switch
     the subscription off.
     """
-    reply = reply_to(text)
+    reply = reply_in_conversation(recipient_id, text)
     if not reply:
         return
     send_message(recipient_id, reply)
