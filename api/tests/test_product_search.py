@@ -32,12 +32,13 @@ class FakeResult:
 
 
 class FakeSession:
-    """Answers the three queries the tool makes: rate, categories, products."""
+    """Answers the four queries the tool makes: rate, categories, products, specs."""
 
-    def __init__(self, rate="12000", categories=(), products=()):
+    def __init__(self, rate="12000", categories=(), products=(), specs=()):
         self.rate = rate
         self.categories = list(categories)
         self.products = list(products)
+        self.specs = list(specs)
         self.calls = []
 
     def execute(self, statement, params=None):
@@ -47,6 +48,8 @@ class FakeSession:
             return FakeResult([self.rate])
         if "'categories'" in sql:
             return FakeResult(self.categories)
+        if "'product_attributes'" in sql:
+            return FakeResult(self.specs)
         return FakeResult(self.products)
 
     def __enter__(self):
@@ -300,6 +303,30 @@ class OutputTest(unittest.TestCase):
     def test_results_are_capped(self):
         _, session = run(name="lenovo")
         self.assertEqual(product_params(session)["limit"], tools.MAX_RESULTS)
+
+    def test_a_product_with_no_attribute_rows_has_no_specs_key(self):
+        result, _ = run(name="lenovo")
+        self.assertNotIn("specs", result["products"][0])
+
+    def test_a_products_attribute_values_are_returned_as_specs(self):
+        session = FakeSession(
+            categories=[("cat-1", "Noutbuklar")],
+            products=[PRODUCT],
+            specs=[("row-uuid-1", "RAM", "16"), ("row-uuid-1", "CPU", "i7-11th")],
+        )
+        result, _ = run(name="lenovo", session=session)
+        self.assertEqual(
+            result["products"][0]["specs"], {"RAM": "16", "CPU": "i7-11th"}
+        )
+
+    def test_specs_for_a_different_product_are_not_mixed_in(self):
+        session = FakeSession(
+            categories=[("cat-1", "Noutbuklar")],
+            products=[PRODUCT],
+            specs=[("some-other-product", "RAM", "8")],
+        )
+        result, _ = run(name="lenovo", session=session)
+        self.assertNotIn("specs", result["products"][0])
 
 
 class StockTest(unittest.TestCase):
