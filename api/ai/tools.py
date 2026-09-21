@@ -177,7 +177,11 @@ def search_products(
         clauses.append("r.data ->> 'barcode' = :barcode")
         params["barcode"] = barcode
     if name:
-        clauses.append("r.data ->> 'name' %% :name")
+        # Parenthesised: pg_trgm's % binds tighter than ->>, so an unparenthesised
+        # extraction gets read as 'name' % :name first - a text-vs-text similarity
+        # test - and the whole clause becomes "jsonb ->> boolean", which Postgres
+        # rejects outright.
+        clauses.append("(r.data ->> 'name') % :name")
         params["name"] = name
     if in_stock_only:
         clauses.append("COALESCE((r.data ->> 'stock')::numeric, 0) > 0")

@@ -323,5 +323,58 @@ class FailureTest(unittest.TestCase):
         self.assertEqual(result["count"], 0)
 
 
+class LiveStatementTest(unittest.TestCase):
+    """The fake session above proves the right SQL is *built*; it cannot prove
+    Postgres *accepts* it - a fake session never rejects anything.
+
+    Precedence bugs are exactly what slips through that gap: pg_trgm's ``%``
+    binds tighter than ``->>``, so an unparenthesised ``r.data ->> 'name' %
+    :name`` parses as ``r.data ->> ('name' % :name)`` - "jsonb ->> boolean" -
+    and every name search fails, even though the fake-session tests above are
+    all green. This runs the real statement against a live database (skipped
+    when one is not reachable) so that class of bug fails a test again.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import os
+
+        try:
+            import psycopg
+        except ImportError:
+            raise unittest.SkipTest("psycopg not installed")
+
+        url = os.environ.get("API_DATABASE_URL") or os.environ.get("DATABASE_URL")
+        if not url or "sqlite" in url:
+            raise unittest.SkipTest("no live Postgres configured (set API_DATABASE_URL)")
+
+        dsn = url.split("+psycopg", 1)[0] + url.split("+psycopg", 1)[1] if "+psycopg" in url else url
+        try:
+            cls.conn = psycopg.connect(dsn, connect_timeout=3)
+        except Exception as exc:  # pragma: no cover - environment dependent
+            raise unittest.SkipTest(f"Postgres unreachable: {exc}")
+
+    @classmethod
+    def tearDownClass(cls):
+        if hasattr(cls, "conn"):
+            cls.conn.close()
+
+    def test_the_name_filter_is_accepted_by_postgres(self):
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "SELECT ((%s::jsonb ->> 'name') %% %s)",
+                ('{"name": "Lenovo IdeaPad 3"}', "lenovo"),
+            )
+            self.assertIsInstance(cur.fetchone()[0], bool)
+
+    def test_the_similarity_ranking_is_accepted_by_postgres(self):
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "SELECT similarity(COALESCE(%s::jsonb ->> 'name', ''), %s)",
+                ('{"name": "Lenovo IdeaPad 3"}', "lenovo"),
+            )
+            self.assertIsInstance(cur.fetchone()[0], float)
+
+
 if __name__ == "__main__":
     unittest.main()
