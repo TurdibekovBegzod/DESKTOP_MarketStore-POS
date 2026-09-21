@@ -52,8 +52,14 @@ class Settings(BaseSettings):
     # Sent when the model has nothing to say or is too slow. Never empty: the
     # platform would otherwise deliver a blank message to the customer.
     assistant_fallback_reply: str = "Rahmat! Operatorimiz tez orada javob beradi."
+    # Conversation memory for the DM agent. Redis db 3; 0-2 are the Celery
+    # broker, its result backend and the sync event bus.
+    conversation_redis_url: str | None = "redis://localhost:6379/3"
+    # The account whose synced products the agent may read. One shop for
+    # now; per-account routing needs the Instagram id to map to a user.
+    shop_account_email: str | None = None
     gemini_api_key: str | None = None
-    gemini_model: str = "gemini-3.7-flash"
+    gemini_model: str = "gemini-3.1-flash-lite"
     ngrok_domain: str | None = None
     trusted_hosts: str = "localhost,127.0.0.1,testserver,api"
     # Bearer token the metrics scraper must present. The tunnel exposes every

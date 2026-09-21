@@ -5,7 +5,9 @@ the shop's stock or prices yet, so the prompt's main job is to keep it from
 inventing them - a bot that quotes a made-up price costs more than no bot.
 """
 
+from ai import memory
 from ai.gemini import generate
+from ai.tools import DECLARATIONS, TOOLS
 
 
 SYSTEM_PROMPT = """Sen MarketStore do'konining Instagram sahifasiga yozgan mijozlarga javob beradigan yordamchisan.
@@ -39,5 +41,45 @@ def reply_to(text: str | None, timeout: float | None = None) -> str:
         return ""
 
     kwargs = {} if timeout is None else {"timeout": timeout}
-    answer = generate(message[:MAX_INCOMING_CHARS], system_instruction=SYSTEM_PROMPT, **kwargs)
+    answer = generate(
+        message[:MAX_INCOMING_CHARS],
+        system_instruction=SYSTEM_PROMPT,
+        tools=TOOLS,
+        declarations=DECLARATIONS,
+        **kwargs,
+    )
     return answer[:MAX_REPLY_CHARS].strip()
+
+
+def reply_in_conversation(instagram_id: str, text: str | None, timeout: float | None = None) -> str:
+    """Answer one DM with the customer's own history in front of the model.
+
+    The history is loaded and stored around the call rather than inside
+    ``reply_to`` so that the stateless path - the one chat platforms call - is
+    left exactly as it was.
+    """
+    message = (text or "").strip()
+    if not message:
+        return ""
+
+    history = memory.load(instagram_id)
+    contents = history + [{"role": "user", "parts": [{"text": message[:MAX_INCOMING_CHARS]}]}]
+
+    kwargs = {} if timeout is None else {"timeout": timeout}
+    answer = generate(
+        contents,
+        system_instruction=SYSTEM_PROMPT,
+        tools=TOOLS,
+        declarations=DECLARATIONS,
+        **kwargs,
+    )
+    answer = answer[:MAX_REPLY_CHARS].strip()
+    if not answer:
+        # Nothing was said, so nothing is worth remembering: storing a silent
+        # turn would leave the next reply reasoning about an empty answer.
+        return ""
+
+    # Only the spoken turns are kept. Tool calls and their results are what this
+    # reply was built from, not what the next reply needs to know.
+    memory.save(instagram_id, contents + [{"role": "model", "parts": [{"text": answer}]}])
+    return answer
