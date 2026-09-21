@@ -39,25 +39,32 @@ def extract_text(payload: dict) -> str:
 
 
 def extract_function_calls(payload: dict) -> list[dict]:
-    """Every tool the model asked for this turn, in order.
+    """The model's tool-call parts for this turn, whole and unmodified.
 
-    One turn can hold several - Gemini calls independent tools in parallel. An
-    empty list is the signal that the model stopped asking and wrote its answer.
+    Whole parts, not just their functionCall: a 3.x part also carries a
+    thoughtSignature, and the next request is rejected outright unless every
+    part comes back exactly as it was received. One turn can hold several -
+    Gemini calls independent tools in parallel. An empty list is the signal
+    that the model stopped asking and wrote its answer.
     """
     for candidate in payload.get("candidates") or []:
         parts = (candidate.get("content") or {}).get("parts") or []
-        calls = [part["functionCall"] for part in parts if part.get("functionCall")]
+        calls = [part for part in parts if part.get("functionCall")]
         if calls:
             return calls
     return []
 
 
-def run_tool(call: dict, tools: dict) -> dict:
+def run_tool(part: dict, tools: dict) -> dict:
     """One tool call's result, as the model should see it.
+
+    Takes the whole part and reads the call out of it, so callers can keep
+    passing the parts around untouched.
 
     Failures are reported rather than raised: the model can apologise or try a
     different tool, where an exception would cost the customer the whole reply.
     """
+    call = part.get("functionCall") or part
     name = call.get("name") or ""
     handler = tools.get(name)
     if handler is None:
@@ -124,13 +131,19 @@ def generate(
         if not calls:
             return extract_text(payload)
 
-        contents.append({"role": "model", "parts": [{"functionCall": c} for c in calls]})
+        # The model's parts go back verbatim - see extract_function_calls.
+        contents.append({"role": "model", "parts": calls})
         contents.append(
             {
                 "role": "user",
                 "parts": [
-                    {"functionResponse": {"name": c.get("name"), "response": run_tool(c, tools or {})}}
-                    for c in calls
+                    {
+                        "functionResponse": {
+                            "name": (part.get("functionCall") or {}).get("name"),
+                            "response": run_tool(part, tools or {}),
+                        }
+                    }
+                    for part in calls
                 ],
             }
         )

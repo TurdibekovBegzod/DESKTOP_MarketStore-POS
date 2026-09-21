@@ -20,7 +20,13 @@ class ExtractFunctionCallsTest(unittest.TestCase):
 
     def test_a_call_is_returned_with_its_arguments(self):
         calls = gemini.extract_function_calls(_call("search_products", query="olma"))
-        self.assertEqual(calls, [{"name": "search_products", "args": {"query": "olma"}}])
+        self.assertEqual(calls, [{"functionCall": {"name": "search_products", "args": {"query": "olma"}}}])
+
+    def test_a_thought_signature_survives_extraction(self):
+        """3.x rejects the next request unless the part comes back whole."""
+        payload = {"candidates": [{"content": {"parts": [
+            {"functionCall": {"name": "a", "args": {}}, "thoughtSignature": "sig-1"}]}}]}
+        self.assertEqual(gemini.extract_function_calls(payload)[0]["thoughtSignature"], "sig-1")
 
     def test_parallel_calls_are_all_returned(self):
         payload = {
@@ -35,22 +41,22 @@ class ExtractFunctionCallsTest(unittest.TestCase):
                 }
             ]
         }
-        self.assertEqual([c["name"] for c in gemini.extract_function_calls(payload)], ["a", "b"])
+        self.assertEqual([c["functionCall"]["name"] for c in gemini.extract_function_calls(payload)], ["a", "b"])
 
 
 class RunToolTest(unittest.TestCase):
     def test_an_unknown_tool_is_reported_not_raised(self):
-        self.assertIn("error", gemini.run_tool({"name": "nope", "args": {}}, {}))
+        self.assertIn("error", gemini.run_tool({"functionCall": {"name": "nope", "args": {}}}, {}))
 
     def test_a_failing_tool_is_reported_not_raised(self):
         def boom():
             raise RuntimeError("db down")
 
-        self.assertEqual(gemini.run_tool({"name": "x"}, {"x": boom}), {"error": "db down"})
+        self.assertEqual(gemini.run_tool({"functionCall": {"name": "x"}}, {"x": boom}), {"error": "db down"})
 
     def test_a_working_tool_returns_its_result(self):
         self.assertEqual(
-            gemini.run_tool({"name": "x", "args": {"n": 2}}, {"x": lambda n: {"got": n}}),
+            gemini.run_tool({"functionCall": {"name": "x", "args": {"n": 2}}}, {"x": lambda n: {"got": n}}),
             {"got": 2},
         )
 
