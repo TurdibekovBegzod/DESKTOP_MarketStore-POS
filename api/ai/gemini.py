@@ -148,6 +148,18 @@ def generate(
             }
         )
 
-    # Out of rounds. Whatever text the last turn produced beats saying nothing.
+    # Out of rounds, and the last turn was itself another tool call - its
+    # result is already appended to contents, but the model has never been
+    # asked to turn that into words. Without this, extract_text(payload) reads
+    # the tool-call turn, finds no text, and the customer gets silence even
+    # though the second-to-last round's tool result had their answer.
     logger.warning("tool loop hit %s rounds without a final answer", MAX_TOOL_ROUNDS)
-    return extract_text(payload)
+    body.pop("tools", None)  # forced: no more tool calls, only an answer
+    response = httpx.post(
+        f"{API_ROOT}/{model or settings.gemini_model}:generateContent",
+        headers={"x-goog-api-key": settings.gemini_api_key},
+        json=body,
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    return extract_text(response.json())

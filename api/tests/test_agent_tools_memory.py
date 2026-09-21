@@ -100,10 +100,25 @@ class ToolLoopTest(unittest.TestCase):
         self.assertEqual(roles, ["user", "model", "user"])
 
     def test_a_model_that_never_stops_is_cut_off(self):
-        payloads = [_call("search_products", query="x")] * (gemini.MAX_TOOL_ROUNDS + 3)
+        """After MAX_TOOL_ROUNDS the loop stops asking for tools, but it still
+        owes the model one forced, tool-free request - the customer must get
+        whatever the model can say about the last tool result, not silence."""
+        payloads = [_call("search_products", query="x")] * gemini.MAX_TOOL_ROUNDS + [
+            _text("Hech narsa topilmadi")
+        ]
+        answer, post = self._run(payloads, {"search_products": lambda query: {"products": []}})
+        self.assertEqual(answer, "Hech narsa topilmadi")
+        self.assertEqual(post.call_count, gemini.MAX_TOOL_ROUNDS + 1)
+        # That last request must not offer tools again - it is asking for words.
+        self.assertNotIn("tools", post.call_args.kwargs["json"])
+
+    def test_a_model_that_never_stops_and_still_wont_talk_is_silent(self):
+        """Even the forced round can come back with nothing usable (e.g. a
+        safety filter) - that must still be silence, not an exception."""
+        payloads = [_call("search_products", query="x")] * (gemini.MAX_TOOL_ROUNDS + 1)
         answer, post = self._run(payloads, {"search_products": lambda query: {"products": []}})
         self.assertEqual(answer, "")
-        self.assertEqual(post.call_count, gemini.MAX_TOOL_ROUNDS)
+        self.assertEqual(post.call_count, gemini.MAX_TOOL_ROUNDS + 1)
 
 
 class MemoryTest(unittest.TestCase):
