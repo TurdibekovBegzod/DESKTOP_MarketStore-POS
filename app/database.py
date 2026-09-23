@@ -1335,6 +1335,7 @@ MIGRATIONS = (
     ("014_activity_feed", "Record what each device does so the others can be told."),
     ("015_local_barcode_issues", "Remember every barcode generated on this device."),
     ("016_local_stocktake", "Keep the stocktake on this device instead of the server."),
+    ("017_finalized_at_clock", "Put finalized_at on the same clock as the rest of the sale."),
 )
 
 
@@ -2030,6 +2031,49 @@ def _migration_local_barcode_issues(conn):
     )
 
 
+def _migration_finalized_at_clock(conn):
+    """Put finalized_at back on the same clock as the rest of the sale.
+
+    An older build wrote the sale's own created_at on the device's local
+    clock but finalized_at in UTC. East of Greenwich that makes a sale look
+    confirmed *before* it was sold -- "sotilgan 10:45, yakunlangan 07:47".
+
+    A sale cannot be confirmed before it exists, so every row where
+    finalized_at is behind created_at is one of these. The stored value is
+    short by exactly the device's UTC offset, so adding that offset back
+    lands it where the cashier actually confirmed the sale. Rows that
+    already read correctly are left alone, and so is any row the offset
+    would not fix -- those are a different problem and guessing at them
+    would only invent a time.
+    """
+    if not _has_table(conn, "sales"):
+        return
+    columns = _table_columns(conn, "sales")
+    if "finalized_at" not in columns or "created_at" not in columns:
+        return
+
+    # The offset these rows were written with is this device's own, which is
+    # what SQLite's 'localtime' modifier reports.
+    offset_hours = conn.exec_driver_sql(
+        "SELECT CAST(ROUND((julianday(datetime('now','localtime')) "
+        "- julianday(datetime('now'))) * 24) AS INTEGER)"
+    ).scalar()
+    if not offset_hours or offset_hours <= 0:
+        return
+
+    conn.exec_driver_sql(
+        """
+        UPDATE sales
+           SET finalized_at = datetime(finalized_at, ? || ' hours')
+         WHERE finalized_at IS NOT NULL
+           AND created_at IS NOT NULL
+           AND finalized_at < created_at
+           AND datetime(finalized_at, ? || ' hours') >= created_at
+        """,
+        (f"+{offset_hours}", f"+{offset_hours}"),
+    )
+
+
 MIGRATION_FUNCTIONS = {
     "001_create_missing_tables": _migration_create_missing_tables,
     "002_add_missing_columns": _migration_add_missing_columns,
@@ -2047,6 +2091,7 @@ MIGRATION_FUNCTIONS = {
     "014_activity_feed": _migration_activity_feed,
     "015_local_barcode_issues": _migration_local_barcode_issues,
     "016_local_stocktake": _migration_local_stocktake,
+    "017_finalized_at_clock": _migration_finalized_at_clock,
 }
 
 
@@ -4364,7 +4409,10 @@ def log_activity(action, title, message, level="info", target="products", badge=
         "target": target,
         "badge": badge,
         "device_key": device_key,
-        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        # UTC, like every other stored timestamp. These rows sync between
+        # devices, so a local clock here would make one device's feed read
+        # hours off on another, and would sort wrongly against sales.
+        "created_at": _utc_now(),
     }
     actor = _store_activity(item)
     item["user_name"] = actor.get("name")
@@ -4411,10 +4459,11 @@ def get_recent_activities(limit=50):
                 user_id=row.user_id,
                 user_name=row.user_name,
                 device_key=row.device_key,
-                created_at=row.created_at,
+                created_at=_utc_to_local(row.created_at),
             )) for row in rows]
     except Exception:
-        return [Row(act) for act in _SESSION_ACTIVITIES[:limit]]
+        return [Row(dict(act, created_at=_utc_to_local(act.get("created_at"))))
+                for act in _SESSION_ACTIVITIES[:limit]]
 
 
 def take_new_remote_activities(limit=5):
@@ -4447,7 +4496,10 @@ def take_new_remote_activities(limit=5):
             level=row.level,
             target=row.target,
             user_name=row.user_name,
+            # Stays UTC: the watermark below is compared against stored values.
             created_at=row.created_at,
+            # What a person should see, already in their own time.
+            created_at_local=_utc_to_local(row.created_at),
         )) for row in rows]
     newest = max((row["created_at"] or "" for row in fresh), default=None)
     if newest:
