@@ -85,12 +85,12 @@ class ReportFiltersAndProgressTest(unittest.TestCase):
         }
         self.assertEqual(combo_names, {"Sardor Kassir", "Madina Admin"})
         self.assertNotIn("Owner", combo_names)
-        self.assertEqual(widget.table.horizontalHeaderItem(7).text(), "Kassir")
+        self.assertEqual(widget.table.horizontalHeaderItem(8).text(), "Kassir")
 
         seller_names = {
-            widget.table.item(row, 7).text()
+            widget.table.item(row, 8).text()
             for row in range(1, widget.table.rowCount())
-            if widget.table.item(row, 7)
+            if widget.table.item(row, 8)
         }
         self.assertEqual(seller_names, {"Sardor Kassir", "Madina Admin"})
 

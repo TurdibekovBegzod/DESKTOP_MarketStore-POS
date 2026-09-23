@@ -809,6 +809,9 @@ TRANSLATIONS["en"].update({
     "Qarz oluvchi turi:": "Debtor type:",
     "Kassirni tanlang!": "Select a cashier!",
     "— Kassirni tanlang —": "— Select cashier —",
+    "To'lov turini tanlang!": "Select a payment type!",
+    "— To'lov turini tanlang —": "— Select payment type —",
+    "Sotilgan": "Sold at",
     "Tanlangan foydalanuvchi kassir emas.": "The selected user is not a cashier.",
     "Boshlang'ich qarz:": "Opening debt:",
 })
@@ -828,6 +831,9 @@ TRANSLATIONS["ru"].update({
     "Qarz oluvchi turi:": "Тип должника:",
     "Kassirni tanlang!": "Выберите кассира!",
     "— Kassirni tanlang —": "— Выберите кассира —",
+    "To'lov turini tanlang!": "Выберите тип оплаты!",
+    "— To'lov turini tanlang —": "— Выберите тип оплаты —",
+    "Sotilgan": "Продано в",
     "Tanlangan foydalanuvchi kassir emas.": "Выбранный пользователь не является кассиром.",
     "Boshlang'ich qarz:": "Начальный долг:",
 })

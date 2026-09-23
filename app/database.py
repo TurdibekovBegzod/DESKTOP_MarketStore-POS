@@ -924,6 +924,13 @@ class LoginLog(Base):
     username = Column(String, nullable=False)
     role = Column(String, nullable=False)
     logged_at = Column(String, server_default=text("CURRENT_TIMESTAMP"))
+    # What happened: "login", "failed", "logout", "main_mode", "cashier_mode",
+    # "session_restored". Older rows predate the column and read as "login".
+    event = Column(String, server_default=text("'login'"))
+    # "success" or "failed"; a failed attempt still records the typed e-mail.
+    status = Column(String, server_default=text("'success'"))
+    # Why a failed attempt was rejected, shown verbatim in the history table.
+    detail = Column(String)
 
 
 class Category(Base):
@@ -1428,6 +1435,11 @@ def _add_missing_columns(conn=None):
         },
         "currencies": {
             "updated_at": "ALTER TABLE currencies ADD COLUMN updated_at TEXT",
+        },
+        "login_logs": {
+            "event": "ALTER TABLE login_logs ADD COLUMN event TEXT DEFAULT 'login'",
+            "status": "ALTER TABLE login_logs ADD COLUMN status TEXT DEFAULT 'success'",
+            "detail": "ALTER TABLE login_logs ADD COLUMN detail TEXT",
         },
         "products": {
             "section_id": "ALTER TABLE products ADD COLUMN section_id TEXT REFERENCES product_sections(id)",
@@ -7563,23 +7575,62 @@ def sync_online_user(email, display_name=None, role="admin", access_token=None, 
         _sync_suspend_token.__exit__(None, None, None)
 
 
-def log_login(user):
-    _sync_suspend_token = suspend_sync()
-    _sync_suspend_token.__enter__()
-    try:
+LOGIN_EVENT_LABELS = {
+    "login": ("Tizimga kirish", "Kirish"),
+    "failed": ("Kirish urinishi muvaffaqiyatsiz", "Xato"),
+    "logout": ("Tizimdan chiqish", "Chiqish"),
+    "main_mode": ("Asosiy oynaga kirish", "Asosiy"),
+    "cashier_mode": ("Kassir oynasiga o'tish", "Kassir"),
+    "session_restored": ("Saqlangan sessiya tiklandi", "Tiklandi"),
+}
+
+
+def log_login(user, event="login", status="success", detail=None):
+    """Record one authentication event.
+
+    Every attempt belongs here, successful or not: a plain login, a failed
+    attempt, a logout, and each switch between the main and cashier windows.
+    The row is written through the normal sync path on purpose -- in server
+    mode the local SQLite file is a disposable session cache, so a row kept
+    out of the outbox would disappear on the next launch.
+    """
+    user = dict(user or {})
+    # A typed e-mail is untrusted input and the reason text comes from whatever
+    # the server or an exception produced, so both are bounded before they are
+    # stored and pushed.
+    username = (user.get("email") or user.get("username") or "").strip()[:255] or "—"
+    role = user.get("role") or "cashier"
+    if detail is not None:
+        detail = str(detail).strip()[:500] or None
+    user_id = user.get("id")
+    if user_id:
+        # A failed attempt names an account that may not exist; never write a
+        # dangling foreign key for it.
         with session_scope() as session:
-            session.add(LoginLog(user_id=user["id"], username=user.get("email") or user["username"], role=user["role"], logged_at=_utc_now()))
-    finally:
-        _sync_suspend_token.__exit__(None, None, None)
-    u_name = user.get("email") or user.get("username")
-    u_role = str(user.get("role", "cashier")).title()
+            if session.get(User, user_id) is None:
+                user_id = None
+    with session_scope() as session:
+        session.add(LoginLog(
+            user_id=user_id,
+            username=username,
+            role=role,
+            logged_at=_utc_now(),
+            event=event,
+            status=status,
+            detail=detail,
+        ))
+
+    title, badge = LOGIN_EVENT_LABELS.get(event, LOGIN_EVENT_LABELS["login"])
+    description = f"Foydalanuvchi roli: {str(role).title()}"
+    if detail:
+        description = f"{description}. {detail}"
     log_activity(
         "user_login",
-        f"Tizimga kirish: {u_name}",
-        f"Foydalanuvchi roli: {u_role}",
-        level="info",
+        f"{title}: {username}",
+        description,
+        level="warning" if status != "success" else "info",
         target="login_history",
-        badge="Kirish",
+        badge=badge,
     )
 
 

@@ -11,6 +11,7 @@ from PyQt6.QtGui import QAction, QPixmap, QPainter, QIcon, QColor, QImage, QFont
 from datetime import datetime, timedelta
 from pathlib import Path
 import sys
+import traceback
 import api_client
 import database as db
 import sync_service
@@ -43,6 +44,9 @@ def resource_path(relative_path):
 
 DESKTOP_ICON_PATH = resource_path("images/desktop.png")
 APP_ICON_PATH = resource_path("images/desktop_icon.ico")
+# Shown only by accounts that have never saved a logo of their own; a saved
+# logo always wins, so changing this never rewrites an existing account.
+DEFAULT_LOGO_PATH = APP_ICON_PATH
 RIGHT_ARROW_LIST_PATH = resource_path("images/right-arrow_list.png")
 DOWN_ARROW_PATH = resource_path("images/down_full.png")
 if not Path(DOWN_ARROW_PATH).exists():
@@ -122,7 +126,7 @@ def load_custom_logo_pixmap() -> QPixmap:
         _mark_logo_migration_complete()
     elif not marker.exists():
         _mark_logo_migration_complete()
-    return QPixmap(DESKTOP_ICON_PATH)
+    return QPixmap(DEFAULT_LOGO_PATH)
 
 
 def reset_custom_logo() -> bool:
@@ -540,18 +544,24 @@ class SettingsDialog(QDialog):
             self.language_combo.setCurrentIndex(idx)
         form.addRow(labels["theme"] + ":", self.theme_combo)
         form.addRow(labels["language"] + ":", self.language_combo)
-        currency_row = QHBoxLayout()
-        currency_row.setContentsMargins(0, 0, 0, 0)
-        currency_row.setSpacing(8)
-        self.currency_combo = QComboBox()
-        self.currency_combo.setMinimumWidth(150)
-        self.currency_manage_btn = QPushButton(labels["exchange_rates"])
-        self.currency_manage_btn.setFixedHeight(32)
-        self.currency_manage_btn.clicked.connect(self._manage_currencies)
-        currency_row.addWidget(self.currency_combo, 1)
-        currency_row.addWidget(self.currency_manage_btn)
-        form.addRow(labels["currency"] + ":", currency_row)
-        self._load_currency_combo(self.settings.get("currency", "UZS"))
+        # The default currency and the exchange rates behind it are account-wide:
+        # one change re-prices every product for everyone, so both belong to the
+        # main (admin) window only. Theme and language stay per-user above.
+        self.currency_combo = None
+        self.currency_manage_btn = None
+        if self.user_role == "admin":
+            currency_row = QHBoxLayout()
+            currency_row.setContentsMargins(0, 0, 0, 0)
+            currency_row.setSpacing(8)
+            self.currency_combo = QComboBox()
+            self.currency_combo.setMinimumWidth(150)
+            currency_row.addWidget(self.currency_combo, 1)
+            self.currency_manage_btn = QPushButton(labels["exchange_rates"])
+            self.currency_manage_btn.setFixedHeight(32)
+            self.currency_manage_btn.clicked.connect(self._manage_currencies)
+            currency_row.addWidget(self.currency_manage_btn)
+            form.addRow(labels["currency"] + ":", currency_row)
+            self._load_currency_combo(self.settings.get("currency", "UZS"))
         self.app_name_edit = None
         if self.user_role == "admin":
             self.app_name_edit = QLineEdit(self.settings.get("app_name", "Market POS"))
@@ -657,8 +667,9 @@ class SettingsDialog(QDialog):
         data = {
             "theme": self.theme_combo.currentData(),
             "language": self.language_combo.currentData(),
-            "currency": self.currency_combo.currentData() or "UZS",
         }
+        if self.currency_combo is not None:
+            data["currency"] = self.currency_combo.currentData() or "UZS"
         if self.app_name_edit is not None:
             data["app_name"] = self.app_name_edit.text().strip() or "Market POS"
         return data
@@ -675,6 +686,8 @@ class SettingsDialog(QDialog):
             self.currency_combo.setCurrentIndex(index)
 
     def _manage_currencies(self):
+        if self.user_role != "admin":
+            return
         selected_code = self.currency_combo.currentData()
         dialog = CurrencyDialog(self)
         dialog.exec()
@@ -2852,20 +2865,29 @@ class MainWindow(QMainWindow):
         self._push_to_server(show_message=False)
 
     def _set_logo_icon(self):
+        """Show this account's logo on this window only.
+
+        The application-wide icon is deliberately left alone: it is shared by
+        every window in the process, so writing an account logo into it would
+        follow the user to the login dialog and into the next account's window.
+        """
         pixmap = load_custom_logo_pixmap()
-        if not pixmap.isNull():
-            self.logo_icon_lbl.setPixmap(
-                pixmap.scaled(
-                    36,
-                    36,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
+        if pixmap.isNull():
+            # No logo for this account -- fall back, never keep a stale one.
+            pixmap = QPixmap(DEFAULT_LOGO_PATH)
+        if pixmap.isNull():
+            self.logo_icon_lbl.clear()
+            self.setWindowIcon(QIcon(APP_ICON_PATH))
+            return
+        self.logo_icon_lbl.setPixmap(
+            pixmap.scaled(
+                36,
+                36,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
             )
-            self.setWindowIcon(QIcon(pixmap))
-            app = QApplication.instance()
-            if app:
-                app.setWindowIcon(QIcon(pixmap))
+        )
+        self.setWindowIcon(QIcon(pixmap))
 
     def _change_logo_image(self):
         if self.user.get("role") != "admin":
@@ -3086,15 +3108,21 @@ class MainWindow(QMainWindow):
                 api_client.verify_admin_password(token, password)
                 break
             except api_client.ApiOfflineError:
-                dlg.set_error(self.labels.get(
+                message = self.labels.get(
                     "unlock_needs_internet",
                     "Serverga ulanib bo'lmadi. Bu amal uchun internet kerak.",
-                ))
+                )
+                self._log_auth_event("main_mode", status="failed", detail=message)
+                dlg.set_error(message)
             except api_client.ApiClientError as exc:
+                self._log_auth_event("main_mode", status="failed", detail=str(exc))
                 dlg.set_error(str(exc))
             except Exception as exc:  # noqa: BLE001 - shown to the user
-                dlg.set_error(str(exc) or type(exc).__name__)
+                message = str(exc) or type(exc).__name__
+                self._log_auth_event("main_mode", status="failed", detail=message)
+                dlg.set_error(message)
         self.user["role"] = "admin"
+        self._log_auth_event("main_mode")
         self.next_window = MainWindow(dict(self.user))
         self.next_window.showMaximized()
         self._logging_out = True
@@ -3115,8 +3143,20 @@ class MainWindow(QMainWindow):
             return False
         return bool(self._change_admin_password(send_on_open=True, recovery=True))
 
+    def _log_auth_event(self, event, status="success", detail=None):
+        """Record a window/session change in the login history.
+
+        Best-effort on purpose: failing to write history must never block the
+        user from switching windows or logging out.
+        """
+        try:
+            db.log_login(self.user, event=event, status=status, detail=detail)
+        except Exception:
+            traceback.print_exc()
+
     def _switch_to_cashier_mode(self):
         self.user["role"] = "cashier"
+        self._log_auth_event("cashier_mode")
         self.next_window = MainWindow(dict(self.user))
         self.next_window.showMaximized()
         self._logging_out = True
@@ -3373,6 +3413,12 @@ class MainWindow(QMainWindow):
             page.discount_currency_combo.setStyleSheet(self._field_style(theme))
             page.discount_currency_combo.setMinimumHeight(40)
             page.discount_currency_combo.setMinimumWidth(86)
+        if getattr(page, "total_currency_combo", None) is not None:
+            # Same geometry as the discount picker directly above it, so the
+            # two line up instead of stepping in and out.
+            page.total_currency_combo.setStyleSheet(self._field_style(theme))
+            page.total_currency_combo.setMinimumHeight(40)
+            page.total_currency_combo.setMinimumWidth(86)
         cart_title = page.findChild(QLabel, "salesCartTitle")
         if cart_title:
             cart_title.setStyleSheet(f"""
@@ -3709,6 +3755,7 @@ class MainWindow(QMainWindow):
         )
         if reply == QMessageBox.StandardButton.Yes:
             self._logging_out = True
+            self._log_auth_event("logout")
             db.clear_user_activity(self.user.get("id"))
             self.close()
             from ui.login_dialog import LoginDialog

@@ -301,6 +301,8 @@ class ProductInfoDialog(QDialog):
 
 
 class SalesWidget(QWidget):
+    PAYMENT_METHODS = ["Naqd", "Plastik karta"]
+
     def __init__(self, user):
         super().__init__()
         self.user = user
@@ -419,63 +421,62 @@ class SalesWidget(QWidget):
         disc_row.addWidget(self.discount_currency_combo)
         right.addLayout(disc_row)
 
-        # Totals card
+        # Totals row. The card holds only the amount, so its currency picker
+        # lines up with the discount one above it: same row geometry, same
+        # width, same height, one straight edge down the right-hand side.
+        totals_row = QHBoxLayout()
+        totals_row.setSpacing(disc_row.spacing())
+
         totals_frame = QFrame()
+        totals_frame.setMinimumHeight(40)
         totals_frame.setStyleSheet("""
             QFrame { background: white; border: 1px solid #e2e8f0;
                      border-radius: 10px; padding: 4px; }
         """)
-        totals_layout = QVBoxLayout(totals_frame)
-        totals_layout.setSpacing(6)
+        totals_layout = QHBoxLayout(totals_frame)
+        totals_layout.setContentsMargins(6, 0, 6, 0)
 
         self.subtotal_lbl = QLabel("")
         self.subtotal_lbl.setStyleSheet("color: #1e293b; font-size: 20px; font-weight: bold;")
-
         totals_layout.addWidget(self.subtotal_lbl)
-        right.addWidget(totals_frame)
 
-        # Payment method and cashier selector
+        # Shows the same total in whichever currency is picked. This only
+        # changes what is displayed: the sale is still recorded in UZS.
+        self.total_currency_combo = QComboBox()
+        self.total_currency_combo.setMinimumHeight(40)
+        self.total_currency_combo.setMinimumWidth(86)
+        self.total_currency_combo.setStyleSheet(self._input_style())
+        self.total_currency_combo.currentIndexChanged.connect(self._update_totals)
+
+        totals_row.addWidget(totals_frame, 1)
+        totals_row.addWidget(self.total_currency_combo)
+        right.addLayout(totals_row)
+
+        # Payment method and cashier selector (each sale must pick both)
         pay_row = QHBoxLayout()
         pay_row.setSpacing(10)
         pay_lbl = QLabel("To'lov:")
         pay_lbl.setFixedWidth(55)
         self.payment_combo = QComboBox()
-        self.payment_combo.addItems(["Naqd", "Plastik karta"])
+        self.payment_combo.setMinimumHeight(40)
         self.payment_combo.setStyleSheet(self._input_style())
         self.payment_combo.currentIndexChanged.connect(self._on_payment_changed)
         pay_row.addWidget(pay_lbl)
         pay_row.addWidget(self.payment_combo, 1)
+        right.addLayout(pay_row)
 
+        cashier_row = QHBoxLayout()
+        cashier_row.setSpacing(10)
         cashier_lbl = QLabel("Kassir:")
         cashier_lbl.setFixedWidth(55)
         self.cashier_combo = QComboBox()
+        self.cashier_combo.setMinimumHeight(40)
         self.cashier_combo.setStyleSheet(self._input_style())
-        pay_row.addWidget(cashier_lbl)
-        pay_row.addWidget(self.cashier_combo, 1)
-        right.addLayout(pay_row)
+        cashier_row.addWidget(cashier_lbl)
+        cashier_row.addWidget(self.cashier_combo, 1)
+        right.addLayout(cashier_row)
 
-        currency_row = QHBoxLayout()
-        currency_lbl = QLabel("Valyuta:")
-        currency_lbl.setFixedWidth(55)
-        self.currency_combo = QComboBox()
-        self.currency_combo.setStyleSheet(self._input_style())
-        self.currency_combo.currentIndexChanged.connect(self._on_currency_changed)
-        currency_btn = QPushButton("Kurslar")
-        currency_btn.setFixedHeight(34)
-        currency_btn.setStyleSheet("""
-            QPushButton { background: white; color: #1e293b; border: 1px solid #d1d5db;
-                          border-radius: 6px; padding: 0 10px; font-size: 12px; }
-            QPushButton:hover { background: #f8fafc; }
-        """)
-        currency_btn.clicked.connect(self._manage_currencies)
-        currency_row.addWidget(currency_lbl)
-        currency_row.addWidget(self.currency_combo)
-        currency_row.addWidget(currency_btn)
-        right.addLayout(currency_row)
-
-        self.currency_total_lbl = QLabel("")
-        self.currency_total_lbl.setStyleSheet("color: #64748b; font-size: 12px;")
-        right.addWidget(self.currency_total_lbl)
+        self._reset_payment_combo()
 
         # Action buttons
         sell_btn = QPushButton("Sotishni yakunlash")
@@ -605,20 +606,10 @@ class SalesWidget(QWidget):
                 QTimer.singleShot(150, lambda: set_progress_bar_loading(self.progress_bar, False))
 
     def _load_currencies(self, currencies=None):
-        current = self.currency_combo.currentData() if hasattr(self, "currency_combo") else None
         discount_current = self.discount_currency_combo.currentData() if hasattr(self, "discount_currency_combo") else None
+        total_current = self.total_currency_combo.currentData() if hasattr(self, "total_currency_combo") else None
         preferred_code = db.get_app_settings(self.user.get("id")).get("currency", "UZS")
         currencies = currencies if currencies is not None else [dict(currency) for currency in db.get_currencies()]
-        self.currency_combo.blockSignals(True)
-        self.currency_combo.clear()
-        for currency in currencies:
-            self.currency_combo.addItem(f"{currency['code']} - {currency['name']}", dict(currency))
-        selected_code = current["code"] if current else preferred_code
-        idx = self.currency_combo.findText(selected_code, Qt.MatchFlag.MatchStartsWith)
-        if idx >= 0:
-            self.currency_combo.setCurrentIndex(idx)
-        self.currency_combo.blockSignals(False)
-
         self.discount_currency_combo.blockSignals(True)
         self.discount_currency_combo.clear()
         for currency in currencies:
@@ -628,6 +619,17 @@ class SalesWidget(QWidget):
         if idx >= 0:
             self.discount_currency_combo.setCurrentIndex(idx)
         self.discount_currency_combo.blockSignals(False)
+
+        self.total_currency_combo.blockSignals(True)
+        self.total_currency_combo.clear()
+        for currency in currencies:
+            self.total_currency_combo.addItem(currency["code"], dict(currency))
+        if not currencies:
+            self.total_currency_combo.addItem("UZS", {"code": "UZS", "rate_to_uzs": 1})
+        total_code = total_current["code"] if total_current else preferred_code
+        idx = self.total_currency_combo.findText(total_code, Qt.MatchFlag.MatchStartsWith)
+        self.total_currency_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.total_currency_combo.blockSignals(False)
         self._on_currency_changed()
 
     def _load_cashiers(self, users=None):
@@ -667,14 +669,45 @@ class SalesWidget(QWidget):
         )
         self.cashier_combo.blockSignals(True)
         self.cashier_combo.clear()
+        # Added untranslated so set_language() can translate it.
+        self.cashier_combo.addItem("— Kassirni tanlang —", None)
         for user in users:
             self.cashier_combo.addItem(self._cashier_display_name(user), user.get("id"))
+        # Keep the picked cashier while a cart is open, but never preselect one:
+        # every new sale has to choose again.
         idx = self.cashier_combo.findData(current_id) if current_id is not None else -1
-        if idx < 0 and self.cashier_combo.count():
-            idx = 0
-        if idx >= 0:
-            self.cashier_combo.setCurrentIndex(idx)
+        self.cashier_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self.cashier_combo.blockSignals(False)
+
+    def _reset_payment_combo(self):
+        """Rebuild the payment picker with nothing selected."""
+        if self.payment_combo.count() != len(self.PAYMENT_METHODS) + 1:
+            self.payment_combo.blockSignals(True)
+            self.payment_combo.clear()
+            # Items are added untranslated so set_language() can translate them.
+            self.payment_combo.addItem("— To'lov turini tanlang —")
+            for method in self.PAYMENT_METHODS:
+                self.payment_combo.addItem(method)
+            self.payment_combo.blockSignals(False)
+            set_language(self.payment_combo, self._language())
+        self.payment_combo.blockSignals(True)
+        self.payment_combo.setCurrentIndex(0)
+        self.payment_combo.blockSignals(False)
+
+    def _selected_payment_method(self):
+        """Untranslated payment name, or None while the placeholder is selected."""
+        index = self.payment_combo.currentIndex()
+        if index <= 0:
+            return None
+        return self.PAYMENT_METHODS[index - 1]
+
+    def _reset_payment_and_cashier(self):
+        """Clear both pickers so the next sale asks for them again."""
+        self._reset_payment_combo()
+        if self.cashier_combo.count():
+            self.cashier_combo.blockSignals(True)
+            self.cashier_combo.setCurrentIndex(0)
+            self.cashier_combo.blockSignals(False)
 
     def _cashier_display_name(self, user):
         username = (user.get("username") or "").strip()
@@ -687,14 +720,20 @@ class SalesWidget(QWidget):
         return " ".join(part.capitalize() for part in name.split()) or "User"
 
     def _selected_cashier_id(self):
-        cashier_id = self.cashier_combo.currentData() if hasattr(self, "cashier_combo") else None
-        return cashier_id or self.user["id"]
+        return self.cashier_combo.currentData() if hasattr(self, "cashier_combo") else None
 
     def _selected_currency(self):
-        return self.currency_combo.currentData() or {"code": "UZS", "rate_to_uzs": 1}
+        """Sales are always recorded in UZS; the currency picker was removed from this screen."""
+        return {"code": "UZS", "rate_to_uzs": 1}
 
     def _selected_discount_currency(self):
         return self.discount_currency_combo.currentData() or {"code": "UZS", "rate_to_uzs": 1}
+
+    def _selected_total_currency(self):
+        """Currency the cart total is shown in; the sale itself stays in UZS."""
+        if not hasattr(self, "total_currency_combo"):
+            return {"code": "UZS", "rate_to_uzs": 1}
+        return self.total_currency_combo.currentData() or {"code": "UZS", "rate_to_uzs": 1}
 
     def _amount_from_line_edit(self, edit):
         text = edit.text().strip().replace(" ", "").replace(",", ".")
@@ -725,11 +764,6 @@ class SalesWidget(QWidget):
     def _language_changed(self, language):
         self.setProperty("app_language", language)
         self._update_totals()
-
-    def _manage_currencies(self):
-        dlg = CurrencyDialog(self)
-        dlg.exec()
-        self.load_data()
 
     def _search_products(self, text):
         self._pending_search_text = text
@@ -878,27 +912,47 @@ class SalesWidget(QWidget):
             discount = subtotal
         total = max(0, subtotal - discount)
         language = self._language()
-        money_unit = self._money_unit()
-        self.subtotal_lbl.setText(f"{t('Jami', language)}: {total:,.0f} {money_unit}")
-        currency = self._selected_currency()
-        rate = currency["rate_to_uzs"] or 1
-        currency_by_label = t("bo'yicha:", language)
-        self.currency_total_lbl.setText(
-            f"{currency['code']} {currency_by_label} {total / rate:,.2f} {currency['code']} "
-            f"({t('kurs:', language)} {rate:,.2f} {money_unit})"
-        )
+        display = self._selected_total_currency()
+        rate = display.get("rate_to_uzs") or 1
+        if display.get("code") == "UZS":
+            amount = f"{total:,.0f} {self._money_unit()}"
+        else:
+            # Foreign amounts need the cents; so'm never has them.
+            amount = f"{total / rate:,.2f} {display.get('code')}"
+        self.subtotal_lbl.setText(f"{t('Jami', language)}: {amount}")
 
     def _complete_sale(self):
         if not self.cart:
             QMessageBox.warning(self, t("Xatolik", self._language()), t("Savat bo'sh!", self._language()))
             return
 
+        payment_text = self._selected_payment_method()
+        if not payment_text:
+            QMessageBox.warning(
+                self,
+                t("Xatolik", self._language()),
+                t("To'lov turini tanlang!", self._language()),
+            )
+            self.payment_combo.setFocus()
+            return
+
+        cashier_id = self._selected_cashier_id()
+        if not cashier_id:
+            QMessageBox.warning(
+                self,
+                t("Xatolik", self._language()),
+                t("Kassirni tanlang!", self._language()),
+            )
+            self.cashier_combo.setFocus()
+            return
+        cashier_name = self.cashier_combo.currentText()
+
         subtotal = sum(i["subtotal"] for i in self.cart)
         discount = min(self._discount_value_uzs(), subtotal)
         total = max(0, subtotal - discount)
         currency = self._selected_currency()
         rate = currency["rate_to_uzs"] or 1
-        payment = self.payment_combo.currentText().lower()
+        payment = payment_text.lower()
 
         customer_id, customer_name, customer_phone = None, None, None
         customer_dlg = SaleCustomerDialog(self)
@@ -914,7 +968,7 @@ class SalesWidget(QWidget):
         try:
             sale_id = db.create_sale(
                 customer_id=customer_id,
-                cashier_id=self._selected_cashier_id(),
+                cashier_id=cashier_id,
                 items=self.cart,
                 total=subtotal,
                 discount=discount,
@@ -940,8 +994,8 @@ class SalesWidget(QWidget):
             f"{t('Jami', language)}: {subtotal:,.0f} {money_unit}\n"
             f"{t('Chegirma:', language)} {discount:,.0f} {money_unit}\n"
             f"{pay_label} {total:,.0f} {money_unit}\n"
-            f"{payment_label} {self.payment_combo.currentText()}\n"
-            f"{t('Valyuta:', language)} {effective_paid_original:,.2f} {currency['code']}"
+            f"{payment_label} {payment_text}\n"
+            f"{t('Kassir:', language)} {cashier_name}"
         )
         QMessageBox.information(self, t("Sotuv yakunlandi", language), msg)
         self._clear_cart()
@@ -951,6 +1005,7 @@ class SalesWidget(QWidget):
         self.cart.clear()
         self.cart_table.setRowCount(0)
         self.discount_edit.clear()
+        self._reset_payment_and_cashier()
         self._update_totals()
 
     def _input_style(self):

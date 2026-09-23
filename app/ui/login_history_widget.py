@@ -3,6 +3,7 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox
 )
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor
 import database as db
 from ui.async_loader import AsyncDataLoader, make_progress_bar
 from ui.i18n import set_language, t
@@ -40,15 +41,21 @@ class LoginHistoryWidget(QWidget):
         layout.addLayout(toolbar)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(4)
-        self.table.setHorizontalHeaderLabels(["Vaqt", "Email", "Role", "User ID"])
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
-        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        self.table.setColumnCount(6)
+        self.table.setHorizontalHeaderLabels(
+            ["Vaqt", "Email", "Role", "Hodisa", "Holat", "Izoh"]
+        )
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
         self.table.setColumnWidth(0, 180)
-        self.table.setColumnWidth(2, 120)
-        self.table.setColumnWidth(3, 80)
+        self.table.setColumnWidth(2, 100)
+        self.table.setColumnWidth(3, 150)
+        self.table.setColumnWidth(4, 110)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setAlternatingRowColors(True)
@@ -66,16 +73,33 @@ class LoginHistoryWidget(QWidget):
             return
         self._apply_loaded_data(db.get_login_logs())
 
+    EVENT_LABELS = {
+        "login": "Tizimga kirish",
+        "failed": "Kirish urinishi",
+        "logout": "Tizimdan chiqish",
+        "main_mode": "Asosiy oyna",
+        "cashier_mode": "Kassir oynasi",
+        "session_restored": "Sessiya tiklandi",
+    }
+
     def _apply_loaded_data(self, logs):
         self.table.setRowCount(0)
         for row, log in enumerate(logs):
             self.table.insertRow(row)
+            failed = (log.get("status") or "success") != "success"
             self.table.setItem(row, 0, QTableWidgetItem(log["logged_at"] or ""))
             self.table.setItem(row, 1, QTableWidgetItem(log["username"] or ""))
             self.table.setItem(row, 2, QTableWidgetItem("Admin" if log["role"] == "admin" else "Kassir"))
-            user_id_item = QTableWidgetItem(str(log["user_id"] or "")[:8])
-            user_id_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table.setItem(row, 3, user_id_item)
+
+            event = log.get("event") or "login"
+            self.table.setItem(row, 3, QTableWidgetItem(self.EVENT_LABELS.get(event, event)))
+
+            status_item = QTableWidgetItem("Xato" if failed else "Muvaffaqiyatli")
+            status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            status_item.setForeground(QColor("#dc2626" if failed else "#16a34a"))
+            self.table.setItem(row, 4, status_item)
+
+            self.table.setItem(row, 5, QTableWidgetItem(log.get("detail") or ""))
         set_language(self, self.property("app_language") or "uz")
 
     def _clear_history(self):

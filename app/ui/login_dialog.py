@@ -1,6 +1,8 @@
 import math
+import sys
 import time
 import traceback
+from pathlib import Path
 
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel,
@@ -8,9 +10,22 @@ from PyQt6.QtWidgets import (
 )
 
 from PyQt6.QtCore import QObject, QThread, QTimer, Qt, pyqtSignal, pyqtSlot
+from PyQt6.QtGui import QIcon
 import api_client
 import database as db
 import sync_service
+
+
+def _resource_path(relative_path):
+    base_path = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
+    return str(base_path / relative_path)
+
+
+# The login screen is shown before any account is known, so it always uses the
+# neutral product icon rather than whichever account logged in last.
+APP_ICON_PATH = _resource_path(
+    "images/desktop.png" if sys.platform == "darwin" else "images/desktop_icon.ico"
+)
 
 
 class _AuthWorker(QObject):
@@ -322,6 +337,7 @@ class LoginDialog(QDialog):
         self.signup_timer.setInterval(1000)
         self.signup_timer.timeout.connect(self._tick_signup_countdown)
         self.setWindowTitle("Market Store POS - Kirish")
+        self.setWindowIcon(QIcon(APP_ICON_PATH))
         self.setMinimumSize(420, 500)
         self.resize(420, 520)
         self.setWindowFlags(
@@ -686,6 +702,10 @@ class LoginDialog(QDialog):
         self._start_login(email, password)
 
     def _start_login(self, email, password):
+        # Remembered so a rejected attempt can still be written to the history
+        # under the e-mail that was typed.
+        self._attempted_email = email
+
         def operation():
             online_session = api_client.login(email, password)
             return self._establish_session(
@@ -729,10 +749,28 @@ class LoginDialog(QDialog):
         self._show_error(self._error_text(exc))
         self.verification_code_edit.setFocus()
 
+    def _log_failed_attempt(self, exc):
+        """Write a rejected attempt to the login history.
+
+        Best-effort: the history must never be the reason a user cannot see
+        why their login failed, and with no account activated yet there may be
+        no database to write to at all.
+        """
+        try:
+            db.log_login(
+                {"email": getattr(self, "_attempted_email", None)},
+                event="failed",
+                status="failed",
+                detail=self._error_text(exc),
+            )
+        except Exception:
+            traceback.print_exc()
+
     def _on_login_failure(self, exc):
         # Signing in is always the server's decision - there is no local copy of
         # the password to fall back on, so an unreachable server means no entry.
         self._set_busy(False)
+        self._log_failed_attempt(exc)
         if isinstance(exc, api_client.ApiOfflineError):
             self._show_error(
                 "Serverga ulanib bo'lmadi. Kirish uchun internet kerak - "

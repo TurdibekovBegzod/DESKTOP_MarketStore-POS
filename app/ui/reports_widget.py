@@ -2008,15 +2008,15 @@ class SalesDetailsWidget(QWidget):
         layout.addLayout(summary)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(9)
+        self.table.setColumnCount(10)
         self.table.setHorizontalHeaderLabels([
-            "Sana", "Mahsulot", "Shtrix-kod", "Miqdor",
+            "Sotilgan", "Yakunlangan", "Mahsulot", "Shtrix-kod", "Miqdor",
             "Narx", "Jami", "Kassirga ajratildi", "Kassir", "Holati",
         ])
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         for column, width in [
-            (0, 105), (2, 130), (3, 72), (4, 125),
-            (5, 135), (6, 150), (7, 150), (8, 82),
+            (0, 105), (1, 105), (3, 130), (4, 72), (5, 125),
+            (6, 135), (7, 150), (8, 150), (9, 82),
         ]:
             self.table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
             self.table.setColumnWidth(column, width)
@@ -2219,6 +2219,7 @@ class SalesDetailsWidget(QWidget):
                 "",
                 "",
                 "",
+                "",
                 f"{total_quantity:g}",
                 "",
                 self._format_money(total_value),
@@ -2236,11 +2237,11 @@ class SalesDetailsWidget(QWidget):
                 font = item.font()
                 font.setBold(True)
                 item.setFont(font)
-                if column in (3, 4, 5, 6):
+                if column in (4, 5, 6, 7):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                elif column in (0, 2, 7, 8):
+                elif column in (0, 1, 3, 8, 9):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                if column == 6 and deduction_uzs > 0:
+                if column == 7 and deduction_uzs > 0:
                     item.setForeground(QColor("#991b1b"))
                     item.setToolTip(
                         f"{t('Jami ajratildi', language)}: {self._format_money(total_cashier_reward)}\n"
@@ -2279,8 +2280,16 @@ class SalesDetailsWidget(QWidget):
                 status_hex, status_text = "#bbf7d0", "#166534"
 
             status_value = self._status_icon(status_key)
+            # Rows group several sales of one product together, and the group
+            # only counts as finalized once every one of them is. While any is
+            # still pending there is no single finish time to show.
+            finalized_text = (
+                self._compact_details_time(data.get("finalized_at")) or "-"
+                if data.get("is_finalized") else "-"
+            )
             values = [
                 self._compact_details_time(data.get("created_at")),
+                finalized_text,
                 str(data.get("product_name") or "-"),
                 str(data.get("barcode") or "-"),
                 f"{net_quantity:g}",
@@ -2294,11 +2303,11 @@ class SalesDetailsWidget(QWidget):
                 item = QTableWidgetItem(value)
                 item.setBackground(QColor(row_hex))
                 item.setForeground(QColor("#1e293b"))
-                if column in (3, 4, 5, 6):
+                if column in (4, 5, 6, 7):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                elif column in (0, 2, 7, 8):
+                elif column in (0, 1, 3, 8, 9):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                if column == 8:
+                if column == 9:
                     item.setBackground(QColor(status_hex))
                     item.setForeground(QColor(status_text))
                     item.setToolTip(t(status_key, language))
@@ -2334,6 +2343,7 @@ class SalesDetailsWidget(QWidget):
         status_key = "Harajat"
         values = [
             self._compact_details_time(data.get("created_at")),
+            "-",                       # an expense is never "finalized"
             str(data.get("product_name") or "-"),
             "-",
             "-",
@@ -2355,21 +2365,21 @@ class SalesDetailsWidget(QWidget):
             item.setBackground(QColor(self.EXPENSE_ROW_HEX))
             item.setForeground(QColor("#1e293b"))
             item.setToolTip(tooltip)
-            if column in (3, 4, 5, 6):
+            if column in (4, 5, 6, 7):
                 item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            elif column in (0, 2, 7, 8):
+            elif column in (0, 1, 3, 8, 9):
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            if column == 6:
+            if column == 7:
                 item.setForeground(QColor(self.EXPENSE_AMOUNT_TEXT))
                 font = item.font()
                 font.setBold(True)
                 item.setFont(font)
-            if column == 1:
+            if column == 2:
                 item.setForeground(QColor(self.EXPENSE_TEXT))
                 font = item.font()
                 font.setBold(True)
                 item.setFont(font)
-            if column == 8:
+            if column == 9:
                 item.setBackground(QColor(self.EXPENSE_STATUS_HEX))
                 item.setForeground(QColor(self.EXPENSE_STATUS_TEXT))
                 item.setToolTip(t(status_key, language))
@@ -2401,8 +2411,14 @@ class SalesDetailsWidget(QWidget):
                 "payment_methods": set(),
                 "is_finalized": int(is_fin),
                 "created_at": data.get("created_at") or "",
+                "finalized_at": data.get("finalized_at") or "",
             })
             item["is_finalized"] = int(bool(item["is_finalized"]) and is_fin)
+            # The group is only finalized once its last item is, so the latest
+            # confirmation time is the one that describes the whole row.
+            finalized_at = data.get("finalized_at") or ""
+            if finalized_at > (item.get("finalized_at") or ""):
+                item["finalized_at"] = finalized_at
             item["sold_quantity"] += data.get("sold_quantity", 0) or 0
             item["net_quantity"] += data.get("net_quantity", 0) or 0
             item["item_total_after_discount"] += data.get("item_total_after_discount", 0) or 0

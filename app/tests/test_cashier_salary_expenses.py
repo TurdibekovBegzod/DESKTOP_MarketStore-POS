@@ -236,9 +236,9 @@ class SalesDetailsExpenseRowTest(unittest.TestCase):
     def test_an_expense_gets_its_own_row_in_the_details_table(self):
         widget = self._widget()
         texts = [
-            widget.table.item(row, 1).text()
+            widget.table.item(row, 2).text()
             for row in range(widget.table.rowCount())
-            if widget.table.item(row, 1)
+            if widget.table.item(row, 2)
         ]
         self.assertTrue(any("avans" in text for text in texts), texts)
 
@@ -249,16 +249,16 @@ class SalesDetailsExpenseRowTest(unittest.TestCase):
         widget = self._widget()
         expense_row = next(
             row for row in range(widget.table.rowCount())
-            if widget.table.item(row, 1) and "avans" in widget.table.item(row, 1).text()
+            if widget.table.item(row, 2) and "avans" in widget.table.item(row, 2).text()
         )
-        allocation = widget.table.item(expense_row, 6)
+        allocation = widget.table.item(expense_row, 7)
         self.assertTrue(allocation.text().startswith("-"))
         self.assertEqual(
             widget.table.item(expense_row, 0).background().color(),
             QColor(SalesDetailsWidget.EXPENSE_ROW_HEX),
         )
         self.assertEqual(
-            widget.table.item(expense_row, 8).background().color(),
+            widget.table.item(expense_row, 9).background().color(),
             QColor(SalesDetailsWidget.EXPENSE_STATUS_HEX),
         )
 
@@ -273,7 +273,7 @@ class SalesDetailsExpenseRowTest(unittest.TestCase):
         self.assertEqual(widget.summary_cards["products"].text(), "1")
         # 125 000 earned - 40 000 already taken.
         self.assertIn("85,000", widget.summary_cards["salary"].text())
-        self.assertIn("85,000", widget.table.item(0, 6).text())
+        self.assertIn("85,000", widget.table.item(0, 7).text())
 
 
 class ProfitIsolationTest(unittest.TestCase):

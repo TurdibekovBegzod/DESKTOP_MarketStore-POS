@@ -65,6 +65,25 @@ def main():
     if recent_user:
         recent_user["role"] = "cashier"
         db.touch_user_activity(recent_user["id"])
+        # Entering without the login screen is still an entry into the system,
+        # so it belongs in the login history like any other. A failure here is
+        # reported rather than swallowed: a silently missing entry is exactly
+        # the gap that made the history look empty before.
+        try:
+            db.log_login(dict(recent_user), event="session_restored")
+        except Exception as exc:
+            traceback.print_exc()
+            try:
+                db.log_activity(
+                    "user_login",
+                    "Kirish tarixiga yozib bo'lmadi",
+                    f"Saqlangan sessiya bilan kirish yozilmadi: {exc}",
+                    level="warning",
+                    target="login_history",
+                    badge="Xato",
+                )
+            except Exception:
+                traceback.print_exc()
         window = MainWindow(dict(recent_user))
         window.showMaximized()
         sys.exit(app.exec())
