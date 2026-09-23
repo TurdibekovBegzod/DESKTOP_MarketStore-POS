@@ -33,14 +33,39 @@ MAX_RESULTS = 8
 VISIBLE_FIELDS = ("name", "price", "currency", "stock", "unit", "category")
 
 
+GET_PRODUCT_SPECS_DECLARATION = {
+    "name": "get_product_specs",
+    "description": (
+        "Bitta mahsulotning texnik xarakteristikalarini qaytaradi (masalan "
+        "protsessor, xotira, ekran, videokarta) - qaysi maydonlar borligi "
+        "mahsulot turiga qarab farq qiladi. Mijoz aniq bir model haqida "
+        "'xarakteristikasi qanday', 'xotirasi qancha' kabi savol berganda, "
+        "avval search_products bilan topilgan nomni shu yerga ber."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Mahsulotning aniq nomi, search_products natijasidagi 'name' bilan bir xil.",
+            },
+        },
+        "required": ["name"],
+    },
+}
+
+
 SEARCH_PRODUCTS_DECLARATION = {
     "name": "search_products",
     "description": (
         "Do'kon omboridagi mahsulotlarni qidiradi. Nom, kategoriya va narx "
         "oralig'i bo'yicha filtrlash mumkin - bir nechtasini birga ishlatsa "
-        "ham bo'ladi. Narx, qoldiq va kategoriyani qaytaradi. Mijoz mahsulot, "
-        "narx yoki mavjudlik haqida so'raganda ishlat. Mijoz dollar yoki yevroda "
-        "gapirsa, currency ni 'USD' yoki 'EUR' qilib ber - kurs o'zi hisoblanadi."
+        "ham bo'ladi. Narx, qoldiq, kategoriya va (mavjud bo'lsa) 'specs' "
+        "maydonida texnik xarakteristikalarni (masalan CPU, RAM) qaytaradi - "
+        "ular bor mahsulotlar uchun bularni ham darhol ayt, alohida so'ralishini "
+        "kutma. Mijoz mahsulot, narx yoki mavjudlik haqida so'raganda ishlat. "
+        "Mijoz dollar yoki yevroda gapirsa, currency ni 'USD' yoki 'EUR' qilib "
+        "ber - kurs o'zi hisoblanadi."
     ),
     "parameters": {
         "type": "object",
@@ -102,14 +127,16 @@ def _rate_to_uzs(session, email: str, code: str) -> float | None:
     return rate if rate > 0 else None
 
 
-def _describe(row: dict, categories: dict) -> dict:
+def _describe(row: dict, categories: dict, specs: dict) -> dict:
     """The few fields a customer actually asked about.
 
     ``price`` is the selling price. ``cost`` is what the shop paid and never
-    leaves this function.
+    leaves this function. ``specs`` (RAM, CPU, ...) is included only when the
+    product's template actually has attribute values - most products have
+    none, and an empty dict costs the model nothing to skip over.
     """
     category_id = row.get("category_id")
-    return {
+    described = {
         "name": row.get("name"),
         "price": row.get("price"),
         "currency": row.get("price_currency") or "UZS",
@@ -117,6 +144,48 @@ def _describe(row: dict, categories: dict) -> dict:
         "unit": row.get("unit") or "dona",
         "category": categories.get(category_id),
     }
+    product_specs = specs.get(row.get("id")) or {}
+    if product_specs:
+        described["specs"] = product_specs
+    return described
+
+
+def _load_specs(session, email: str, product_ids: list[str]) -> dict:
+    """product_id -> {field name: value}, for every id that has any.
+
+    One join instead of one query per row: a list of results can be up to
+    MAX_RESULTS products, and asking the database once scales the same
+    whether that list holds one row or eight.
+    """
+    if not product_ids:
+        return {}
+
+    rows = session.execute(
+        text(
+            """
+            SELECT a.data ->> 'product_id', f.data ->> 'name', a.data ->> 'value'
+            FROM user_records AS a
+            JOIN users AS u ON u.id = a.user_id
+            JOIN user_records AS f
+              ON f.user_id = a.user_id
+             AND f.table_name = 'product_template_fields'
+             AND f.deleted_at IS NULL
+             AND f.data ->> 'id' = a.data ->> 'field_id'
+            WHERE u.email = :email
+              AND a.table_name = 'product_attributes'
+              AND a.deleted_at IS NULL
+              AND a.data ->> 'product_id' = ANY(:product_ids)
+            """
+        ),
+        {"email": email, "product_ids": product_ids},
+    ).all()
+
+    specs: dict = {}
+    for product_id, field_name, value in rows:
+        if not product_id or not field_name or not value:
+            continue
+        specs.setdefault(product_id, {})[field_name] = value
+    return specs
 
 
 def _load_categories(session, email: str) -> dict:
@@ -227,15 +296,106 @@ def search_products(
                 f"WHERE {' AND '.join(clauses)} {order} LIMIT :limit"
             )
             rows = session.execute(statement, params).scalars().all()
+            product_ids = [row.get("id") for row in rows if isinstance(row, dict) and row.get("id")]
+            specs = _load_specs(session, email, product_ids)
     except Exception:
         logger.exception("product search failed: name=%r category=%r", name, category)
         return {"error": "lookup failed", "products": [], "count": 0}
 
-    products = [_describe(row, categories) for row in rows if isinstance(row, dict)]
+    products = [_describe(row, categories, specs) for row in rows if isinstance(row, dict)]
     return {"products": products, "count": len(products)}
 
 
-# Name -> handler, as ai.gemini.generate expects it.
-TOOLS = {"search_products": search_products}
+def get_product_specs(name: str = "") -> dict:
+    """Technical fields for one product, looked up by its closest name match.
 
-DECLARATIONS = [SEARCH_PRODUCTS_DECLARATION]
+    Fields live apart from the product row: a template (e.g. "Noutbuk") lists
+    which fields exist, and product_attributes holds each product's value for
+    one of those fields. A template with no fields, or a product with no
+    attribute rows, is not an error - most products simply have none.
+    """
+    email = (get_settings().shop_account_email or "").strip()
+    if not email:
+        return {"error": "shop account is not configured"}
+
+    name = (name or "").strip()
+    if not name:
+        return {"error": "mahsulot nomi kerak", "specs": {}}
+
+    try:
+        with SessionLocal() as session:
+            row = session.execute(
+                text(
+                    """
+                    SELECT r.data
+                    FROM user_records AS r
+                    JOIN users AS u ON u.id = r.user_id
+                    WHERE u.email = :email
+                      AND r.table_name = 'products'
+                      AND r.deleted_at IS NULL
+                      AND COALESCE((r.data ->> 'is_deleted')::int, 0) = 0
+                      AND (r.data ->> 'name') % :name
+                    ORDER BY similarity(COALESCE(r.data ->> 'name', ''), :name) DESC
+                    LIMIT 1
+                    """
+                ),
+                {"email": email, "name": name},
+            ).scalar()
+
+            if not isinstance(row, dict):
+                return {"specs": {}, "found": False}
+
+            product_id = row.get("id")
+            template_id = row.get("template_id")
+            if not product_id or not template_id:
+                return {"name": row.get("name"), "specs": {}, "found": True}
+
+            fields = session.execute(
+                text(
+                    """
+                    SELECT r.data ->> 'id', r.data ->> 'name'
+                    FROM user_records AS r
+                    JOIN users AS u ON u.id = r.user_id
+                    WHERE u.email = :email
+                      AND r.table_name = 'product_template_fields'
+                      AND r.deleted_at IS NULL
+                      AND r.data ->> 'template_id' = :template_id
+                    """
+                ),
+                {"email": email, "template_id": template_id},
+            ).all()
+            field_names = {field_id: field_name for field_id, field_name in fields if field_id}
+
+            if not field_names:
+                return {"name": row.get("name"), "specs": {}, "found": True}
+
+            values = session.execute(
+                text(
+                    """
+                    SELECT r.data ->> 'field_id', r.data ->> 'value'
+                    FROM user_records AS r
+                    JOIN users AS u ON u.id = r.user_id
+                    WHERE u.email = :email
+                      AND r.table_name = 'product_attributes'
+                      AND r.deleted_at IS NULL
+                      AND r.data ->> 'product_id' = :product_id
+                    """
+                ),
+                {"email": email, "product_id": product_id},
+            ).all()
+    except Exception:
+        logger.exception("product specs lookup failed: name=%r", name)
+        return {"error": "lookup failed", "specs": {}}
+
+    specs = {
+        field_names[field_id]: value
+        for field_id, value in values
+        if field_id in field_names and value
+    }
+    return {"name": row.get("name"), "specs": specs, "found": True}
+
+
+# Name -> handler, as ai.gemini.generate expects it.
+TOOLS = {"search_products": search_products, "get_product_specs": get_product_specs}
+
+DECLARATIONS = [SEARCH_PRODUCTS_DECLARATION, GET_PRODUCT_SPECS_DECLARATION]
