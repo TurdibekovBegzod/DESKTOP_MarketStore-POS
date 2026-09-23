@@ -1,29 +1,12 @@
-MarketStore POS v1.6.0
+MarketStore POS v1.6.1
 
-Instagram savdo yordamchisi, sotuv oynasi qayta ishlandi va kirish tarixi
-to'liq yozila boshladi.
+Sotuv vaqtlari to'g'ri ko'rsatiladigan bo'ldi.
 
-- Instagram DM'ga kelgan savollarga dastur o'zi javob beradi. Narx, qoldiq
-  va texnik xarakteristika faqat bazadan olinadi - model hech narsa o'ylab
-  topmaydi. Mijozning oxirgi bir haftalik suhbati eslab qolinadi, shuning
-  uchun "qancha turadi?" degan savol qaysi mahsulot haqida ekani tushuniladi.
-- Har sotuvda kassir va to'lov turi qaytadan so'raladi. Ilgari birinchi
-  tanlov keyingi sotuvlarga ham o'tib ketardi va sotuv boshqa kassir nomiga
-  yozilishi mumkin edi.
-- Sotuv oynasidan valyuta tanlash va "Kurslar" tugmasi olib tashlandi.
-  Jami summa yonidagi ro'yxatdan so'm, dollar yoki yevroda ko'rsatiladi;
-  sotuvning o'zi hamisha so'mda yoziladi.
-- Kurslarni va asosiy valyutani faqat asosiy oyna (admin) o'zgartira oladi.
-  Bitta o'zgarish barcha mahsulot narxini qayta hisoblaydi, kassirlar esa
-  rang va tilni o'zicha tanlayveradi.
-- Chap bo'lim va sotuv oynasining ikki qismi sichqoncha bilan tortiladi.
-  Kenglik har bir kompyuterda alohida eslab qolinadi.
-- Kirish tarixiga endi hamma narsa tushadi: muvaffaqiyatli va xato
-  urinishlar, asosiy oynaga o'tish, kassir oynasiga qaytish, chiqish va
-  parolsiz ochilgan saqlangan sessiya. Yozuvlar serverga yuboriladi,
-  shuning uchun dastur qayta ochilganda yo'qolmaydi.
-- Sotuv tafsilotlarida mahsulot qachon sotilgani va qachon yakunlangani
-  alohida ustunlarda ko'rinadi.
-- Hisob logosi endi faqat o'z oynasida ko'rinadi. Ilgari bir hisobning
-  logosi chiqish qilgandan keyin kirish oynasida va boshqa hisobda ham
-  qolib ketardi.
+- Sotuv tafsilotlarida ba'zi qatorlar "sotilgan 10:45, yakunlangan 07:47"
+  ko'rinishida edi - sotuv o'zi sotilishidan oldin yakunlangandek turardi.
+  Eski yozuvlar dastur ochilganda avtomatik tuzatiladi.
+- Bildirishnomalar vaqti ham to'g'rilandi. Ilgari bir kompyuterda yozilgan
+  xabar boshqasida soatlab noto'g'ri vaqt bilan ko'rinishi mumkin edi.
+- Vaqt endi bazada yagona standartda saqlanadi, ekranda esa har bir
+  kompyuter o'z vaqt zonasi bo'yicha ko'rsatadi. Shu sababli dastur
+  boshqa davlatda ishlatilsa ham vaqtlar to'g'ri chiqadi.

@@ -1,63 +1,36 @@
-release: v1.6.0 Instagram yordamchisi, sotuv oynasi va kirish tarixi
+release: v1.6.1 sotuv vaqtlari to'g'ri ko'rsatilsin
 
-Instagram sahifasiga yozgan mijozga dastur o'zi javob beradi, sotuv oynasi
-har sotuvda kassir va to'lovni qaytadan so'raydi, kirish tarixi esa har bir
-kirishni yozib boradi.
+Sotuv tafsilotlarida yakunlash vaqti sotuv vaqtidan oldin ko'rinardi. Eski
+yozuvlar tuzatiladi, yangi vaqtlar esa har bir kompyuterning o'z vaqt
+zonasi bo'yicha ko'rsatiladi.
 
-Instagram savdo yordamchisi
+Yakunlash vaqti
 
-- DM'ga kelgan savolga narx, qoldiq va texnik xarakteristika bilan javob
-  beriladi. Har bir raqam bazadan olinadi - model o'ylab topgan narx yo'q
-  botdan ham qimmatga tushadi.
-- Mijozning oxirgi bir haftalik suhbati eslab qolinadi. Shuning uchun
-  "qancha turadi?" degan savol qaysi mahsulot haqida ketayotgani
-  tushuniladi. Bir hafta tegilmagan suhbat o'zi o'chadi.
-- Mijoz "o'yin uchun" kabi maqsad aytsa, bot birma-bir aniqlashtirib,
-  xarakteristikaga qarab aniq model tavsiya qiladi.
+- "Sotilgan 10:45, yakunlangan 07:47" kabi qatorlar bor edi - sotuv o'zi
+  sotilishidan oldin yakunlangandek turardi.
+- Sabab: eski build sotuv vaqtini kompyuterning mahalliy soatida, yakunlash
+  vaqtini esa jahon standart vaqtida yozgan. Grinvichdan sharqda bu
+  ikkinchisini birinchisidan orqada qoldiradi.
+- Dastur ochilganda eski yozuvlar avtomatik tuzatiladi. Faqat buzuq
+  qatorlarga tegiladi, to'g'rilari qoldiriladi.
 
-Sotuv oynasi
+Bildirishnomalar
 
-- Kassir va to'lov turi har sotuvda qaytadan so'raladi. Ilgari birinchi
-  tanlov keyingi sotuvlarga ham o'tib ketardi - sotuv boshqa kassir nomiga
-  yozilib qolishi mumkin edi. Tanlanmasa sotuv yakunlanmaydi.
-- Valyuta tanlash va "Kurslar" tugmasi olib tashlandi. Jami summa yonidagi
-  ro'yxatdan so'm, dollar yoki yevroda ko'rsatiladi; sotuv hamisha so'mda
-  yoziladi, ya'ni hisobotlar o'zgarmaydi.
-- To'lov va kassir bir-birining ostida joylashdi.
+- Bildirishnomalar vaqti ham mahalliy soatda yozilardi. U kompyuterlar
+  o'rtasida sinxronlanadi, shuning uchun bir kassada yozilgan xabar
+  boshqasida soatlab noto'g'ri vaqt bilan ko'rinishi va sotuvlarga
+  nisbatan xato tartiblanishi mumkin edi.
 
-Sozlamalar
+Vaqt qanday ishlaydi
 
-- Kurslarni va asosiy valyutani faqat asosiy oyna (admin) o'zgartira oladi.
-  Bitta kurs o'zgarishi barcha mahsulot narxini qayta hisoblaydi, shuning
-  uchun u kassirga ochiq turmasligi kerak edi. Rang va tilni har kim
-  o'zicha tanlayveradi.
+- Bazada hamma vaqt yagona standartda (UTC) saqlanadi, ekranda esa har bir
+  kompyuter o'z vaqt zonasi bo'yicha ko'rsatadi. Bitta yozuv Toshkentda
+  12:45, Tokioda 16:45 bo'lib ko'rinadi.
+- Tuzatishda qo'llaniladigan siljish qattiq yozilmagan - u kompyuterning
+  o'z sozlamasidan o'qiladi, shuning uchun dastur boshqa davlatda
+  ishlatilsa ham to'g'ri ishlaydi.
 
-Oyna bo'limlari
-
-- Chap bo'lim va sotuv oynasining ikki qismi sichqoncha bilan tortiladi.
-  Kenglik har bir kompyuterda alohida eslab qolinadi va dastur qayta
-  ochilganda tiklanadi.
-
-Kirish tarixi
-
-- Endi hamma kirish yoziladi: muvaffaqiyatli va xato urinishlar (xato
-  sababi bilan), asosiy oynaga o'tish va undagi noto'g'ri parol, kassir
-  oynasiga qaytish, chiqish va parolsiz ochilgan saqlangan sessiya.
-- Ilgari yozuvlar serverga yuborilmasdi. Server rejimida mahalliy baza
-  vaqtinchalik kesh bo'lgani uchun tarix dastur qayta ochilganda
-  yo'qolardi - shuning uchun bo'lim deyarli bo'sh ko'rinardi.
-- Jadvalga hodisa turi, holati va xato sababi ustunlari qo'shildi.
-
-Sotuv tafsilotlari
-
-- Mahsulot qachon sotilgani va qachon yakunlangani alohida ustunlarda.
-  Eski sotuvlarda ikkala vaqt bir xil bo'ladi.
-
-Logo
-
-- Hisob logosi faqat o'z oynasida ko'rinadi. Ilgari u butun dastur
-  ikonkasiga yozilardi va chiqish qilgandan keyin kirish oynasida hamda
-  boshqa hisobda ham qolib ketardi. Logosi yo'q hisob endi neytral
-  ikonkani oladi.
+Tekshirildi: haqiqiy bazaning nusxasida 47 ta qator tuzatildi, 150 tasi
+tegilmadi, qator soni o'zgarmadi. Desktop testlari: 245 passed.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
