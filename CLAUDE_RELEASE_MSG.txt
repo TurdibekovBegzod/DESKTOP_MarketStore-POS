@@ -1,22 +1,63 @@
-release: v1.5.0 avtomatik shtrix-kod va oflayn tekshiruv
+release: v1.6.0 Instagram yordamchisi, sotuv oynasi va kirish tarixi
 
-Mahsulotga shtrix-kodni dastur o'zi yaratadi, Tekshiruv bo'limi esa
-internetsiz, faqat shu kompyuterda ishlaydi.
+Instagram sahifasiga yozgan mijozga dastur o'zi javob beradi, sotuv oynasi
+har sotuvda kassir va to'lovni qaytadan so'raydi, kirish tarixi esa har bir
+kirishni yozib boradi.
 
-- Yangi mahsulot oynasida shtrix-kod maydoni avtomatik to'ladi, yonida
-  "Yaratish" tugmasi bor. Kod 6 ta belgi: katta va kichik harf hamda
-  raqam.
-- Kod hech qachon takrorlanmaydi. Tekshiruv shu qurilmaning bazasidan
-  boradi: berilgan kodlar jurnali, mahsulotdagi shtrix-kod va
-  o'chirilgan mahsulotning eski kodi. Internet talab qilinmaydi.
-- Tekshiruv (Checking) bo'limi endi butunlay lokal. Sanoq serverga
-  yuborilmaydi va serverdan olinmaydi, shuning uchun aloqa uzilganda
-  ham skaner ishlayveradi.
-- Tekshiruv har bir kompyuterda alohida: bir kassada boshlangan sanoq
-  boshqasida ko'rinmaydi.
-- Yakunlashda qoldiqni tuzatish hamon internet talab qiladi - u ombor
-  harakatini yozadi.
-- Eski buildlar navbatga qo'ygan tekshiruv yozuvlari tozalanadi.
+Instagram savdo yordamchisi
+
+- DM'ga kelgan savolga narx, qoldiq va texnik xarakteristika bilan javob
+  beriladi. Har bir raqam bazadan olinadi - model o'ylab topgan narx yo'q
+  botdan ham qimmatga tushadi.
+- Mijozning oxirgi bir haftalik suhbati eslab qolinadi. Shuning uchun
+  "qancha turadi?" degan savol qaysi mahsulot haqida ketayotgani
+  tushuniladi. Bir hafta tegilmagan suhbat o'zi o'chadi.
+- Mijoz "o'yin uchun" kabi maqsad aytsa, bot birma-bir aniqlashtirib,
+  xarakteristikaga qarab aniq model tavsiya qiladi.
+
+Sotuv oynasi
+
+- Kassir va to'lov turi har sotuvda qaytadan so'raladi. Ilgari birinchi
+  tanlov keyingi sotuvlarga ham o'tib ketardi - sotuv boshqa kassir nomiga
+  yozilib qolishi mumkin edi. Tanlanmasa sotuv yakunlanmaydi.
+- Valyuta tanlash va "Kurslar" tugmasi olib tashlandi. Jami summa yonidagi
+  ro'yxatdan so'm, dollar yoki yevroda ko'rsatiladi; sotuv hamisha so'mda
+  yoziladi, ya'ni hisobotlar o'zgarmaydi.
+- To'lov va kassir bir-birining ostida joylashdi.
+
+Sozlamalar
+
+- Kurslarni va asosiy valyutani faqat asosiy oyna (admin) o'zgartira oladi.
+  Bitta kurs o'zgarishi barcha mahsulot narxini qayta hisoblaydi, shuning
+  uchun u kassirga ochiq turmasligi kerak edi. Rang va tilni har kim
+  o'zicha tanlayveradi.
+
+Oyna bo'limlari
+
+- Chap bo'lim va sotuv oynasining ikki qismi sichqoncha bilan tortiladi.
+  Kenglik har bir kompyuterda alohida eslab qolinadi va dastur qayta
+  ochilganda tiklanadi.
+
+Kirish tarixi
+
+- Endi hamma kirish yoziladi: muvaffaqiyatli va xato urinishlar (xato
+  sababi bilan), asosiy oynaga o'tish va undagi noto'g'ri parol, kassir
+  oynasiga qaytish, chiqish va parolsiz ochilgan saqlangan sessiya.
+- Ilgari yozuvlar serverga yuborilmasdi. Server rejimida mahalliy baza
+  vaqtinchalik kesh bo'lgani uchun tarix dastur qayta ochilganda
+  yo'qolardi - shuning uchun bo'lim deyarli bo'sh ko'rinardi.
+- Jadvalga hodisa turi, holati va xato sababi ustunlari qo'shildi.
+
+Sotuv tafsilotlari
+
+- Mahsulot qachon sotilgani va qachon yakunlangani alohida ustunlarda.
+  Eski sotuvlarda ikkala vaqt bir xil bo'ladi.
+
+Logo
+
+- Hisob logosi faqat o'z oynasida ko'rinadi. Ilgari u butun dastur
+  ikonkasiga yozilardi va chiqish qilgandan keyin kirish oynasida hamda
+  boshqa hisobda ham qolib ketardi. Logosi yo'q hisob endi neytral
+  ikonkani oladi.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_015VRKTW56yrZiy1J115KA5T

@@ -1,17 +1,29 @@
-MarketStore POS v1.5.0
+MarketStore POS v1.6.0
 
-Avtomatik shtrix-kod va oflayn tekshiruv.
+Instagram savdo yordamchisi, sotuv oynasi qayta ishlandi va kirish tarixi
+to'liq yozila boshladi.
 
-- Yangi mahsulot oynasida shtrix-kod maydoni avtomatik to'ladi, yonida
-  "Yaratish" tugmasi bor. Kod 6 ta belgi: katta va kichik harf hamda
-  raqam.
-- Kod hech qachon takrorlanmaydi. Tekshiruv shu qurilmaning bazasidan
-  boradi: berilgan kodlar jurnali, mahsulotdagi shtrix-kod va
-  o'chirilgan mahsulotning eski kodi.
-- Tekshiruv (Checking) bo'limi butunlay lokal bo'ldi. Sanoq serverga
-  yuborilmaydi va serverdan olinmaydi, shuning uchun internet uzilganda
-  ham skaner ishlayveradi.
-- Tekshiruv har bir kompyuterda alohida: bir kassada boshlangan sanoq
-  boshqasida ko'rinmaydi.
-- Yakunlashda qoldiqni tuzatish hamon internet talab qiladi, chunki u
-  ombor harakatini yozadi.
+- Instagram DM'ga kelgan savollarga dastur o'zi javob beradi. Narx, qoldiq
+  va texnik xarakteristika faqat bazadan olinadi - model hech narsa o'ylab
+  topmaydi. Mijozning oxirgi bir haftalik suhbati eslab qolinadi, shuning
+  uchun "qancha turadi?" degan savol qaysi mahsulot haqida ekani tushuniladi.
+- Har sotuvda kassir va to'lov turi qaytadan so'raladi. Ilgari birinchi
+  tanlov keyingi sotuvlarga ham o'tib ketardi va sotuv boshqa kassir nomiga
+  yozilishi mumkin edi.
+- Sotuv oynasidan valyuta tanlash va "Kurslar" tugmasi olib tashlandi.
+  Jami summa yonidagi ro'yxatdan so'm, dollar yoki yevroda ko'rsatiladi;
+  sotuvning o'zi hamisha so'mda yoziladi.
+- Kurslarni va asosiy valyutani faqat asosiy oyna (admin) o'zgartira oladi.
+  Bitta o'zgarish barcha mahsulot narxini qayta hisoblaydi, kassirlar esa
+  rang va tilni o'zicha tanlayveradi.
+- Chap bo'lim va sotuv oynasining ikki qismi sichqoncha bilan tortiladi.
+  Kenglik har bir kompyuterda alohida eslab qolinadi.
+- Kirish tarixiga endi hamma narsa tushadi: muvaffaqiyatli va xato
+  urinishlar, asosiy oynaga o'tish, kassir oynasiga qaytish, chiqish va
+  parolsiz ochilgan saqlangan sessiya. Yozuvlar serverga yuboriladi,
+  shuning uchun dastur qayta ochilganda yo'qolmaydi.
+- Sotuv tafsilotlarida mahsulot qachon sotilgani va qachon yakunlangani
+  alohida ustunlarda ko'rinadi.
+- Hisob logosi endi faqat o'z oynasida ko'rinadi. Ilgari bir hisobning
+  logosi chiqish qilgandan keyin kirish oynasida va boshqa hisobda ham
+  qolib ketardi.
