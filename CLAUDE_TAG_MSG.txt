@@ -1,12 +1,10 @@
-MarketStore POS v1.6.1
+MarketStore POS v1.6.2
 
-Sotuv vaqtlari to'g'ri ko'rsatiladigan bo'ldi.
+Yangilanishni yuklab olishdagi xatolik tuzatildi.
 
-- Sotuv tafsilotlarida ba'zi qatorlar "sotilgan 10:45, yakunlangan 07:47"
-  ko'rinishida edi - sotuv o'zi sotilishidan oldin yakunlangandek turardi.
-  Eski yozuvlar dastur ochilganda avtomatik tuzatiladi.
-- Bildirishnomalar vaqti ham to'g'rilandi. Ilgari bir kompyuterda yozilgan
-  xabar boshqasida soatlab noto'g'ri vaqt bilan ko'rinishi mumkin edi.
-- Vaqt endi bazada yagona standartda saqlanadi, ekranda esa har bir
-  kompyuter o'z vaqt zonasi bo'yicha ko'rsatadi. Shu sababli dastur
-  boshqa davlatda ishlatilsa ham vaqtlar to'g'ri chiqadi.
+- "Yuklab olishda xatolik: HTTP Error 404" xabari chiqmaydigan bo'ldi.
+  Yangilanish fayli serverdan yuklanmasa, dastur uni to'g'ridan-to'g'ri
+  GitHub havolasidan oladi.
+- Server ham xatoni o'zi hal qiladi: fayl uzatib bo'lmasa, dasturni
+  to'g'ri havolaga yo'naltiradi.
+- Bekor qilingan yuklash endi xato deb hisoblanmaydi.

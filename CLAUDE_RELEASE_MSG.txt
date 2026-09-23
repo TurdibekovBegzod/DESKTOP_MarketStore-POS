@@ -1,36 +1,31 @@
-release: v1.6.1 sotuv vaqtlari to'g'ri ko'rsatilsin
+release: v1.6.2 yangilanishni yuklab olishdagi 404 tuzatildi
 
-Sotuv tafsilotlarida yakunlash vaqti sotuv vaqtidan oldin ko'rinardi. Eski
-yozuvlar tuzatiladi, yangi vaqtlar esa har bir kompyuterning o'z vaqt
-zonasi bo'yicha ko'rsatiladi.
+Dastur yangi versiyani topardi, lekin yuklab olishda "HTTP Error 404"
+berardi - garchi reliz joyida turgan bo'lsa ham.
 
-Yakunlash vaqti
+Nima bo'lgan
 
-- "Sotilgan 10:45, yakunlangan 07:47" kabi qatorlar bor edi - sotuv o'zi
-  sotilishidan oldin yakunlangandek turardi.
-- Sabab: eski build sotuv vaqtini kompyuterning mahalliy soatida, yakunlash
-  vaqtini esa jahon standart vaqtida yozgan. Grinvichdan sharqda bu
-  ikkinchisini birinchisidan orqada qoldiradi.
-- Dastur ochilganda eski yozuvlar avtomatik tuzatiladi. Faqat buzuq
-  qatorlarga tegiladi, to'g'rilari qoldiriladi.
+- Server yangilanish faylini GitHub'ning asset API'si orqali uzatadi. U
+  tokensiz soatiga 60 ta so'rovga cheklangan, barcha mijozlar esa bitta
+  server manzilidan keladi - shuning uchun chegara tez tugaydi.
+- Chegara tugagach GitHub so'rovni rad etadi, server esa buni xatoga
+  aylantirib dasturga qaytaradi.
+- Reliz ommaviy, ya'ni faylning o'zi GitHub havolasidan bemalol
+  yuklanardi. Shunchaki hech kim u yerga murojaat qilmasdi.
 
-Bildirishnomalar
+Nima o'zgardi
 
-- Bildirishnomalar vaqti ham mahalliy soatda yozilardi. U kompyuterlar
-  o'rtasida sinxronlanadi, shuning uchun bir kassada yozilgan xabar
-  boshqasida soatlab noto'g'ri vaqt bilan ko'rinishi va sotuvlarga
-  nisbatan xato tartiblanishi mumkin edi.
+- Dastur endi server javobidagi to'g'ridan-to'g'ri havolani zaxira
+  sifatida ishlatadi. Serverdan yuklab bo'lmasa, fayl GitHub'dan olinadi.
+  Oraliq xato ko'rsatilmaydi - foydalanuvchi faqat ikkala yo'l ham
+  yiqilganda xabar oladi.
+- Server ham o'z tomonidan tuzatildi: fayl uzatib bo'lmasa, dasturni
+  to'g'ri havolaga yo'naltiradi. Havola saqlangan relizdan o'qiladi, ya'ni
+  GitHub bizni rad etayotgan paytda unga yana murojaat qilinmaydi.
+- Bekor qilingan yuklash endi xato deb hisoblanmaydi, chunki u
+  foydalanuvchining o'z qarori.
 
-Vaqt qanday ishlaydi
-
-- Bazada hamma vaqt yagona standartda (UTC) saqlanadi, ekranda esa har bir
-  kompyuter o'z vaqt zonasi bo'yicha ko'rsatadi. Bitta yozuv Toshkentda
-  12:45, Tokioda 16:45 bo'lib ko'rinadi.
-- Tuzatishda qo'llaniladigan siljish qattiq yozilmagan - u kompyuterning
-  o'z sozlamasidan o'qiladi, shuning uchun dastur boshqa davlatda
-  ishlatilsa ham to'g'ri ishlaydi.
-
-Tekshirildi: haqiqiy bazaning nusxasida 47 ta qator tuzatildi, 150 tasi
-tegilmadi, qator soni o'zgarmadi. Desktop testlari: 245 passed.
+Tekshirildi: v1.6.1 relizi to'liq yuklab olindi (30.1 MB), fayl hajmi va
+SHA-256 tekshiruvidan o'tdi. API testlari 189 passed, desktop 245 passed.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
