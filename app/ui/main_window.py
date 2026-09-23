@@ -4,9 +4,9 @@ from PyQt6.QtWidgets import (
     QDialog, QFormLayout, QComboBox, QLineEdit, QApplication,
     QAbstractButton, QTableWidget, QHeaderView, QSpinBox, QDoubleSpinBox,
     QTextEdit, QDateEdit, QTabWidget, QScrollArea, QCalendarWidget,
-    QFileDialog, QMenu, QWidgetAction, QLayout
+    QFileDialog, QMenu, QWidgetAction, QLayout, QSplitter, QSizePolicy
 )
-from PyQt6.QtCore import QByteArray, QBuffer, QIODevice, QPoint, QTimer, Qt, pyqtSignal, pyqtSlot, QEvent, QThread, QObject
+from PyQt6.QtCore import QByteArray, QBuffer, QIODevice, QPoint, QSettings, QTimer, Qt, pyqtSignal, pyqtSlot, QEvent, QThread, QObject
 from PyQt6.QtGui import QAction, QPixmap, QPainter, QIcon, QColor, QImage, QFont, QFontMetrics
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -1615,6 +1615,54 @@ class MainWindow(QMainWindow):
         db.touch_user_activity(self.user.get("id"))
         self._last_activity_saved_at = now
 
+    # How far the sidebar may be dragged, and where it starts.
+    SIDEBAR_MIN_WIDTH = 150
+    SIDEBAR_MAX_WIDTH = 460
+    SIDEBAR_DEFAULT_WIDTH = 220
+    SIDEBAR_WIDTH_KEY = "ui/sidebar_width"
+
+    def _restore_sidebar_width(self):
+        """Width the sidebar was last dragged to on this machine.
+
+        Kept in QSettings rather than the account settings: it depends on the
+        screen in front of the person, so it should not follow them to another
+        device through sync.
+        """
+        try:
+            stored = QSettings().value(self.SIDEBAR_WIDTH_KEY)
+            width = int(stored) if stored is not None else self.SIDEBAR_DEFAULT_WIDTH
+        except (TypeError, ValueError):
+            width = self.SIDEBAR_DEFAULT_WIDTH
+        return max(self.SIDEBAR_MIN_WIDTH, min(self.SIDEBAR_MAX_WIDTH, width))
+
+    def _remember_sidebar_width(self, *_args):
+        if not getattr(self, "main_splitter", None):
+            return
+        width = self.main_splitter.sizes()[0]
+        if width <= 0:
+            return
+        try:
+            QSettings().setValue(self.SIDEBAR_WIDTH_KEY, int(width))
+        except Exception:
+            traceback.print_exc()
+
+    def _apply_sidebar_width(self):
+        """Give the sidebar its stored width, and the rest to the pages."""
+        splitter = getattr(self, "main_splitter", None)
+        if not splitter:
+            return
+        width = self._restore_sidebar_width()
+        remaining = max(1, splitter.width() - width - splitter.handleWidth())
+        splitter.setSizes([width, remaining])
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # A splitter only honours setSizes once it knows its own width, which
+        # is not true while the window is still being built.
+        if not getattr(self, "_sidebar_width_applied", False):
+            self._sidebar_width_applied = True
+            self._apply_sidebar_width()
+
     def _build_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
@@ -1622,8 +1670,16 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
+        # The sidebar and the page area sit in a splitter so the divider
+        # between them can be dragged, the way an editor's side panel works.
+        self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.main_splitter.setObjectName("mainSplitter")
+        self.main_splitter.setChildrenCollapsible(False)
+        self.main_splitter.setHandleWidth(4)
+
         self.sidebar = QFrame()
-        self.sidebar.setFixedWidth(220)
+        self.sidebar.setMinimumWidth(self.SIDEBAR_MIN_WIDTH)
+        self.sidebar.setMaximumWidth(self.SIDEBAR_MAX_WIDTH)
         self.sidebar.setObjectName("sidebar")
         sb_layout = QVBoxLayout(self.sidebar)
         sb_layout.setContentsMargins(0, 0, 0, 0)
@@ -1782,7 +1838,7 @@ class MainWindow(QMainWindow):
         user_lay.addWidget(self.user_menu_btn)
         sb_layout.addWidget(self.user_frame)
 
-        root.addWidget(self.sidebar)
+        self.main_splitter.addWidget(self.sidebar)
 
         self.content_area = QWidget()
         self.content_area.setObjectName("content")
@@ -1820,6 +1876,14 @@ class MainWindow(QMainWindow):
         content_layout.addWidget(self.topbar)
 
         self.stack = QStackedWidget()
+        # A stack asks for as much width as its widest page, even a hidden one,
+        # which would leave the sidebar nothing to be dragged into. The wide
+        # pages are all tables that scroll on their own, so the floor is set
+        # here instead of letting the widest page dictate the whole window.
+        self.stack.setMinimumWidth(520)
+        self.stack.setSizePolicy(
+            QSizePolicy.Policy.Ignored, self.stack.sizePolicy().verticalPolicy()
+        )
         self.pages = {
             "sales": SalesWidget(self.user),
             "checking": CheckingWidget(self.user),
@@ -1846,7 +1910,15 @@ class MainWindow(QMainWindow):
             self.stack.addWidget(widget)
             set_language(widget, self.settings.get("language", "uz"))
         content_layout.addWidget(self.stack)
-        root.addWidget(self.content_area)
+        self.main_splitter.addWidget(self.content_area)
+        # Only the page area grows when the window is resized; the sidebar
+        # keeps whatever width the person dragged it to.
+        self.main_splitter.setStretchFactor(0, 0)
+        self.main_splitter.setStretchFactor(1, 1)
+        # The real width is set in showEvent, once the splitter has one.
+        self.main_splitter.setSizes([self._restore_sidebar_width(), 1000])
+        self.main_splitter.splitterMoved.connect(self._remember_sidebar_width)
+        root.addWidget(self.main_splitter)
 
         self._apply_theme()
         self.toast_manager = ToastManager(self)
@@ -3207,6 +3279,21 @@ class MainWindow(QMainWindow):
                 border-right: 1px solid {theme['border']};
             }}
         """)
+        if getattr(self, "main_splitter", None):
+            # The grip is invisible until pointed at, so the divider reads as a
+            # plain edge until someone means to move it.
+            self.main_splitter.setStyleSheet(f"""
+                QSplitter#mainSplitter::handle:horizontal {{
+                    background: transparent;
+                    width: 4px;
+                }}
+                QSplitter#mainSplitter::handle:horizontal:hover {{
+                    background: {theme['accent']};
+                }}
+                QSplitter#mainSplitter::handle:horizontal:pressed {{
+                    background: {theme['accent']};
+                }}
+            """)
         self.logo_frame.setStyleSheet(f"background:{theme['sidebar_alt']};border-bottom:1px solid {theme['border']};")
         self.logo_icon_lbl.setStyleSheet(
             f"background:{theme['topbar']};border:1px solid {theme['border']};border-radius:8px;"
@@ -3419,6 +3506,20 @@ class MainWindow(QMainWindow):
             page.total_currency_combo.setStyleSheet(self._field_style(theme))
             page.total_currency_combo.setMinimumHeight(40)
             page.total_currency_combo.setMinimumWidth(86)
+        if getattr(page, "panel_splitter", None) is not None:
+            # Same invisible-until-hovered grip as the sidebar divider.
+            page.panel_splitter.setStyleSheet(f"""
+                QSplitter#salesPanelSplitter::handle:horizontal {{
+                    background: transparent;
+                    width: 10px;
+                }}
+                QSplitter#salesPanelSplitter::handle:horizontal:hover {{
+                    background: {theme['accent']};
+                }}
+                QSplitter#salesPanelSplitter::handle:horizontal:pressed {{
+                    background: {theme['accent']};
+                }}
+            """)
         cart_title = page.findChild(QLabel, "salesCartTitle")
         if cart_title:
             cart_title.setStyleSheet(f"""

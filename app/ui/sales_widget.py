@@ -2,12 +2,13 @@ from PyQt6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QLabel, QLineEdit,
     QPushButton, QTableWidget, QTableWidgetItem, QComboBox,
     QFrame, QMessageBox, QHeaderView, QSpinBox, QDoubleSpinBox,
-    QDialog, QFormLayout, QCheckBox
+    QDialog, QFormLayout, QCheckBox, QSplitter
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QRegularExpression, QTimer
+from PyQt6.QtCore import Qt, pyqtSignal, QRegularExpression, QSettings, QTimer
 from PyQt6.QtGui import QFont, QColor, QPixmap, QRegularExpressionValidator
 from pathlib import Path
 import sys
+import traceback
 import database as db
 from ui.async_loader import AsyncDataLoader, make_progress_bar, set_progress_bar_loading
 from ui.i18n import set_language, t
@@ -303,6 +304,11 @@ class ProductInfoDialog(QDialog):
 class SalesWidget(QWidget):
     PAYMENT_METHODS = ["Naqd", "Plastik karta"]
 
+    # How far the divider between the product list and the cart may travel.
+    PRODUCTS_MIN_WIDTH = 320
+    CART_MIN_WIDTH = 380
+    PANEL_SIZES_KEY = "ui/sales_panel_sizes"
+
     def __init__(self, user):
         super().__init__()
         self.user = user
@@ -313,8 +319,63 @@ class SalesWidget(QWidget):
         self._render_products = []
         self._render_index = 0
         self._render_generation = 0
+        self._panel_sizes_applied = False
         self._build_ui()
         self.load_data()
+
+    def _remember_panel_sizes(self, *_args):
+        splitter = getattr(self, "panel_splitter", None)
+        if not splitter:
+            return
+        sizes = splitter.sizes()
+        if len(sizes) != 2 or min(sizes) <= 0:
+            return
+        try:
+            QSettings().setValue(self.PANEL_SIZES_KEY, ",".join(str(int(s)) for s in sizes))
+        except Exception:
+            traceback.print_exc()
+
+    def _stored_panel_sizes(self):
+        """Widths the two halves were last dragged to, or None.
+
+        Kept per machine in QSettings, like the sidebar width: it describes the
+        screen in front of the person, not the account.
+        """
+        try:
+            raw = QSettings().value(self.PANEL_SIZES_KEY)
+            if not raw:
+                return None
+            sizes = [int(part) for part in str(raw).split(",")]
+        except (TypeError, ValueError):
+            return None
+        if len(sizes) != 2 or min(sizes) <= 0:
+            return None
+        return sizes
+
+    def _apply_panel_sizes(self):
+        splitter = getattr(self, "panel_splitter", None)
+        if not splitter:
+            return
+        total = splitter.width() - splitter.handleWidth()
+        if total <= 0:
+            return
+        stored = self._stored_panel_sizes()
+        if stored:
+            # Rescale to this window, which may differ from the one the sizes
+            # were saved on.
+            scale = total / sum(stored)
+            left = int(stored[0] * scale)
+        else:
+            left = int(total * 3 / 5)
+        left = max(self.PRODUCTS_MIN_WIDTH, min(total - self.CART_MIN_WIDTH, left))
+        splitter.setSizes([left, total - left])
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # A splitter only honours setSizes once it knows its own width.
+        if not self._panel_sizes_applied and self.panel_splitter.width() > 1:
+            self._panel_sizes_applied = True
+            self._apply_panel_sizes()
 
     def _build_ui(self):
         root_layout = QVBoxLayout(self)
@@ -331,12 +392,18 @@ class SalesWidget(QWidget):
         self._render_timer = QTimer(self)
         self._render_timer.timeout.connect(self._render_product_chunk)
 
-        layout = QHBoxLayout()
-        layout.setSpacing(16)
-        root_layout.addLayout(layout, 1)
+        # The two halves sit in a splitter so the divider between the product
+        # list and the cart can be dragged, the way the sidebar can be.
+        self.panel_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.panel_splitter.setObjectName("salesPanelSplitter")
+        self.panel_splitter.setChildrenCollapsible(False)
+        self.panel_splitter.setHandleWidth(10)
+        root_layout.addWidget(self.panel_splitter, 1)
 
         # ── Left: Search + Products ───────────────────────
-        left = QVBoxLayout()
+        left_panel = QWidget()
+        left = QVBoxLayout(left_panel)
+        left.setContentsMargins(0, 0, 0, 0)
         search_row = QHBoxLayout()
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Mahsulot nomi yoki shtrix-kod... Skaner Enter yuborsa savatga qo'shiladi")
@@ -360,10 +427,13 @@ class SalesWidget(QWidget):
         self.products_table.setStyleSheet(self._table_style())
         self.products_table.doubleClicked.connect(self._show_product_from_table)
         left.addWidget(self.products_table)
-        layout.addLayout(left, 3)
+        left_panel.setMinimumWidth(self.PRODUCTS_MIN_WIDTH)
+        self.panel_splitter.addWidget(left_panel)
 
         # ── Right: Cart + Payment ─────────────────────────
-        right = QVBoxLayout()
+        right_panel = QWidget()
+        right = QVBoxLayout(right_panel)
+        right.setContentsMargins(0, 0, 0, 0)
         right.setSpacing(10)
 
         cart_title_row = QHBoxLayout()
@@ -503,7 +573,13 @@ class SalesWidget(QWidget):
         clear_btn.clicked.connect(self._clear_cart)
         right.addWidget(clear_btn)
 
-        layout.addLayout(right, 2)
+        right_panel.setMinimumWidth(self.CART_MIN_WIDTH)
+        self.panel_splitter.addWidget(right_panel)
+        # Both halves grow with the window, keeping roughly the 3:2 split the
+        # fixed layout had, until someone drags the divider.
+        self.panel_splitter.setStretchFactor(0, 3)
+        self.panel_splitter.setStretchFactor(1, 2)
+        self.panel_splitter.splitterMoved.connect(self._remember_panel_sizes)
 
     def load_data(self):
         query = self.search_edit.text() if hasattr(self, "search_edit") else ""
