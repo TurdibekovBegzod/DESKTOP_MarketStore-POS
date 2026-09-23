@@ -3,7 +3,7 @@ import os
 import secrets as secrets_module
 from typing import Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
@@ -275,6 +275,54 @@ async def check_app_version(
     }
 
 
+async def _public_asset_url(repo: str, token: str | None, asset_id, platform: str) -> str:
+    """The release CDN link for this asset, or "" when it cannot be found.
+
+    Read from the release we already store, so it costs no GitHub call in the
+    case that matters most: the one where GitHub is refusing us anyway.
+    """
+    from app.database import SessionLocal
+
+    def _stored() -> str:
+        with SessionLocal() as db:
+            row = get_release(db)
+            if row is None:
+                return ""
+            assets = list(row.assets or [])
+            if asset_id is not None:
+                for asset in assets:
+                    if str(asset.get("id")) == str(asset_id):
+                        return str(asset.get("browser_download_url") or "")
+            match = match_asset_for_platform(assets, platform)
+            return str((match or {}).get("browser_download_url") or "")
+
+    try:
+        url = await run_in_threadpool(_stored)
+    except Exception:
+        url = ""
+    if url:
+        return url
+
+    # Nothing stored yet: one GitHub call, which may itself be rate limited.
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "MarketStore-Updater/1.0"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"https://api.github.com/repos/{repo}/releases/latest", headers=headers)
+            if resp.status_code != 200:
+                return ""
+            assets = resp.json().get("assets", [])
+    except httpx.HTTPError:
+        return ""
+    if asset_id is not None:
+        for asset in assets:
+            if str(asset.get("id")) == str(asset_id):
+                return str(asset.get("browser_download_url") or "")
+    match = match_asset_for_platform(assets, platform)
+    return str((match or {}).get("browser_download_url") or "")
+
+
 @router.get("/download")
 async def download_app_release(
     platform: str = Query("windows"),
@@ -315,9 +363,19 @@ async def download_app_release(
         req = client.build_request("GET", asset_url, headers=req_headers)
         res = await client.send(req, stream=True)
         if res.status_code != 200:
+            status_code = res.status_code
             await res.aclose()
             await client.aclose()
-            raise HTTPException(status_code=res.status_code, detail="Faylni yuklab olishda xatolik yuz berdi.")
+            # Without a GITHUB_TOKEN the asset API is limited to 60 calls an
+            # hour per IP, and every client shares this server's address, so
+            # the limit is reached quickly and the download dies on an error
+            # that has nothing to do with the release. A public release is
+            # still downloadable from the CDN, so the client is sent there
+            # rather than told the update failed.
+            public_url = await _public_asset_url(repo, token, asset_id, platform)
+            if public_url:
+                return RedirectResponse(public_url, status_code=status.HTTP_302_FOUND)
+            raise HTTPException(status_code=status_code, detail="Faylni yuklab olishda xatolik yuz berdi.")
 
         async def stream_content():
             try:

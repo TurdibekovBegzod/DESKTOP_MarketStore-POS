@@ -276,10 +276,16 @@ class UpdateDownloaderThread(QThread):
         api_base_url: str = None,
         expected_size: int = 0,
         expected_sha256: str = "",
+        fallback_url: str = "",
         parent=None,
     ):
         super().__init__(parent)
         self.download_url = download_url
+        # Where to go when the first URL fails. The server hands back its own
+        # proxy first, which needs a GitHub token to reach the asset API; with
+        # no token that call runs into GitHub's hourly limit and comes back as
+        # an error. The release itself is public, so its CDN link still works.
+        self.fallback_url = fallback_url or ""
         self.file_name = file_name or "MarketStore_Update"
         self.api_base_url = (api_base_url or get_default_api_base()).rstrip("/")
         self.expected_size = max(0, int(expected_size or 0))
@@ -299,18 +305,47 @@ class UpdateDownloaderThread(QThread):
                 pass
 
     def run(self):
-        url = self.download_url
+        """Download from the server, falling back to the public release link.
+
+        The server's own proxy is tried first so its bandwidth accounting and
+        private releases keep working. When that fails -- most often because
+        the API has no GitHub token and hits the hourly limit -- the public
+        CDN link is tried before the person is told anything went wrong.
+        """
+        fallback = (self.fallback_url or "").strip()
+        if fallback == (self.download_url or "").strip():
+            fallback = ""
+        # With nothing to fall back to, the first try is also the last one,
+        # so its failure is the one the person must be told about.
+        if self._attempt(self.download_url, is_last=not fallback):
+            return
+        if self._is_cancelled or not fallback:
+            return
+        self._attempt(fallback, is_last=True)
+
+    def _attempt(self, raw_url: str, is_last: bool = False) -> bool:
+        """One download try. True when the file landed, False to try the next.
+
+        Errors are only reported to the person on the last attempt; an earlier
+        failure that a fallback recovers from is not something they need to see.
+        """
+        def fail(message):
+            if is_last and not self._is_cancelled:
+                self.download_error.emit(message)
+            return False
+
+        url = raw_url or ""
+        if not url:
+            return fail("Yuklab olish havolasi topilmadi.")
         if url.startswith("/"):
             url = urljoin(f"{self.api_base_url}/", url.lstrip("/"))
 
         parsed_url = urlparse(url)
         if parsed_url.scheme not in ("http", "https"):
-            self.download_error.emit("Yangilanish havolasi xavfsiz emas.")
-            return
+            return fail("Yangilanish havolasi xavfsiz emas.")
         is_local = (parsed_url.hostname or "").lower() in {"127.0.0.1", "localhost", "::1"}
         if parsed_url.scheme != "https" and not is_local:
-            self.download_error.emit("Yangilanish faqat xavfsiz HTTPS orqali yuklanadi.")
-            return
+            return fail("Yangilanish faqat xavfsiz HTTPS orqali yuklanadi.")
 
         # Determine target file extension
         ext = ".exe" if sys.platform.startswith("win") else (".AppImage" if sys.platform.startswith("linux") else ".dmg")
@@ -362,33 +397,33 @@ class UpdateDownloaderThread(QThread):
                         os.remove(target_path)
                 except Exception:
                     pass
-                return
+                # Cancelling is the person's decision, not a failure to retry.
+                return True
 
             actual_size = os.path.getsize(target_path) if os.path.exists(target_path) else 0
             if self.expected_size and actual_size != self.expected_size:
                 os.remove(target_path)
-                self.download_error.emit(
+                return fail(
                     f"Yuklangan fayl hajmi mos emas: {actual_size} / {self.expected_size} bayt."
                 )
-                return
             if self.expected_sha256 and digest.hexdigest() != self.expected_sha256:
                 os.remove(target_path)
-                self.download_error.emit("Yangilanish faylining SHA-256 tekshiruvi mos kelmadi.")
-                return
+                return fail("Yangilanish faylining SHA-256 tekshiruvi mos kelmadi.")
 
             if actual_size > 0:
                 self.progress.emit(downloaded, total_size, speed, 100)
                 self.download_finished.emit(target_path)
-            else:
-                self.download_error.emit("Yuklangan fayl bo'sh.")
+                return True
+            return fail("Yuklangan fayl bo'sh.")
         except Exception as exc:
             try:
                 if os.path.exists(target_path):
                     os.remove(target_path)
             except OSError:
                 pass
-            if not self._is_cancelled:
-                self.download_error.emit(f"Yuklab olishda xatolik: {str(exc)}")
+            if self._is_cancelled:
+                return True
+            return fail(f"Yuklab olishda xatolik: {str(exc)}")
         finally:
             with self._response_lock:
                 self._response = None

@@ -254,6 +254,11 @@ class UpdaterDialog(QDialog):
 
     def _start_download(self):
         download_url = self.update_data.get("download_url")
+        # The server's proxy can fail while the release itself is fine, so the
+        # public link it sends alongside is kept as a second chance.
+        fallback_url = self.update_data.get("direct_download_url") or ""
+        if not download_url:
+            download_url, fallback_url = fallback_url, ""
         if not download_url:
             QMessageBox.warning(self, self._tr("Xatolik"), self._tr("Yuklab olish havolasi topilmadi."))
             return
@@ -271,6 +276,7 @@ class UpdaterDialog(QDialog):
             file_name,
             expected_size=self.update_data.get("file_size", 0),
             expected_sha256=self.update_data.get("sha256", ""),
+            fallback_url=fallback_url,
             parent=QApplication.instance(),
         )
         self.downloader_thread.progress.connect(self._on_download_progress)
