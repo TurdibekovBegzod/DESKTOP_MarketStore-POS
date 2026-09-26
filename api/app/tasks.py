@@ -13,6 +13,7 @@ from app.email_service import (
     send_password_reset_code,
     send_signup_verification_code,
 )
+from app.config import get_settings
 from app.instagram_api import InstagramNotConfiguredError, send_message
 from app.instagram_service import get_account_config_by_id, verify_instagram_connection
 
@@ -110,12 +111,12 @@ def reply_to_instagram_dm_task(
     if config is not None:
         store_ctx = StoreContext(user_id=config.user_id, user_uid=config.user_uid, email=config.email)
         token_to_use = config.access_token
-        gemini_key = config.gemini_api_key
+        gemini_key = config.gemini_api_key or get_settings().gemini_api_key
         conv_id = f"{config.account_id}:{recipient_id}"
     else:
         store_ctx = None
         token_to_use = None
-        gemini_key = None
+        gemini_key = get_settings().gemini_api_key
         conv_id = recipient_id
 
     set_store_context(store_ctx)

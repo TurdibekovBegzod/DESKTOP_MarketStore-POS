@@ -50,7 +50,7 @@ def get_account_config_by_id(account_id: str) -> InstagramAccountConfig | None:
 
     try:
         with SessionLocal() as session:
-            # 1. Locate the user who owns this instagram_account_id
+            # 1. Locate the user who owns this instagram_account_id or matches email
             match_row = session.execute(
                 text(
                     """
@@ -58,8 +58,10 @@ def get_account_config_by_id(account_id: str) -> InstagramAccountConfig | None:
                     FROM user_records AS r
                     JOIN users AS u ON u.id = r.user_id
                     WHERE r.table_name = 'app_settings'
-                      AND r.local_id = 'instagram_account_id'
-                      AND (r.data ->> 'value') = :account_id
+                      AND (
+                        (r.local_id = 'instagram_account_id' AND TRIM(r.data ->> 'value') = :account_id)
+                        OR LOWER(u.email) = LOWER(:account_id)
+                      )
                       AND r.deleted_at IS NULL
                     ORDER BY r.updated_at DESC
                     LIMIT 1
@@ -67,6 +69,26 @@ def get_account_config_by_id(account_id: str) -> InstagramAccountConfig | None:
                 ),
                 {"account_id": account_id},
             ).first()
+
+            # If not matched directly, check if there is a single store that configured an active
+            # Instagram access token. Handles Meta Page ID vs Instagram ID mapping differences.
+            if not match_row:
+                single_store_rows = session.execute(
+                    text(
+                        """
+                        SELECT DISTINCT r.user_id, r.user_uid, u.email
+                        FROM user_records AS r
+                        JOIN users AS u ON u.id = r.user_id
+                        WHERE r.table_name = 'app_settings'
+                          AND r.local_id = 'instagram_access_token'
+                          AND LENGTH(TRIM(r.data ->> 'value')) > 10
+                          AND r.deleted_at IS NULL
+                        """
+                    )
+                ).all()
+                if len(single_store_rows) == 1:
+                    match_row = single_store_rows[0]
+                    logger.info("Account %s resolved to single connected store user %s (%s)", account_id, match_row[0], match_row[2])
 
             if match_row:
                 user_id, user_uid, email = match_row
@@ -92,14 +114,15 @@ def get_account_config_by_id(account_id: str) -> InstagramAccountConfig | None:
                 auto_reply_val = settings_map.get("instagram_auto_reply", "1")
                 auto_reply = auto_reply_val not in ("0", "false", "False", False)
                 access_token = settings_map.get("instagram_access_token", "")
-                app_secret = settings_map.get("instagram_app_secret") or None
+                resolved_account_id = settings_map.get("instagram_account_id") or account_id
+                app_secret = settings_map.get("instagram_app_secret") or get_settings().instagram_app_secret
                 gemini_key = settings_map.get("gemini_api_key") or getattr(get_settings(), "gemini_api_key", None)
 
                 return InstagramAccountConfig(
                     user_id=user_id,
                     user_uid=user_uid,
                     email=email,
-                    account_id=account_id,
+                    account_id=resolved_account_id,
                     access_token=access_token,
                     app_secret=app_secret,
                     auto_reply=auto_reply,
@@ -134,7 +157,8 @@ def verify_instagram_connection(
         return cached[0]
 
     try:
-        if token.startswith("IGAA"):
+        # Instagram tokens start with IG (e.g. IGAA, IGAB, IGQV). Facebook Page tokens start with EAA.
+        if token.startswith("IG"):
             url = f"https://graph.instagram.com/v21.0/me?fields=id,username&access_token={token}"
         else:
             target = account_id if account_id else "me"
@@ -150,6 +174,17 @@ def verify_instagram_connection(
             if "id" in data:
                 _CONNECTION_CACHE[cache_key] = (True, now)
                 return True
+
+        # Alternate endpoint fallback
+        alt_url = (
+            f"https://graph.facebook.com/v21.0/{account_id or 'me'}?fields=id,name,username&access_token={token}"
+            if token.startswith("IG")
+            else f"https://graph.instagram.com/v21.0/me?fields=id,username&access_token={token}"
+        )
+        alt_resp = httpx.get(alt_url, headers={"User-Agent": "MarketStore-POS/1.0"}, timeout=timeout)
+        if alt_resp.status_code == 200 and "id" in alt_resp.json():
+            _CONNECTION_CACHE[cache_key] = (True, now)
+            return True
 
         logger.warning(
             "Instagram connection check returned %s: %s",

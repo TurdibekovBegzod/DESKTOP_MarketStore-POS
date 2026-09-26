@@ -30,8 +30,13 @@ def send_message(
     if not token:
         raise InstagramNotConfiguredError("INSTAGRAM_ACCESS_TOKEN is not set")
 
+    if token.startswith("IG"):
+        url = "https://graph.instagram.com/v21.0/me/messages"
+    else:
+        url = f"{settings.instagram_graph_url}/me/messages"
+
     response = httpx.post(
-        f"{settings.instagram_graph_url}/me/messages",
+        url,
         headers={"Authorization": f"Bearer {token}"},
         json={"recipient": {"id": recipient_id}, "message": {"text": text}},
         timeout=timeout,
