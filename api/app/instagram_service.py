@@ -90,6 +90,24 @@ def get_account_config_by_id(account_id: str) -> InstagramAccountConfig | None:
                     match_row = single_store_rows[0]
                     logger.info("Account %s resolved to single connected store user %s (%s)", account_id, match_row[0], match_row[2])
 
+            if not match_row and get_settings().shop_account_email:
+                shop_email = get_settings().shop_account_email.strip().lower()
+                match_row = session.execute(
+                    text(
+                        """
+                        SELECT r.user_id, r.user_uid, u.email
+                        FROM user_records AS r
+                        JOIN users AS u ON u.id = r.user_id
+                        WHERE r.table_name = 'app_settings'
+                          AND LOWER(u.email) = :email
+                          AND r.deleted_at IS NULL
+                        ORDER BY r.updated_at DESC
+                        LIMIT 1
+                        """
+                    ),
+                    {"email": shop_email},
+                ).first()
+
             if match_row:
                 user_id, user_uid, email = match_row
 
@@ -130,6 +148,38 @@ def get_account_config_by_id(account_id: str) -> InstagramAccountConfig | None:
                 )
     except Exception:
         logger.exception("Failed to query Instagram account settings for account %s", account_id)
+
+    # 3. Fallback to .env settings if DB record wasn't found but .env has credentials
+    try:
+        env_settings = get_settings()
+        if env_settings.instagram_access_token:
+            with SessionLocal() as session:
+                target_email = (env_settings.shop_account_email or "").strip().lower()
+                user_row = None
+                if target_email:
+                    user_row = session.execute(
+                        text("SELECT id, uid, email FROM users WHERE LOWER(email) = :email LIMIT 1"),
+                        {"email": target_email},
+                    ).first()
+                if not user_row:
+                    user_row = session.execute(
+                        text("SELECT id, uid, email FROM users ORDER BY id ASC LIMIT 1")
+                    ).first()
+
+                if user_row:
+                    u_id, u_uid, u_email = user_row
+                    return InstagramAccountConfig(
+                        user_id=u_id,
+                        user_uid=u_uid,
+                        email=u_email,
+                        account_id=account_id or "default",
+                        access_token=env_settings.instagram_access_token,
+                        app_secret=env_settings.instagram_app_secret,
+                        auto_reply=env_settings.instagram_auto_reply,
+                        gemini_api_key=env_settings.gemini_api_key,
+                    )
+    except Exception:
+        pass
 
     return None
 
