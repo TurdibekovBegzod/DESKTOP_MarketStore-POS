@@ -14,6 +14,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 
 from app.config import get_settings
+from app.instagram_service import get_account_config_by_id
 from app.tasks import reply_to_instagram_dm_task
 
 
@@ -91,10 +92,22 @@ def handle_event(event: dict) -> None:
     if event["sender_id"] == event["account_id"]:
         # The account talking to itself; is_echo already covers most of these.
         return
-    if not get_settings().instagram_auto_reply:
+
+    account_id = str(event.get("account_id") or "").strip()
+    config = get_account_config_by_id(account_id) if account_id else None
+
+    if config is not None:
+        if not config.auto_reply:
+            logger.info("Auto-reply disabled for account %s; dropping event", account_id)
+            return
+        if not config.access_token:
+            logger.warning("No access token for account %s; dropping event", account_id)
+            return
+    elif not get_settings().instagram_auto_reply:
         return
+
     # Queued, not awaited: see reply_to_instagram_dm_task.
-    reply_to_instagram_dm_task.delay(event["sender_id"], event["text"])
+    reply_to_instagram_dm_task.delay(account_id, event["sender_id"], event["text"])
 
 
 @router.get("/webhook")
@@ -118,21 +131,39 @@ def verify_webhook(
 
 @router.post("/webhook")
 async def receive_webhook(request: Request):
-    secret = get_settings().instagram_app_secret
-    if not secret:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Instagram webhook is not configured",
-        )
-
     raw_body = await request.body()
-    if not verify_signature(raw_body, request.headers.get("X-Hub-Signature-256"), secret):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid signature")
-
     try:
         payload = json.loads(raw_body)
     except ValueError:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Malformed payload")
+
+    # Determine secret to verify signature:
+    # 1. Look up account_id in payload entry to see if that account has its own app_secret
+    account_secret: str | None = None
+    entries = payload.get("entry") or []
+    if entries and isinstance(entries, list):
+        first_id = str(entries[0].get("id") or "")
+        if first_id:
+            cfg = get_account_config_by_id(first_id)
+            if cfg and cfg.app_secret:
+                account_secret = cfg.app_secret
+
+    signature_header = request.headers.get("X-Hub-Signature-256")
+    global_secret = get_settings().instagram_app_secret
+
+    verified = False
+    if account_secret and verify_signature(raw_body, signature_header, account_secret):
+        verified = True
+    elif global_secret and verify_signature(raw_body, signature_header, global_secret):
+        verified = True
+
+    if not verified:
+        if not account_secret and not global_secret:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Instagram webhook is not configured",
+            )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid signature")
 
     for event in extract_events(payload):
         try:

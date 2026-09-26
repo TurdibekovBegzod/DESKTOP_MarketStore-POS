@@ -13,6 +13,8 @@ generation lock, and an Instagram DM is untrusted input: a customer must not be
 able to talk the shop's stock into changing.
 """
 
+from contextvars import ContextVar
+from dataclasses import dataclass
 import logging
 
 from sqlalchemy import text
@@ -22,6 +24,37 @@ from app.database import SessionLocal
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class StoreContext:
+    user_id: int | None = None
+    user_uid: str | None = None
+    email: str | None = None
+
+
+_store_context: ContextVar[StoreContext | None] = ContextVar("store_context", default=None)
+
+
+def set_store_context(ctx: StoreContext | None):
+    return _store_context.set(ctx)
+
+
+def get_store_context() -> StoreContext | None:
+    return _store_context.get()
+
+
+def _resolve_target() -> tuple[str, str, dict]:
+    """Return (target_type, target_val, params) where target_type is 'uid' or 'email'."""
+    ctx = get_store_context()
+    if ctx and ctx.user_uid:
+        return "uid", ctx.user_uid, {"user_uid": ctx.user_uid}
+    if ctx and ctx.email:
+        return "email", ctx.email, {"email": ctx.email}
+    email = (get_settings().shop_account_email or "").strip()
+    if email:
+        return "email", email, {"email": email}
+    return "", "", {}
 
 # The reply is three sentences on Instagram; more rows than this only cost
 # tokens and give the model room to pad the answer.
@@ -94,7 +127,7 @@ SEARCH_PRODUCTS_DECLARATION = {
 }
 
 
-def _rate_to_uzs(session, email: str, code: str) -> float | None:
+def _rate_to_uzs(session, target_val: str, code: str, target_type: str = "email") -> float | None:
     """The shop's own rate for a currency, not the central bank's.
 
     The shop priced its stock with this number, so a filter that used any other
@@ -104,9 +137,19 @@ def _rate_to_uzs(session, email: str, code: str) -> float | None:
     if not code or code == "UZS":
         return 1.0
 
-    row = session.execute(
-        text(
-            """
+    if target_type == "uid":
+        query = """
+            SELECT r.data ->> 'rate_to_uzs'
+            FROM user_records AS r
+            WHERE r.user_uid = :user_uid
+              AND r.table_name = 'currencies'
+              AND r.deleted_at IS NULL
+              AND upper(r.data ->> 'code') = :code
+            LIMIT 1
+        """
+        params = {"user_uid": target_val, "code": code}
+    else:
+        query = """
             SELECT r.data ->> 'rate_to_uzs'
             FROM user_records AS r
             JOIN users AS u ON u.id = r.user_id
@@ -115,11 +158,10 @@ def _rate_to_uzs(session, email: str, code: str) -> float | None:
               AND r.deleted_at IS NULL
               AND upper(r.data ->> 'code') = :code
             LIMIT 1
-            """
-        ),
-        {"email": email, "code": code},
-    ).scalar()
+        """
+        params = {"email": target_val, "code": code}
 
+    row = session.execute(text(query), params).scalar()
     try:
         rate = float(row)
     except (TypeError, ValueError):
@@ -150,7 +192,7 @@ def _describe(row: dict, categories: dict, specs: dict) -> dict:
     return described
 
 
-def _load_specs(session, email: str, product_ids: list[str]) -> dict:
+def _load_specs(session, target_val: str, product_ids: list[str], target_type: str = "email") -> dict:
     """product_id -> {field name: value}, for every id that has any.
 
     One join instead of one query per row: a list of results can be up to
@@ -160,12 +202,26 @@ def _load_specs(session, email: str, product_ids: list[str]) -> dict:
     if not product_ids:
         return {}
 
-    rows = session.execute(
-        text(
-            """
+    if target_type == "uid":
+        query = """
             SELECT a.data ->> 'product_id', f.data ->> 'name', a.data ->> 'value'
             FROM user_records AS a
-            JOIN users AS u ON u.id = a.user_id
+            JOIN user_records AS f
+              ON f.user_uid = a.user_uid
+             AND f.table_name = 'product_template_fields'
+             AND f.deleted_at IS NULL
+             AND f.data ->> 'id' = a.data ->> 'field_id'
+            WHERE a.user_uid = :user_uid
+              AND a.table_name = 'product_attributes'
+              AND a.deleted_at IS NULL
+              AND a.data ->> 'product_id' = ANY(:product_ids)
+        """
+        params = {"user_uid": target_val, "product_ids": product_ids}
+    else:
+        query = """
+            SELECT a.data ->> 'product_id', f.data ->> 'name', a.data ->> 'value'
+            FROM user_records AS a
+            JOIN users AS u ON u.id = r.user_id
             JOIN user_records AS f
               ON f.user_id = a.user_id
              AND f.table_name = 'product_template_fields'
@@ -175,11 +231,10 @@ def _load_specs(session, email: str, product_ids: list[str]) -> dict:
               AND a.table_name = 'product_attributes'
               AND a.deleted_at IS NULL
               AND a.data ->> 'product_id' = ANY(:product_ids)
-            """
-        ),
-        {"email": email, "product_ids": product_ids},
-    ).all()
+        """
+        params = {"email": target_val, "product_ids": product_ids}
 
+    rows = session.execute(text(query), params).all()
     specs: dict = {}
     for product_id, field_name, value in rows:
         if not product_id or not field_name or not value:
@@ -188,21 +243,29 @@ def _load_specs(session, email: str, product_ids: list[str]) -> dict:
     return specs
 
 
-def _load_categories(session, email: str) -> dict:
+def _load_categories(session, target_val: str, target_type: str = "email") -> dict:
     """id -> name for this account, so rows can name their category."""
-    rows = session.execute(
-        text(
-            """
+    if target_type == "uid":
+        query = """
+            SELECT r.data ->> 'id', r.data ->> 'name'
+            FROM user_records AS r
+            WHERE r.user_uid = :user_uid
+              AND r.table_name = 'categories'
+              AND r.deleted_at IS NULL
+        """
+        params = {"user_uid": target_val}
+    else:
+        query = """
             SELECT r.data ->> 'id', r.data ->> 'name'
             FROM user_records AS r
             JOIN users AS u ON u.id = r.user_id
             WHERE u.email = :email
               AND r.table_name = 'categories'
               AND r.deleted_at IS NULL
-            """
-        ),
-        {"email": email},
-    ).all()
+        """
+        params = {"email": target_val}
+
+    rows = session.execute(text(query), params).all()
     return {row[0]: row[1] for row in rows if row[0]}
 
 
@@ -221,8 +284,8 @@ def search_products(
     functionResponse, and "nothing found" is an answer the model can relay,
     where an exception would cost the customer their reply entirely.
     """
-    email = (get_settings().shop_account_email or "").strip()
-    if not email:
+    target_type, target_val, scope_params = _resolve_target()
+    if not target_type:
         return {"error": "shop account is not configured"}
 
     name = (name or "").strip()
@@ -234,13 +297,25 @@ def search_products(
 
     # Built up rather than one fixed string, but only from this function's own
     # fragments - the model's values reach the database solely as parameters.
-    clauses = [
-        "u.email = :email",
-        "r.table_name = 'products'",
-        "r.deleted_at IS NULL",
-        "COALESCE((r.data ->> 'is_deleted')::int, 0) = 0",
-    ]
-    params: dict = {"email": email, "limit": MAX_RESULTS}
+    if target_type == "uid":
+        clauses = [
+            "r.user_uid = :user_uid",
+            "r.table_name = 'products'",
+            "r.deleted_at IS NULL",
+            "COALESCE((r.data ->> 'is_deleted')::int, 0) = 0",
+        ]
+        from_sql = "FROM user_records AS r"
+    else:
+        clauses = [
+            "u.email = :email",
+            "r.table_name = 'products'",
+            "r.deleted_at IS NULL",
+            "COALESCE((r.data ->> 'is_deleted')::int, 0) = 0",
+        ]
+        from_sql = "FROM user_records AS r JOIN users AS u ON u.id = r.user_id"
+
+    params: dict = dict(scope_params)
+    params["limit"] = MAX_RESULTS
 
     if barcode:
         clauses.append("r.data ->> 'barcode' = :barcode")
@@ -257,7 +332,7 @@ def search_products(
 
     try:
         with SessionLocal() as session:
-            rate = _rate_to_uzs(session, email, currency)
+            rate = _rate_to_uzs(session, target_val, currency, target_type)
             if rate is None:
                 return {
                     "error": f"{currency} kursi bazada yo'q",
@@ -272,7 +347,7 @@ def search_products(
                 clauses.append("COALESCE((r.data ->> 'price')::numeric, 0) <= :price_max")
                 params["price_max"] = float(price_max) * rate
 
-            categories = _load_categories(session, email)
+            categories = _load_categories(session, target_val, target_type)
 
             if category:
                 wanted = [
@@ -291,13 +366,12 @@ def search_products(
                 else "ORDER BY COALESCE((r.data ->> 'price')::numeric, 0) ASC"
             )
             statement = text(
-                f"SELECT r.data FROM user_records AS r "
-                f"JOIN users AS u ON u.id = r.user_id "
+                f"SELECT r.data {from_sql} "
                 f"WHERE {' AND '.join(clauses)} {order} LIMIT :limit"
             )
             rows = session.execute(statement, params).scalars().all()
             product_ids = [row.get("id") for row in rows if isinstance(row, dict) and row.get("id")]
-            specs = _load_specs(session, email, product_ids)
+            specs = _load_specs(session, target_val, product_ids, target_type)
     except Exception:
         logger.exception("product search failed: name=%r category=%r", name, category)
         return {"error": "lookup failed", "products": [], "count": 0}
@@ -314,8 +388,8 @@ def get_product_specs(name: str = "") -> dict:
     one of those fields. A template with no fields, or a product with no
     attribute rows, is not an error - most products simply have none.
     """
-    email = (get_settings().shop_account_email or "").strip()
-    if not email:
+    target_type, target_val, scope_params = _resolve_target()
+    if not target_type:
         return {"error": "shop account is not configured"}
 
     name = (name or "").strip()
@@ -324,9 +398,21 @@ def get_product_specs(name: str = "") -> dict:
 
     try:
         with SessionLocal() as session:
-            row = session.execute(
-                text(
-                    """
+            if target_type == "uid":
+                prod_query = """
+                    SELECT r.data
+                    FROM user_records AS r
+                    WHERE r.user_uid = :user_uid
+                      AND r.table_name = 'products'
+                      AND r.deleted_at IS NULL
+                      AND COALESCE((r.data ->> 'is_deleted')::int, 0) = 0
+                      AND (r.data ->> 'name') % :name
+                    ORDER BY similarity(COALESCE(r.data ->> 'name', ''), :name) DESC
+                    LIMIT 1
+                """
+                prod_params = {"user_uid": target_val, "name": name}
+            else:
+                prod_query = """
                     SELECT r.data
                     FROM user_records AS r
                     JOIN users AS u ON u.id = r.user_id
@@ -337,10 +423,10 @@ def get_product_specs(name: str = "") -> dict:
                       AND (r.data ->> 'name') % :name
                     ORDER BY similarity(COALESCE(r.data ->> 'name', ''), :name) DESC
                     LIMIT 1
-                    """
-                ),
-                {"email": email, "name": name},
-            ).scalar()
+                """
+                prod_params = {"email": target_val, "name": name}
+
+            row = session.execute(text(prod_query), prod_params).scalar()
 
             if not isinstance(row, dict):
                 return {"specs": {}, "found": False}
@@ -350,9 +436,18 @@ def get_product_specs(name: str = "") -> dict:
             if not product_id or not template_id:
                 return {"name": row.get("name"), "specs": {}, "found": True}
 
-            fields = session.execute(
-                text(
-                    """
+            if target_type == "uid":
+                fields_query = """
+                    SELECT r.data ->> 'id', r.data ->> 'name'
+                    FROM user_records AS r
+                    WHERE r.user_uid = :user_uid
+                      AND r.table_name = 'product_template_fields'
+                      AND r.deleted_at IS NULL
+                      AND r.data ->> 'template_id' = :template_id
+                """
+                fields_params = {"user_uid": target_val, "template_id": template_id}
+            else:
+                fields_query = """
                     SELECT r.data ->> 'id', r.data ->> 'name'
                     FROM user_records AS r
                     JOIN users AS u ON u.id = r.user_id
@@ -360,18 +455,27 @@ def get_product_specs(name: str = "") -> dict:
                       AND r.table_name = 'product_template_fields'
                       AND r.deleted_at IS NULL
                       AND r.data ->> 'template_id' = :template_id
-                    """
-                ),
-                {"email": email, "template_id": template_id},
-            ).all()
+                """
+                fields_params = {"email": target_val, "template_id": template_id}
+
+            fields = session.execute(text(fields_query), fields_params).all()
             field_names = {field_id: field_name for field_id, field_name in fields if field_id}
 
             if not field_names:
                 return {"name": row.get("name"), "specs": {}, "found": True}
 
-            values = session.execute(
-                text(
-                    """
+            if target_type == "uid":
+                values_query = """
+                    SELECT r.data ->> 'field_id', r.data ->> 'value'
+                    FROM user_records AS r
+                    WHERE r.user_uid = :user_uid
+                      AND r.table_name = 'product_attributes'
+                      AND r.deleted_at IS NULL
+                      AND r.data ->> 'product_id' = :product_id
+                """
+                values_params = {"user_uid": target_val, "product_id": product_id}
+            else:
+                values_query = """
                     SELECT r.data ->> 'field_id', r.data ->> 'value'
                     FROM user_records AS r
                     JOIN users AS u ON u.id = r.user_id
@@ -379,10 +483,10 @@ def get_product_specs(name: str = "") -> dict:
                       AND r.table_name = 'product_attributes'
                       AND r.deleted_at IS NULL
                       AND r.data ->> 'product_id' = :product_id
-                    """
-                ),
-                {"email": email, "product_id": product_id},
-            ).all()
+                """
+                values_params = {"email": target_val, "product_id": product_id}
+
+            values = session.execute(text(values_query), values_params).all()
     except Exception:
         logger.exception("product specs lookup failed: name=%r", name)
         return {"error": "lookup failed", "specs": {}}

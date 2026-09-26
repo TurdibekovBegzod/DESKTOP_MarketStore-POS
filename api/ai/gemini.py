@@ -84,6 +84,7 @@ def generate(
     tools: dict | None = None,
     declarations: list[dict] | None = None,
     model: str | None = None,
+    api_key: str | None = None,
 ) -> str:
     """The model's answer, after running any tools it asks for along the way.
 
@@ -91,7 +92,8 @@ def generate(
     caller has history to replay.
     """
     settings = get_settings()
-    if not settings.gemini_api_key:
+    effective_key = (api_key or "").strip() or settings.gemini_api_key
+    if not effective_key:
         raise GeminiNotConfiguredError("GEMINI_API_KEY is not set")
 
     if isinstance(prompt, str):
@@ -120,7 +122,7 @@ def generate(
             f"{API_ROOT}/{model or settings.gemini_model}:generateContent",
             # The key travels as a header, never as ?key= - a query string ends up in
             # proxy and access logs.
-            headers={"x-goog-api-key": settings.gemini_api_key},
+            headers={"x-goog-api-key": effective_key},
             json=body,
             timeout=timeout,
         )
@@ -157,7 +159,7 @@ def generate(
     body.pop("tools", None)  # forced: no more tool calls, only an answer
     response = httpx.post(
         f"{API_ROOT}/{model or settings.gemini_model}:generateContent",
-        headers={"x-goog-api-key": settings.gemini_api_key},
+        headers={"x-goog-api-key": effective_key},
         json=body,
         timeout=timeout,
     )

@@ -14,19 +14,25 @@ class InstagramNotConfiguredError(RuntimeError):
     """No access token. Retrying cannot fix it, so the task must not retry."""
 
 
-def send_message(recipient_id: str, text: str, timeout: float = 15.0) -> None:
+def send_message(
+    recipient_id: str,
+    text: str,
+    timeout: float = 15.0,
+    access_token: str | None = None,
+) -> None:
     """Send a direct message as the connected business account.
 
     Meta only allows this within 24 hours of the customer's own message, which
     is exactly the case the webhook puts us in.
     """
     settings = get_settings()
-    if not settings.instagram_access_token:
+    token = (access_token or "").strip() or settings.instagram_access_token
+    if not token:
         raise InstagramNotConfiguredError("INSTAGRAM_ACCESS_TOKEN is not set")
 
     response = httpx.post(
         f"{settings.instagram_graph_url}/me/messages",
-        headers={"Authorization": f"Bearer {settings.instagram_access_token}"},
+        headers={"Authorization": f"Bearer {token}"},
         json={"recipient": {"id": recipient_id}, "message": {"text": text}},
         timeout=timeout,
     )

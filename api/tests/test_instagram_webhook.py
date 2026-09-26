@@ -125,7 +125,7 @@ class HandleEventTest(unittest.TestCase):
     def test_a_customer_dm_is_queued_for_the_agent(self):
         with patch.object(instagram, "reply_to_instagram_dm_task") as task:
             instagram.handle_event(self._event())
-        task.delay.assert_called_once_with("5551", "Narxi qancha?")
+        task.delay.assert_called_once_with("17841477756581063", "5551", "Narxi qancha?")
 
     def test_a_comment_is_logged_but_not_answered(self):
         with patch.object(instagram, "reply_to_instagram_dm_task") as task:

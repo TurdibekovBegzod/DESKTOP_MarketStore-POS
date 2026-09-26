@@ -105,7 +105,11 @@ MAX_REPLY_CHARS = 900
 MAX_INCOMING_CHARS = 1500
 
 
-def reply_to(text: str | None, timeout: float | None = None) -> str:
+def reply_to(
+    text: str | None,
+    timeout: float | None = None,
+    api_key: str | None = None,
+) -> str:
     """The reply to send back, or "" meaning: say nothing.
 
     A photo-only or sticker-only DM arrives with no text at all, and an empty
@@ -116,7 +120,10 @@ def reply_to(text: str | None, timeout: float | None = None) -> str:
     if not message:
         return ""
 
-    kwargs = {} if timeout is None else {"timeout": timeout}
+    kwargs: dict = {} if timeout is None else {"timeout": timeout}
+    if api_key:
+        kwargs["api_key"] = api_key
+
     answer = generate(
         message[:MAX_INCOMING_CHARS],
         system_instruction=SYSTEM_PROMPT,
@@ -127,7 +134,12 @@ def reply_to(text: str | None, timeout: float | None = None) -> str:
     return answer[:MAX_REPLY_CHARS].strip()
 
 
-def reply_in_conversation(instagram_id: str, text: str | None, timeout: float | None = None) -> str:
+def reply_in_conversation(
+    instagram_id: str,
+    text: str | None,
+    timeout: float | None = None,
+    api_key: str | None = None,
+) -> str:
     """Answer one DM with the customer's own history in front of the model.
 
     The history is loaded and stored around the call rather than inside
@@ -141,7 +153,10 @@ def reply_in_conversation(instagram_id: str, text: str | None, timeout: float | 
     history = memory.load(instagram_id)
     contents = history + [{"role": "user", "parts": [{"text": message[:MAX_INCOMING_CHARS]}]}]
 
-    kwargs = {} if timeout is None else {"timeout": timeout}
+    kwargs: dict = {} if timeout is None else {"timeout": timeout}
+    if api_key:
+        kwargs["api_key"] = api_key
+
     answer = generate(
         contents,
         system_instruction=SYSTEM_PROMPT,
