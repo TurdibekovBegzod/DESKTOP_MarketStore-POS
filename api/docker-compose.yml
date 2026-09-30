@@ -45,7 +45,9 @@ services:
       retries: 10
 
   api:
-    build: .
+    build:
+      context: .
+      target: base
     container_name: marketstore-api
     restart: unless-stopped
     logging: *default-logging
@@ -110,7 +112,9 @@ services:
       start_period: 20s
 
   worker:
-    build: .
+    build:
+      context: .
+      target: base
     container_name: marketstore-worker
     restart: unless-stopped
     logging: *default-logging
@@ -182,7 +186,9 @@ services:
   logs:
     # Copies every container's output into a monthly archive, so the control
     # panel can show more than the few megabytes Docker keeps per container.
-    build: .
+    build:
+      context: .
+      target: base
     container_name: marketstore-logs
     restart: unless-stopped
     logging: *default-logging
