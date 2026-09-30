@@ -369,6 +369,23 @@ def get_current_user(token):
     return _request_json("/auth/me", token=token, timeout=AUTH_TIMEOUT, retries=AUTH_RETRIES)
 
 
+def check_instagram_account_claim(token, account_id, timeout=15):
+    """Ask the server whether this Instagram account is free for this shop.
+
+    Returns ``(available, owner_email)``. ``available`` is False when another
+    shop already connected the same Instagram Business Account, in which case
+    ``owner_email`` is that owner's masked address (or None when the server did
+    not disclose it).
+    """
+    result = _request_json(
+        "/instagram/account/claim-check",
+        {"account_id": str(account_id or "").strip()},
+        token=token,
+        timeout=timeout,
+    ) or {}
+    return bool(result.get("available")), result.get("owner_email")
+
+
 def push_sync_records(
     token,
     records,

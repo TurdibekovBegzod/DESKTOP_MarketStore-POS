@@ -129,6 +129,9 @@ SYNC_TABLES = (
     "finance_manual_movements",
     "activity_logs",
     "notification_reads",
+    # What this shop tells its Instagram agent. Synced like any other table; the
+    # server derives the searchable, embedded copy from these rows.
+    "agent_rules",
 )
 
 
@@ -971,6 +974,31 @@ class UserSetting(Base):
     value = Column(String)
 
 
+class AgentRule(Base):
+    """One instruction this shop gives its Instagram agent.
+
+    Ordinary synced rows, so a rule written here reaches the shop's other
+    devices; the server additionally embeds them so the agent can look up the few
+    that bear on a customer's question instead of being handed the whole set.
+
+    No ``is_deleted`` column. A deleted rule is deleted - the row goes, and the
+    tombstone carries that to the other devices - because a table of rules is
+    something the owner reads, and rows that only look deleted make it harder to
+    see what the bot is actually working from.
+    """
+
+    __tablename__ = "agent_rules"
+    id = Column(String(ROW_ID_LENGTH), primary_key=True, default=new_row_id)
+    # Named rule_text, not text: a mapped attribute called ``text`` shadows
+    # SQLAlchemy's own ``text()`` for the rest of the class body.
+    rule_text = Column(Text, nullable=False)
+    # Which rule wins when two say opposite things. Similarity cannot decide it,
+    # so the shop does.
+    priority = Column(Integer, default=0, nullable=False)
+    created_at = Column(String, server_default=text("CURRENT_TIMESTAMP"))
+    updated_at = Column(String, server_default=text("CURRENT_TIMESTAMP"))
+
+
 class SyncTombstone(Base):
     __tablename__ = "sync_tombstones"
     table_name = Column(String, primary_key=True)
@@ -1336,6 +1364,7 @@ MIGRATIONS = (
     ("015_local_barcode_issues", "Remember every barcode generated on this device."),
     ("016_local_stocktake", "Keep the stocktake on this device instead of the server."),
     ("017_finalized_at_clock", "Put finalized_at on the same clock as the rest of the sale."),
+    ("018_agent_rules", "Let each shop write its own rules for the Instagram agent."),
 )
 
 
@@ -1672,6 +1701,10 @@ def _migration_add_sale_item_returned_at(conn):
 
 def _migration_create_account_assets(conn):
     Base.metadata.create_all(bind=conn, tables=[AccountAsset.__table__])
+
+
+def _migration_agent_rules(conn):
+    Base.metadata.create_all(bind=conn, tables=[AgentRule.__table__])
 
 
 
@@ -2092,6 +2125,7 @@ MIGRATION_FUNCTIONS = {
     "015_local_barcode_issues": _migration_local_barcode_issues,
     "016_local_stocktake": _migration_local_stocktake,
     "017_finalized_at_clock": _migration_finalized_at_clock,
+    "018_agent_rules": _migration_agent_rules,
 }
 
 
@@ -3172,6 +3206,182 @@ def save_app_settings(settings, user_id=None):
                 row = session.get(UserSetting, {"user_id": user_id, "key": key}) or UserSetting(user_id=user_id, key=key)
                 row.value = str(value)
                 session.merge(row)
+
+
+# A rule the agent has to act on, long enough for a real policy and short enough
+# that one paste cannot fill the model's prompt on its own.
+AGENT_RULE_MAX_CHARS = 2000
+
+
+def list_agent_rules():
+    """Every rule this shop has given its agent, as plain dicts.
+
+    Highest priority first, then newest, which is the order the owner reads them
+    in and the order a contradiction should be resolved in.
+
+    Dicts rather than ORM rows: the widget outlives the session that loaded them.
+    """
+    with session_scope() as session:
+        rows = session.scalars(select(AgentRule)).all()
+        rules = [
+            {
+                "id": row.id,
+                "text": row.rule_text or "",
+                "priority": int(row.priority or 0),
+                "created_at": row.created_at or "",
+                "updated_at": row.updated_at or "",
+            }
+            for row in rows
+        ]
+    # Highest priority first; within one priority, most recently touched first,
+    # so an edit the owner just made is where they look for it. Timestamps are
+    # ISO strings, so reversing them sorts newest-first correctly.
+    rules.sort(key=lambda rule: rule["updated_at"], reverse=True)
+    rules.sort(key=lambda rule: rule["priority"], reverse=True)
+    return rules
+
+
+def add_agent_rule(text_value, priority=0):
+    """Store a new rule and return its id.
+
+    Raises ValueError on empty text: a blank rule would sync, be mirrored, and
+    then be deleted again server-side, which is a confusing round trip for
+    something the caller can catch here.
+    """
+    body = (text_value or "").strip()
+    if not body:
+        raise ValueError("Qoida matni bo'sh bo'lmasligi kerak")
+    if len(body) > AGENT_RULE_MAX_CHARS:
+        raise ValueError(f"Qoida {AGENT_RULE_MAX_CHARS} belgidan uzun bo'lmasligi kerak")
+
+    # Rules are what the bot answers customers with, so they are business data
+    # and follow the same rule as the rest: changed only while the server is
+    # reachable. A rule written offline would sit here unembedded, and the shop
+    # would believe the bot was already applying it.
+    require_online()
+    with session_scope() as session:
+        row = AgentRule(rule_text=body, priority=int(priority or 0), updated_at=_utc_now())
+        session.add(row)
+        session.flush()
+        return row.id
+
+
+def update_agent_rule(rule_id, text_value=None, priority=None):
+    """Change one rule's text or priority. Returns whether a row was found.
+
+    ``updated_at`` is always touched, because that is what tells sync - and
+    through it the server's embedder - that this rule has to be looked at again.
+    """
+    identifier = str(rule_id or "").strip()
+    if not identifier:
+        return False
+
+    body = None
+    if text_value is not None:
+        body = (text_value or "").strip()
+        if not body:
+            raise ValueError("Qoida matni bo'sh bo'lmasligi kerak")
+        if len(body) > AGENT_RULE_MAX_CHARS:
+            raise ValueError(f"Qoida {AGENT_RULE_MAX_CHARS} belgidan uzun bo'lmasligi kerak")
+
+    require_online()
+    with session_scope() as session:
+        row = session.get(AgentRule, identifier)
+        if row is None:
+            return False
+        if body is not None:
+            row.rule_text = body
+        if priority is not None:
+            row.priority = int(priority or 0)
+        row.updated_at = _utc_now()
+        return True
+
+
+def delete_agent_rule(rule_id):
+    """Remove one rule for good. Returns whether a row was found.
+
+    A tombstone and a real delete, in that order. The tombstone is what carries
+    the deletion to the shop's other devices and on to the server, which then
+    drops its own searchable copy; the delete is what keeps this table showing
+    only rules that still apply.
+    """
+    identifier = str(rule_id or "").strip()
+    if not identifier:
+        return False
+
+    require_online()
+    with session_scope() as session:
+        row = session.get(AgentRule, identifier)
+        if row is None:
+            return False
+        session.merge(SyncTombstone(
+            table_name="agent_rules", local_id=identifier, deleted_at=_utc_now()
+        ))
+        session.flush()
+        session.delete(row)
+        return True
+
+
+INSTAGRAM_SETTING_KEYS = (
+    "instagram_account_id",
+    "instagram_access_token",
+    "instagram_app_secret",
+    "instagram_verify_token",
+    "instagram_auto_reply",
+    "gemini_api_key",
+)
+
+
+def get_instagram_settings() -> dict:
+    """Return stored Instagram integration credentials and toggle."""
+    defaults = {
+        "instagram_account_id": "",
+        "instagram_access_token": "",
+        "instagram_app_secret": "",
+        "instagram_verify_token": "",
+        "instagram_auto_reply": "1",
+        "gemini_api_key": "",
+    }
+    with session_scope() as session:
+        result = dict(defaults)
+        for key in INSTAGRAM_SETTING_KEYS:
+            row = session.get(AppSetting, key)
+            if row and row.value is not None:
+                result[key] = str(row.value)
+        return result
+
+
+def save_instagram_settings(settings: dict) -> None:
+    """Save Instagram credentials to AppSetting so they replicate via sync outbox."""
+    with session_scope() as session:
+        for key in INSTAGRAM_SETTING_KEYS:
+            if key in settings:
+                val = str(settings[key] if settings[key] is not None else "").strip()
+                row = session.get(AppSetting, key) or AppSetting(key=key)
+                row.value = val
+                session.merge(row)
+
+
+# Wiped when an Instagram account turns out to belong to another shop: the
+# credentials must not stay behind on this machine, and the blanked rows still
+# replicate so the server drops whatever this device pushed earlier.
+INSTAGRAM_CREDENTIAL_KEYS = (
+    "instagram_account_id",
+    "instagram_access_token",
+    "instagram_app_secret",
+)
+
+
+def clear_instagram_settings() -> None:
+    """Blank this shop's Instagram credentials and switch auto-reply off."""
+    with session_scope() as session:
+        for key in INSTAGRAM_CREDENTIAL_KEYS:
+            row = session.get(AppSetting, key) or AppSetting(key=key)
+            row.value = ""
+            session.merge(row)
+        reply_row = session.get(AppSetting, "instagram_auto_reply") or AppSetting(key="instagram_auto_reply")
+        reply_row.value = "0"
+        session.merge(reply_row)
 
 
 MAX_ACCOUNT_ASSET_BYTES = 512 * 1024

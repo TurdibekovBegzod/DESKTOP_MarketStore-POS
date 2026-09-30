@@ -31,6 +31,7 @@ from ui.supplier_debts_widget import SupplierDebtsWidget
 from ui.expenses_widget import ExpensesWidget
 from ui.finance_widget import FinanceWidget
 from ui.checking_widget import CheckingWidget
+from ui.ai_widget import AIWidget
 from ui.notifications_widget import NotificationsWidget
 from ui.updater_dialog import UpdaterDialog
 from ui.security_dialogs import change_admin_password
@@ -54,6 +55,9 @@ if not Path(DOWN_ARROW_PATH).exists():
 SYNC_ICON_PATH = resource_path("images/sync.png")
 ACCOUNT_LOGO_ASSET_ID = "desktop_logo"
 ACCOUNT_LOGO_MAX_SIDE = 256
+# The AI page is still being tried out, so only these accounts can open it.
+# Everyone else sees the button greyed out.
+AI_ALLOWED_EMAILS = {"akbareliboy@gmail.com"}
 
 
 def get_custom_logo_path() -> str:
@@ -330,7 +334,7 @@ TEXTS = {
         "products": "Mahsulotlar", "stock": "Ombor", "finalize_sales": "Sotishni yakunlash",
         "sales_details": "Sotuv tafsilotlari",
         "reports": "Hisobotlar", "finance": "Moliya", "supplier_debts": "Qarzlar", "expenses": "Harajatlar",
-        "checking": "Tekshiruv",
+        "checking": "Tekshiruv", "ai": "AI",
         "users": "Kassirlar", "login_history": "Kirish tarixi",
         "notifications": "Bildirishnomalar", "check_updates": "Yangilanishlar",
         "app_logo": "Dastur logotipi", "choose_logo": "Rasmni tanlash", "reset_logo": "Asliga qaytarish",
@@ -409,7 +413,7 @@ TEXTS = {
         "products": "Products", "stock": "Stock", "finalize_sales": "Finalize sales",
         "sales_details": "Sales details",
         "reports": "Reports", "finance": "Finance", "supplier_debts": "Debts", "expenses": "Expenses",
-        "checking": "Checking",
+        "checking": "Checking", "ai": "AI",
         "users": "Cashiers", "login_history": "Login history",
         "notifications": "Notifications", "check_updates": "Updates",
         "app_logo": "App logo", "choose_logo": "Choose image", "reset_logo": "Restore default",
@@ -422,7 +426,7 @@ TEXTS = {
         "logo_admin_only_title": "Permission", "logo_admin_only": "Only an admin can change the logo.",
     },
     "ru": {
-        "checking": "Проверка",
+        "checking": "Проверка", "ai": "AI",
         "settings": "Настройки", "theme": "Тема интерфейса", "language": "Язык",
         "app_name": "Название программы", "currency": "Основная валюта",
         "exchange_rates": "Изменить курсы", "save": "Сохранить", "cancel": "Отмена",
@@ -1770,7 +1774,21 @@ class MainWindow(QMainWindow):
         nav_layout.addWidget(btn_checking)
         self.nav_buttons["checking"] = btn_checking
 
-        # 5. Admin-only pages
+        # 5. AI (Admin only)
+        if self.user["role"] == "admin":
+            btn_ai = QPushButton(f"  {self.labels.get('ai', 'AI')}")
+            btn_ai.setFixedHeight(46)
+            btn_ai.setCheckable(True)
+            btn_ai.setObjectName("nav_ai")
+            btn_ai.setStyleSheet(self._nav_btn_style())
+            btn_ai.clicked.connect(lambda checked: self._switch_page("ai"))
+            if not self._ai_allowed():
+                btn_ai.setEnabled(False)
+                btn_ai.setToolTip("AI hozircha faqat test uchun ochiq")
+            nav_layout.addWidget(btn_ai)
+            self.nav_buttons["ai"] = btn_ai
+
+        # 6. Admin-only pages
         if self.user["role"] == "admin":
             for label, key in [
                 (self.labels.get("finance", "Finance"), "finance"),
@@ -1900,6 +1918,8 @@ class MainWindow(QMainWindow):
                 "users": UsersWidget(),
                 "login_history": LoginHistoryWidget(),
             })
+            if self._ai_allowed():
+                self.pages["ai"] = AIWidget(self.user)
         else:
             self.pages.update({
                 "products": ProductsWidget(self.user, cashier_mode=True),
@@ -1933,6 +1953,10 @@ class MainWindow(QMainWindow):
         self.sync_status_timer.timeout.connect(self._refresh_pending_sales_badge)
         self.sync_status_timer.start(1000)
         QTimer.singleShot(1500, self._show_startup_notifications)
+
+    def _ai_allowed(self):
+        email = (self.user.get("email") or "").strip().lower()
+        return email in AI_ALLOWED_EMAILS
 
     def _nav_btn_style(self):
         theme = THEMES.get(self.settings.get("theme"), THEMES["dark_blue"])
