@@ -11,10 +11,13 @@ import hmac
 import json
 import logging
 
-from fastapi import APIRouter, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from pydantic import BaseModel, Field
 
 from app.config import get_settings
-from app.instagram_service import get_account_config_by_id
+from app.deps import get_current_user
+from app.instagram_service import find_conflicting_owner, get_account_config_by_id
+from app.models import User
 from app.tasks import reply_to_instagram_dm_task
 
 
@@ -108,6 +111,54 @@ def handle_event(event: dict) -> None:
 
     # Queued, not awaited: see reply_to_instagram_dm_task.
     reply_to_instagram_dm_task.delay(account_id, event["sender_id"], event["text"])
+
+
+class AccountClaimRequest(BaseModel):
+    account_id: str = Field(min_length=1, max_length=64)
+
+
+class AccountClaimResponse(BaseModel):
+    available: bool
+    owner_email: str | None = None
+
+
+def _mask_email(email: str | None) -> str | None:
+    """Hide most of another shop's address while still making it recognisable.
+
+    The desktop app shows this to whoever hit the conflict, and that person is
+    not necessarily entitled to the other owner's full address.
+    """
+    address = (email or "").strip()
+    if "@" not in address:
+        return None
+    name, domain = address.rsplit("@", 1)
+    if len(name) <= 2:
+        hidden = name[:1] + "*"
+    else:
+        hidden = f"{name[:2]}{'*' * (len(name) - 2)}"
+    return f"{hidden}@{domain}"
+
+
+@router.post("/account/claim-check", response_model=AccountClaimResponse)
+def claim_check(
+    payload: AccountClaimRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Ask whether this Instagram account may be connected to the caller's shop.
+
+    One Instagram Business Account belongs to exactly one shop. Re-saving the
+    same ID from the shop that already holds it is fine -- that is a token
+    rotation -- but a second shop claiming it is refused here, before the
+    credentials are ever written locally or synced.
+    """
+    account_id = payload.account_id.strip()
+    if not account_id:
+        raise HTTPException(status_code=422, detail="account_id is required")
+
+    owner = find_conflicting_owner(account_id, current_user.uid)
+    if owner is None:
+        return AccountClaimResponse(available=True)
+    return AccountClaimResponse(available=False, owner_email=_mask_email(owner.email))
 
 
 @router.get("/webhook")

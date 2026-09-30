@@ -245,6 +245,11 @@ class RejectedRecordOut(BaseModel):
     local_id: str
     expected_version: int | None = None
     server_version: int | None = None
+    # "stale" (the default) when the row moved on under the sender, or
+    # "conflict" when the row may not be written at all -- an Instagram account
+    # already connected to another shop, for instance.
+    reason: str = "stale"
+    detail: str | None = None
 
 
 class PushResponse(BaseModel):

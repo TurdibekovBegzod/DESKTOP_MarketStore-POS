@@ -37,6 +37,64 @@ class InstagramAccountConfig:
     gemini_api_key: str | None
 
 
+@dataclass
+class InstagramAccountOwner:
+    """Who currently holds an Instagram account ID in the sync database."""
+
+    user_id: int
+    user_uid: str
+    email: str | None
+
+
+def find_account_owners(account_id: str) -> list[InstagramAccountOwner]:
+    """Every user whose synced settings claim this Instagram Business Account ID.
+
+    One Instagram account may only belong to one shop. Any result longer than a
+    single entry means the database already carries a duplicate that has to be
+    cleaned up before resolution can be trusted.
+    """
+    account_id = str(account_id or "").strip()
+    if not account_id:
+        return []
+
+    try:
+        with SessionLocal() as session:
+            rows = session.execute(
+                text(
+                    """
+                    SELECT DISTINCT r.user_id, r.user_uid, u.email
+                    FROM user_records AS r
+                    JOIN users AS u ON u.id = r.user_id
+                    WHERE r.table_name = 'app_settings'
+                      AND r.local_id = 'instagram_account_id'
+                      AND TRIM(r.data ->> 'value') = :account_id
+                      AND r.deleted_at IS NULL
+                    ORDER BY r.user_id ASC
+                    """
+                ),
+                {"account_id": account_id},
+            ).all()
+    except Exception:
+        logger.exception("Failed to look up owners of Instagram account %s", account_id)
+        return []
+
+    return [InstagramAccountOwner(user_id=row[0], user_uid=row[1], email=row[2]) for row in rows]
+
+
+def find_conflicting_owner(account_id: str, user_uid: str) -> InstagramAccountOwner | None:
+    """The other shop holding this Instagram account, or None when it is free.
+
+    ``user_uid`` is the shop asking to claim it, so its own existing row is not
+    a conflict -- re-saving the same credentials from the same account is how a
+    token gets rotated.
+    """
+    own_uid = str(user_uid or "").strip()
+    for owner in find_account_owners(account_id):
+        if owner.user_uid != own_uid:
+            return owner
+    return None
+
+
 def get_account_config_by_id(account_id: str) -> InstagramAccountConfig | None:
     """Find a shop's credentials by its Instagram Business Account ID.
 
@@ -50,7 +108,33 @@ def get_account_config_by_id(account_id: str) -> InstagramAccountConfig | None:
 
     try:
         with SessionLocal() as session:
-            # 1. Locate the user who owns this instagram_account_id or matches email
+            # 1. Locate the user who owns this instagram_account_id or matches email.
+            # An exact account_id may only belong to one shop; when older data
+            # carries a duplicate, say so loudly instead of quietly picking the
+            # most recently written row.
+            exact_owners = session.execute(
+                text(
+                    """
+                    SELECT DISTINCT r.user_id, r.user_uid, u.email
+                    FROM user_records AS r
+                    JOIN users AS u ON u.id = r.user_id
+                    WHERE r.table_name = 'app_settings'
+                      AND r.local_id = 'instagram_account_id'
+                      AND TRIM(r.data ->> 'value') = :account_id
+                      AND r.deleted_at IS NULL
+                    """
+                ),
+                {"account_id": account_id},
+            ).all()
+            if len(exact_owners) > 1:
+                logger.error(
+                    "Instagram account %s is claimed by %d shops (%s); resolution is ambiguous "
+                    "until the duplicates are removed",
+                    account_id,
+                    len(exact_owners),
+                    ", ".join(str(row[2] or row[1]) for row in exact_owners),
+                )
+
             match_row = session.execute(
                 text(
                     """

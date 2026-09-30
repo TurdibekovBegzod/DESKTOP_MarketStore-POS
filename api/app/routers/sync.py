@@ -12,6 +12,7 @@ from starlette.concurrency import run_in_threadpool
 from app.database import SessionLocal, get_db
 from app.deps import get_current_user
 from app.events import broker
+from app.instagram_service import find_conflicting_owner
 from app.models import Device, SyncBatch, SyncMeta, User, UserRecord
 from app.releases import release_payload
 from app.schemas import (
@@ -162,6 +163,30 @@ def _assert_generation(db: Session, user: User, expected: int | None) -> None:
         )
 
 
+def _instagram_claim_conflict(user: User, record: RecordIn) -> str | None:
+    """Why this record may not be stored, or None when it is fine to write.
+
+    One Instagram Business Account belongs to exactly one shop. The desktop app
+    checks this before saving, but an offline device syncing later would still
+    get through, so the rule is enforced here too -- the database is the only
+    place that can see every shop at once.
+    """
+    if record.table_name != "app_settings" or record.local_id != "instagram_account_id":
+        return None
+    if record.deleted_at is not None:
+        return None
+    account_id = str((record.data or {}).get("value") or "").strip()
+    if not account_id:
+        return None
+    owner = find_conflicting_owner(account_id, user.uid)
+    if owner is None:
+        return None
+    return (
+        f"Instagram account {account_id} is already connected to another shop "
+        f"({owner.email or owner.user_uid})"
+    )
+
+
 def _upsert_record(db: Session, user: User, record: RecordIn, change_seq: int) -> bool:
     """Store one row. Returns False when the sender was working from a stale copy.
 
@@ -248,6 +273,17 @@ def push(payload: PushRequest, current_user: User = Depends(get_current_user), d
     rejected: list[RejectedRecordOut] = []
     accepted: list[RecordIn] = []
     for record in payload.records:
+        claim_conflict = _instagram_claim_conflict(current_user, record)
+        if claim_conflict:
+            rejected.append(RejectedRecordOut(
+                table_name=record.table_name,
+                local_id=record.local_id,
+                expected_version=record.expected_version,
+                server_version=_record_version(db, current_user, record),
+                reason="conflict",
+                detail=claim_conflict,
+            ))
+            continue
         if _upsert_record(db, current_user, record, generation):
             accepted.append(record)
             continue
@@ -304,15 +340,29 @@ def upsert_table_rows(
         raise HTTPException(status_code=413, detail="Sync batch is too large")
     normalized = [record.model_copy(update={"table_name": table_name}) for record in records]
     generation = _reserve_generation(db, current_user)
+    rejected: list[RejectedRecordOut] = []
+    accepted: list[RecordIn] = []
     for record in normalized:
+        claim_conflict = _instagram_claim_conflict(current_user, record)
+        if claim_conflict:
+            rejected.append(RejectedRecordOut(
+                table_name=record.table_name,
+                local_id=record.local_id,
+                expected_version=record.expected_version,
+                server_version=_record_version(db, current_user, record),
+                reason="conflict",
+                detail=claim_conflict,
+            ))
+            continue
         _upsert_record(db, current_user, record, generation)
-    batch = SyncBatch(user_id=current_user.id, user_uid=current_user.uid, direction="push", records_count=len(normalized), note=f"table:{table_name}")
+        accepted.append(record)
+    batch = SyncBatch(user_id=current_user.id, user_uid=current_user.uid, direction="push", records_count=len(accepted), note=f"table:{table_name}")
     db.add(batch)
     event = _describe_generation(db, current_user, x_device_key, {table_name}, generation)
     db.commit()
     db.refresh(batch)
     _publish(current_user.uid, event)
-    return PushResponse(saved=len(normalized), batch_id=batch.id, generation=event["generation"])
+    return PushResponse(saved=len(accepted), batch_id=batch.id, generation=event["generation"], rejected=rejected)
 
 
 @router.get("/pull", response_model=PullResponse)
