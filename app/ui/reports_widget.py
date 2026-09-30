@@ -978,11 +978,11 @@ class ReportsWidget(QWidget):
             salary_rows = [r for r in salary_rows if r.get("entity_id") == user_id]
         elif period == "day":
             rows = db.get_overall_day_hourly_series(start_date, section_id)
-            expense_rows = db.get_expense_hourly_report(start_date, include_cashier=False)
+            expense_rows = db.get_expense_hourly_report(start_date)
             salary_rows = db.get_cashier_salary_period_summary(start_date, end_date, section_id)
         else:
             rows = db.get_overall_period_series(start_date, end_date, section_id)
-            expense_rows = db.get_expense_report(start_date, end_date, include_cashier=False)
+            expense_rows = db.get_expense_report(start_date, end_date)
             salary_rows = db.get_cashier_salary_period_summary(start_date, end_date, section_id)
         return {
             "start_date": start_date,
@@ -1130,9 +1130,8 @@ class ReportsWidget(QWidget):
         filled_rows = self._filled_series(rows, start_date, end_date)
         if self._selected_section_id():
             for row in filled_rows:
-                row["expense"] = 0
-                cashier_reward = (row.get("cashier_reward", 0) or 0)
-                row["net_profit"] = (row.get("profit", 0) or 0) - cashier_reward
+                row["expense"] = row.get("salary_deduction", 0) or 0
+                row["net_profit"] = (row.get("profit", 0) or 0) - row["expense"]
             filled = filled_rows
         else:
             filled = self._with_entity_net_profit(filled_rows, start_date, end_date)
@@ -1155,7 +1154,7 @@ class ReportsWidget(QWidget):
                 "salary": gross_salary - salary_deduction,
                 "salary_deduction": salary_deduction,
             }
-            cashier_totals["net_profit"] = cashier_totals["profit"] - gross_salary
+            cashier_totals["net_profit"] = cashier_totals["profit"] - salary_deduction
 
             if "revenue" in self.summary_cards:
                 self.summary_cards["revenue"].setText(self._format_money(cashier_totals["revenue"], currency))
@@ -1508,8 +1507,8 @@ class ReportsWidget(QWidget):
         return db.get_entity_period_series(entity_type, entity_id, start_date, end_date, section_id)
 
     def _expense_rows(self, start_date, end_date, user_id=None, include_unassigned=False):
-        # include_cashier=False: money charged to a cashier comes out of that
-        # cashier's salary, so it must never move the shop's profit figures.
+        # include_cashier=False: this is one admin's own expenses. Money charged
+        # to a cashier is counted against that cashier instead, not twice.
         if self.period_combo.currentData() == "day":
             return db.get_expense_hourly_report(
                 start_date, user_id=user_id, include_unassigned=include_unassigned,
@@ -1556,8 +1555,7 @@ class ReportsWidget(QWidget):
         expenses = self._expense_totals_by_period(start_date, end_date)
         for row in rows:
             row["expense"] = expenses.get(row["label"], 0)
-            cashier_reward = row.get("cashier_reward", 0) or 0
-            row["net_profit"] = (row["profit"] or 0) - (row["expense"] or 0) - cashier_reward
+            row["net_profit"] = (row["profit"] or 0) - (row["expense"] or 0)
         return rows
 
     def _with_net_profit_from_expenses(self, rows, expense_rows, currencies, section_id=None, start_date=None, end_date=None):
@@ -1582,8 +1580,7 @@ class ReportsWidget(QWidget):
             totals[label] = totals.get(label, 0) + (expense["amount"] or 0) * (rates.get(currency, 1) or 1) * ratio
         for row in rows:
             row["expense"] = totals.get(row["label"], 0)
-            cashier_reward = row.get("cashier_reward", 0) or 0
-            row["net_profit"] = (row["profit"] or 0) - (row["expense"] or 0) - cashier_reward
+            row["net_profit"] = (row["profit"] or 0) - (row["expense"] or 0)
         return rows
 
     def _with_entity_net_profit(self, rows, start_date, end_date):
@@ -1592,13 +1589,11 @@ class ReportsWidget(QWidget):
             expenses = self._expense_totals_by_period(start_date, end_date, user_id=entity["id"], include_unassigned=True)
             for row in rows:
                 row["expense"] = expenses.get(row["label"], 0)
-                cashier_reward = row.get("cashier_reward", 0) or 0
-                row["net_profit"] = (row["profit"] or 0) - (row["expense"] or 0) - cashier_reward
+                row["net_profit"] = (row["profit"] or 0) - (row["expense"] or 0)
             return rows
         for row in rows:
-            row["expense"] = 0
-            cashier_reward = row.get("cashier_reward", 0) or 0
-            row["net_profit"] = (row.get("profit", 0) or 0) - cashier_reward
+            row["expense"] = row.get("salary_deduction", 0) or 0
+            row["net_profit"] = (row.get("profit", 0) or 0) - row["expense"]
         return rows
 
     @staticmethod
@@ -2184,7 +2179,9 @@ class SalesDetailsWidget(QWidget):
         # Deliberately not clamped: when the expenses exceed what the sales have
         # earned so far, the cashier owes the difference back and must see it.
         salary_uzs = gross_salary_uzs - deduction_uzs
-        net_profit_uzs = max(0, profit_uzs - gross_salary_uzs)
+        # Cashier expenses are real money out, so they lower net profit; the
+        # rewards only add to the cashier's salary and leave it alone.
+        net_profit_uzs = max(0, profit_uzs - deduction_uzs)
 
         if hasattr(self, "summary_cards"):
             if "revenue" in self.summary_cards:

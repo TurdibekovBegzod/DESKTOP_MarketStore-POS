@@ -1,4 +1,8 @@
-"""Expenses filed under the "Kassir" category come out of that cashier's salary."""
+"""Expenses filed under the "Kassir" category come out of that cashier's salary.
+
+They are real money out, so they also lower net profit. The reward a finalized
+sale gives its cashier only adds to that salary and never touches net profit.
+"""
 
 import datetime
 import os
@@ -275,9 +279,15 @@ class SalesDetailsExpenseRowTest(unittest.TestCase):
         self.assertIn("85,000", widget.summary_cards["salary"].text())
         self.assertIn("85,000", widget.table.item(0, 7).text())
 
+    def test_net_profit_loses_the_expense_but_not_the_reward(self):
+        widget = self._widget()
+        # 200 000 profit - 40 000 cashier expense; the 125 000 reward stays out.
+        self.assertIn("200,000", widget.summary_cards["profit"].text())
+        self.assertIn("160,000", widget.summary_cards["net_profit"].text())
 
-class ProfitIsolationTest(unittest.TestCase):
-    """A cashier expense moves only that cashier's salary, never the profit."""
+
+class NetProfitTest(unittest.TestCase):
+    """A cashier expense lowers net profit; a finalized sale's reward does not."""
 
     def setUp(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -323,20 +333,42 @@ class ProfitIsolationTest(unittest.TestCase):
         self.addCleanup(widget.deleteLater)
         return {key: label.text() for key, label in widget.summary_cards.items()}
 
-    def test_a_cashier_expense_leaves_profit_and_net_profit_untouched(self):
+    def test_a_cashier_expense_lowers_net_profit_and_the_salary(self):
         db.add_expense(self.categories["Transport"], 50000, "UZS", "benzin", None, None)
         before = self._cards()
         db.add_expense(self.categories["Kassir"], 120000, "UZS", "avans", None, self.cashier_id)
         after = self._cards()
 
         self.assertEqual(before["profit"], after["profit"])
-        self.assertEqual(before["net_profit"], after["net_profit"])
         self.assertEqual(before["revenue"], after["revenue"])
-        # 800 000 profit - 50 000 ordinary expense - 200 000 cashier reward = 550 000 net profit
-        self.assertIn("550,000", after["net_profit"])
-        # Only the salary moves: 200 000 earned - 120 000 already taken.
+        # The 200 000 of rewards is not taken off: 800 000 - 50 000 = 750 000.
+        self.assertIn("750,000", before["net_profit"])
+        # The cashier expense is: 800 000 - 50 000 - 120 000 = 630 000.
+        self.assertIn("630,000", after["net_profit"])
+        # And it still comes out of the salary: 200 000 earned - 120 000 taken.
         self.assertIn("200,000", before["salary"])
         self.assertIn("80,000", after["salary"])
+
+    def test_one_cashiers_net_profit_loses_only_its_own_expenses(self):
+        other_id = db.add_user(
+            email="ozod@shop.uz", password="parol123", role="cashier", username="Ozod"
+        )
+        db.add_expense(self.categories["Kassir"], 120000, "UZS", "avans", None, self.cashier_id)
+        db.add_expense(self.categories["Kassir"], 30000, "UZS", "avans", None, other_id)
+
+        from PyQt6.QtWidgets import QApplication
+        from ui.reports_widget import ReportsWidget
+
+        self.app = QApplication.instance() or QApplication([])
+        widget = ReportsWidget({"id": 1, "role": "admin", "email": "a@b.uz", "username": "a"})
+        self.addCleanup(widget.deleteLater)
+        widget.load_data()
+        widget.selected_entity_id = self.cashier_id
+        widget._refresh_detail_chart()
+
+        # 800 000 profit - this cashier's 120 000; Ozod's 30 000 is not theirs.
+        self.assertIn("680,000", widget.summary_cards["net_profit"].text())
+        self.assertIn("80,000", widget.summary_cards["salary"].text())
 
     def test_profit_reports_skip_cashier_expenses_at_the_query_level(self):
         db.add_expense(self.categories["Transport"], 50000, "UZS", "benzin", None, None)

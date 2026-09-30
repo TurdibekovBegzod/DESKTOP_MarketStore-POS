@@ -399,7 +399,8 @@ class UiDatabaseSmokeTest(unittest.TestCase):
             [],
             [dict(currency) for currency in db.get_currencies()],
         )
-        self.assertEqual(net_rows[0]["net_profit"], 4250)
+        # The cashier's reward only adds to their salary; net profit keeps it.
+        self.assertEqual(net_rows[0]["net_profit"], 5000)
 
         products._load_cashier_filter()
         cashier_index = products.cashier_filter.findData(cashier_id)
