@@ -440,11 +440,12 @@ class SystemPromptForAccountTest(unittest.TestCase):
 
     def test_the_accounts_rules_are_appended(self):
         rules = [rules_service.AccountRule("r1", "Kafolat 6 oy", priority=0, distance=0.0)]
-        with patch.object(rules_service, "list_rules", return_value=rules) as listing:
+        with patch.object(rules_service, "list_rules", return_value=rules) as listing, \
+             patch.object(self.agent.instagram_service, "get_shop_name", return_value="wiki"):
             prompt = self.agent.system_prompt_for("uid-7")
 
         listing.assert_called_once_with("uid-7")
-        self.assertTrue(prompt.startswith(self.agent.SYSTEM_PROMPT))
+        self.assertIn(self.agent.SYSTEM_PROMPT, prompt)
         self.assertIn("- Kafolat 6 oy", prompt)
 
     def test_no_account_means_no_lookup_and_no_rules(self):
@@ -461,6 +462,7 @@ class SystemPromptForAccountTest(unittest.TestCase):
         token = tools.set_store_context(tools.StoreContext(user_uid="uid-7"))
         try:
             with patch.object(rules_service, "list_rules", return_value=rules) as listing, \
+                 patch.object(self.agent.instagram_service, "get_shop_name", return_value="wiki"), \
                  patch.object(self.agent, "generate", return_value="ok") as generate:
                 self.agent.reply_to("Yetkazib berish bormi?")
         finally:
@@ -470,6 +472,76 @@ class SystemPromptForAccountTest(unittest.TestCase):
         self.assertIn("Yetkazib berish bepul", generate.call_args.kwargs["system_instruction"])
         declared = [d["name"] for d in generate.call_args.kwargs["declarations"]]
         self.assertNotIn("search_shop_rules", declared)
+
+
+class ShopNameInPromptTest(unittest.TestCase):
+    """The bot introduces itself by the name the shop gave its app."""
+
+    def setUp(self):
+        from ai import agent
+
+        self.agent = agent
+
+    def _prompt(self, name):
+        with patch.object(rules_service, "list_rules", return_value=[]), \
+             patch.object(self.agent.instagram_service, "get_shop_name", return_value=name) as lookup:
+            prompt = self.agent.system_prompt_for("uid-7")
+        lookup.assert_called_once_with("uid-7")
+        return prompt
+
+    def test_the_fixed_prompt_names_no_shop(self):
+        self.assertNotIn("MarketStore", self.agent.SYSTEM_PROMPT)
+
+    def test_the_shops_own_name_opens_the_prompt(self):
+        prompt = self._prompt("wiki")
+
+        self.assertTrue(prompt.startswith('Sen "wiki" kompaniyasining'))
+        self.assertIn("Men wiki kompaniyasining botiman. Sizga qanday yordam bera olaman?", prompt)
+        self.assertNotIn("MarketStore", prompt)
+
+    def test_a_rename_is_used_from_the_next_prompt(self):
+        """Nothing is cached: each prompt reads the name again."""
+        self.assertIn("Men wiki kompaniyasining", self._prompt("wiki"))
+        self.assertIn("Men Texno Mart kompaniyasining", self._prompt("Texno Mart"))
+
+
+class GetShopNameTest(unittest.TestCase):
+    """Reading "Dastur nomi" from the account's synced app_settings."""
+
+    def setUp(self):
+        from app import instagram_service
+
+        self.service = instagram_service
+
+    def _stored(self, value):
+        session = MagicMock()
+        session.__enter__.return_value = session
+        session.execute.return_value.scalar.return_value = value
+        with patch.object(self.service, "SessionLocal", return_value=session):
+            name = self.service.get_shop_name("uid-7")
+        return name, session
+
+    def test_the_stored_name_is_returned(self):
+        name, session = self._stored("wiki")
+
+        self.assertEqual(name, "wiki")
+        self.assertEqual(session.execute.call_args.args[1], {"user_uid": "uid-7"})
+
+    def test_the_name_is_kept_on_one_line(self):
+        self.assertEqual(self._stored("  Wiki\n  Shop  ")[0], "Wiki Shop")
+
+    def test_no_stored_name_falls_back_to_the_app_default(self):
+        self.assertEqual(self._stored(None)[0], self.service.DEFAULT_APP_NAME)
+        self.assertEqual(self._stored("   ")[0], self.service.DEFAULT_APP_NAME)
+
+    def test_no_account_means_no_query(self):
+        with patch.object(self.service, "SessionLocal") as factory:
+            self.assertEqual(self.service.get_shop_name(None), self.service.DEFAULT_APP_NAME)
+        factory.assert_not_called()
+
+    def test_a_database_failure_is_the_default_not_an_error(self):
+        with patch.object(self.service, "SessionLocal", side_effect=RuntimeError("db down")):
+            self.assertEqual(self.service.get_shop_name("uid-7"), self.service.DEFAULT_APP_NAME)
 
 
 class PerToolCallLimitTest(unittest.TestCase):

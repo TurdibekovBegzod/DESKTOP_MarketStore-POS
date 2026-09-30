@@ -22,15 +22,13 @@ import logging
 from ai import memory
 from ai.gemini import generate
 from ai.tools import DECLARATIONS, TOOLS, get_store_context
-from app import rules_service
+from app import instagram_service, rules_service
 
 
 logger = logging.getLogger(__name__)
 
 
-SYSTEM_PROMPT = """Sen MarketStore do'konining Instagram sahifasiga yozgan mijozlarga javob beradigan yordamchisan.
-
-ASOSIY QOIDA: mahsulot, narx, qoldiq yoki xarakteristika haqidagi HAR
+SYSTEM_PROMPT = """ASOSIY QOIDA: mahsulot, narx, qoldiq yoki xarakteristika haqidagi HAR
 QANDAY javobing search_products yoki get_product_specs natijasiga
 asoslanishi shart. Avval chaqir, keyin yoz. Natijada yo'q narsani
 aytma - taxmin qilma, eslab qolganingdan yozma, umumiy bilimingdan
@@ -144,14 +142,23 @@ MAX_INCOMING_CHARS = 1500
 
 
 def system_prompt_for(user_uid: str | None) -> str:
-    """SYSTEM_PROMPT followed by every rule this account has written.
+    """The shop's own name, SYSTEM_PROMPT, then every rule the account has written.
 
-    Keyed on ``user_uid`` and nothing else, like the rules table itself: with no
-    account resolved the block says there are no rules, because answering out
-    of another shop's rules is worse than answering with none.
+    The name is the shop's "Dastur nomi", read on every reply, so a rename in the
+    desktop app applies from the next DM on. Keyed on ``user_uid`` and nothing
+    else, like the rules table itself: with no account resolved the block says
+    there are no rules, because answering out of another shop's rules is worse
+    than answering with none.
     """
+    name = instagram_service.get_shop_name(user_uid)
     rules = rules_service.list_rules(user_uid) if user_uid else []
-    return f"{SYSTEM_PROMPT}\n\n{rules_service.format_all_for_prompt(rules)}"
+    intro = (
+        f'Sen "{name}" kompaniyasining Instagram sahifasiga yozgan mijozlarga '
+        f"javob beradigan botisan. Mijoz salomlashsa, o'zingni shunday "
+        f'tanishtir (mijoz tilida): "Assalomu alaykum! Men {name} kompaniyasining '
+        f'botiman. Sizga qanday yordam bera olaman?"'
+    )
+    return f"{intro}\n\n{SYSTEM_PROMPT}\n\n{rules_service.format_all_for_prompt(rules)}"
 
 
 def _current_system_prompt() -> str:

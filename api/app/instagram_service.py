@@ -46,6 +46,47 @@ class InstagramAccountOwner:
     email: str | None
 
 
+# What the desktop app calls itself until the shop names it ("Dastur nomi").
+DEFAULT_APP_NAME = "Market POS"
+
+
+def get_shop_name(user_uid: str | None) -> str:
+    """The name this shop gave its app ("Dastur nomi") in the desktop settings.
+
+    Read from the synced ``app_settings`` row on every call, not cached, so a
+    rename reaches the bot on its next reply. Falls back to the app's own default
+    name when nothing is stored or the lookup fails - never raises, since a
+    missing name must not cost the customer a reply.
+    """
+    account = str(user_uid or "").strip()
+    if not account:
+        return DEFAULT_APP_NAME
+
+    try:
+        with SessionLocal() as session:
+            value = session.execute(
+                text(
+                    """
+                    SELECT r.data ->> 'value'
+                    FROM user_records AS r
+                    WHERE r.user_uid = :user_uid
+                      AND r.table_name = 'app_settings'
+                      AND r.local_id = 'app_name'
+                      AND r.deleted_at IS NULL
+                    LIMIT 1
+                    """
+                ),
+                {"user_uid": account},
+            ).scalar()
+    except Exception:
+        logger.exception("Failed to read the app name of account %s", account)
+        return DEFAULT_APP_NAME
+
+    # One line: the name goes into a sentence of the prompt.
+    name = " ".join(str(value or "").split())
+    return name or DEFAULT_APP_NAME
+
+
 def find_account_owners(account_id: str) -> list[InstagramAccountOwner]:
     """Every user whose synced settings claim this Instagram Business Account ID.
 
