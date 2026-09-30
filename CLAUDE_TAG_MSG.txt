@@ -1,10 +1,8 @@
-MarketStore POS v1.7.1
+MarketStore POS v1.7.2
 
-AI bo'limidagi qoidalar endi bitta maydonda yoziladi.
+Sof foyda hisobi o'zgardi.
 
-- Qoidalar sahifasida har bir qoida uchun alohida kartochka o'rniga
-  bitta katta matn maydoni bor. Hamma qoidalarni shu yerga yozib,
-  "Saqlash" tugmasini bosish kifoya.
-- Oldin alohida yozilgan qoidalar avtomatik ravishda shu maydonga
-  birlashtiriladi.
-- Yozilgan matn to'liq holda botga beriladi.
+- Kassirga yozilgan xarajat endi sof foydadan ayriladi. U avvalgidek
+  kassir oyligidan ham ayriladi va sotuv tafsilotida ko'rinadi.
+- Sotish yakunlanganda kassirga ajratilgan summa endi sof foydadan
+  ayrilmaydi, faqat kassir oyligiga qo'shiladi.

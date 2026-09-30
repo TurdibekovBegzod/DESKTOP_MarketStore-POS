@@ -1,24 +1,19 @@
-release: v1.7.1 qoidalar bitta matn maydonida
+release: v1.7.2 sof foyda kassir xarajatini ayiradi
 
-AI bo'limidagi qoidalar sahifasi soddalashtirildi.
+Sof foyda hisobi o'zgardi, jadval va kartochkalar avvalgidek qoldi.
 
 Nima o'zgardi
 
-- Har bir qoida uchun alohida kartochka olib tashlandi. Endi bitta katta
-  maydon bor, hamma qoidalar shu yerda turadi va bitta qator sifatida
-  saqlanadi.
-- Server qoidalarni har xabarda account_rules dan o'qib system promptga
-  qo'shadi, shuning uchun saqlangan matn sync o'tgach keyingi xabardan
-  ishlaydi.
-- Eski alohida qoidalar sahifa ochilganda birlashib ko'rinadi, saqlanganda
-  bitta qatorga aylanadi.
-- Uzunlik chegarasi 20000 belgi.
+- Kassirga yozilgan xarajat endi sof foydadan ayriladi. U avvalgidek
+  kassir oyligidan ham ayriladi va sotuv tafsilotida qator bo'lib turadi.
+- Sotish yakunlanganda kassirga ajratilgan summa endi sof foydadan
+  ayrilmaydi, faqat kassir oyligiga qo'shiladi.
+- Sotuv tafsilotlari: foyda - kassir xarajatlari. Hisobotlar: foyda -
+  barcha xarajatlar; bitta kassir tanlanganda faqat o'sha kassirning
+  xarajatlari.
 
-Versiya 1.7.1 (build 33): version.py, installer.nsi, version_info.txt.
+Versiya 1.7.2 (build 34): version.py, installer.nsi, version_info.txt.
 
-Tekshirildi: test_agent_rules va test_instagram_connections - 41 passed.
-To'liq desktop to'plami 285 passed; bitta migratsiya testi
-(test_return_timestamp_migration_backfills_existing_returns) faqat to'liq
-to'plamda yiqiladi, alohida va oldingi commitda o'tadi.
+Tekshirildi: to'liq desktop to'plami 288 passed.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
