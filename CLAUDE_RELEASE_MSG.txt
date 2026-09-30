@@ -1,31 +1,20 @@
-release: v1.6.2 yangilanishni yuklab olishdagi 404 tuzatildi
+release: v1.7.0 AI bo'limi qo'shildi
 
-Dastur yangi versiyani topardi, lekin yuklab olishda "HTTP Error 404"
-berardi - garchi reliz joyida turgan bo'lsa ham.
-
-Nima bo'lgan
-
-- Server yangilanish faylini GitHub'ning asset API'si orqali uzatadi. U
-  tokensiz soatiga 60 ta so'rovga cheklangan, barcha mijozlar esa bitta
-  server manzilidan keladi - shuning uchun chegara tez tugaydi.
-- Chegara tugagach GitHub so'rovni rad etadi, server esa buni xatoga
-  aylantirib dasturga qaytaradi.
-- Reliz ommaviy, ya'ni faylning o'zi GitHub havolasidan bemalol
-  yuklanardi. Shunchaki hech kim u yerga murojaat qilmasdi.
+Desktop ilovaga yangi AI bo'limi qo'shildi. U hozircha sinov bosqichida.
 
 Nima o'zgardi
 
-- Dastur endi server javobidagi to'g'ridan-to'g'ri havolani zaxira
-  sifatida ishlatadi. Serverdan yuklab bo'lmasa, fayl GitHub'dan olinadi.
-  Oraliq xato ko'rsatilmaydi - foydalanuvchi faqat ikkala yo'l ham
-  yiqilganda xabar oladi.
-- Server ham o'z tomonidan tuzatildi: fayl uzatib bo'lmasa, dasturni
-  to'g'ri havolaga yo'naltiradi. Havola saqlangan relizdan o'qiladi, ya'ni
-  GitHub bizni rad etayotgan paytda unga yana murojaat qilinmaydi.
-- Bekor qilingan yuklash endi xato deb hisoblanmaydi, chunki u
-  foydalanuvchining o'z qarori.
+- Admin menyusida "AI" sahifasi paydo bo'ldi.
+- Sahifa hozircha faqat akbareliboy@gmail.com akkauntida ochiladi.
+  Ro'yxat main_window.py dagi AI_ALLOWED_EMAILS da turadi. Boshqa admin
+  akkauntlarda tugma kulrang va bosilmaydi, sahifaning o'zi esa umuman
+  yaratilmaydi.
+- api_client va database ga Instagram ulanishlari va do'kon qoidalari
+  uchun kerakli chaqiruvlar qo'shildi.
 
-Tekshirildi: v1.6.1 relizi to'liq yuklab olindi (30.1 MB), fayl hajmi va
-SHA-256 tekshiruvidan o'tdi. API testlari 189 passed, desktop 245 passed.
+Versiya 1.7.0 (build 32): version.py, installer.nsi, version_info.txt.
 
-Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Tekshirildi: test_agent_rules va test_instagram_connections - 32 passed,
+main_window xatosiz import bo'ladi.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
