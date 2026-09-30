@@ -3208,9 +3208,10 @@ def save_app_settings(settings, user_id=None):
                 session.merge(row)
 
 
-# A rule the agent has to act on, long enough for a real policy and short enough
-# that one paste cannot fill the model's prompt on its own.
-AGENT_RULE_MAX_CHARS = 2000
+# The shop keeps all its rules in one text, and the whole of it goes into the
+# agent's system prompt. Long enough for a real shop's full set of policies,
+# short enough that one paste cannot crowd the customer's conversation out.
+AGENT_RULE_MAX_CHARS = 20000
 
 
 def list_agent_rules():
@@ -3320,6 +3321,57 @@ def delete_agent_rule(rule_id):
         session.flush()
         session.delete(row)
         return True
+
+
+def get_agent_rules_text():
+    """All of this shop's rules as the one text the rules page edits.
+
+    The page keeps every rule in a single box. Rules written separately by an
+    earlier build are joined in the order the agent reads them, so the owner
+    sees everything the bot is working from and the next save merges them.
+    """
+    return "\n".join(rule["text"] for rule in list_agent_rules() if rule["text"].strip())
+
+
+def save_agent_rules_text(text_value):
+    """Store the rules page's text as this shop's only rule.
+
+    One row is kept and rewritten; any other rows (from the old one-rule-per-card
+    page) are deleted with tombstones, so every device and the server end up
+    with the same single rule. An empty text removes the rules altogether.
+    Returns whether anything changed.
+    """
+    body = (text_value or "").strip()
+    if len(body) > AGENT_RULE_MAX_CHARS:
+        raise ValueError(f"Qoidalar {AGENT_RULE_MAX_CHARS} belgidan uzun bo'lmasligi kerak")
+
+    require_online()
+    with session_scope() as session:
+        rows = session.scalars(select(AgentRule)).all()
+        # The row kept is the oldest, so an id that other devices already hold
+        # stays the one being edited.
+        rows.sort(key=lambda row: (row.created_at or "", row.id))
+        keep = rows[0] if rows and body else None
+        extra = [row for row in rows if row is not keep]
+
+        if keep is not None and not extra and keep.rule_text == body and not keep.priority:
+            return False
+
+        now = _utc_now()
+        for row in extra:
+            session.merge(SyncTombstone(table_name="agent_rules", local_id=row.id, deleted_at=now))
+        session.flush()
+        for row in extra:
+            session.delete(row)
+
+        if body:
+            if keep is None:
+                session.add(AgentRule(rule_text=body, priority=0, updated_at=now))
+            else:
+                keep.rule_text = body
+                keep.priority = 0
+                keep.updated_at = now
+        return bool(body or extra)
 
 
 INSTAGRAM_SETTING_KEYS = (

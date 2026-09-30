@@ -204,6 +204,83 @@ class OfflineGateTest(AgentRuleTestCase):
         """Seeing the rules is not a write, and a shop offline may still look."""
         self.assertEqual(len(db.list_agent_rules()), 1)
 
+    def test_saving_the_rules_text_offline_is_refused(self):
+        with self.assertRaises(db.AppError):
+            db.save_agent_rules_text("Kafolat 12 oy")
+
+
+class RulesTextTest(AgentRuleTestCase):
+    """The rules page keeps every rule in one text, stored as one row."""
+
+    def _tombstones(self):
+        with db.session_scope() as session:
+            return {
+                row.local_id
+                for row in session.scalars(select(db.SyncTombstone)).all()
+                if row.table_name == "agent_rules"
+            }
+
+    def test_saving_into_an_empty_shop_creates_one_rule(self):
+        text = "Yetkazib berish bepul.\nKafolat 6 oy."
+        self.assertTrue(db.save_agent_rules_text(text))
+
+        rules = db.list_agent_rules()
+        self.assertEqual(len(rules), 1)
+        self.assertEqual(rules[0]["text"], text)
+        self.assertEqual(db.get_agent_rules_text(), text)
+
+    def test_saving_again_rewrites_the_same_row(self):
+        db.save_agent_rules_text("Kafolat 6 oy")
+        first_id = db.list_agent_rules()[0]["id"]
+
+        db.save_agent_rules_text("Kafolat 12 oy\nTo'lov karta orqali")
+
+        rules = db.list_agent_rules()
+        self.assertEqual([rule["id"] for rule in rules], [first_id])
+        self.assertEqual(rules[0]["text"], "Kafolat 12 oy\nTo'lov karta orqali")
+
+    def test_unchanged_text_is_not_a_write(self):
+        db.save_agent_rules_text("Kafolat 6 oy")
+        self.assertFalse(db.save_agent_rules_text("  Kafolat 6 oy  "))
+
+    def test_old_separate_rules_are_shown_together(self):
+        db.add_agent_rule("Oddiy qoida", priority=0)
+        db.add_agent_rule("Muhim qoida", priority=10)
+
+        self.assertEqual(db.get_agent_rules_text(), "Muhim qoida\nOddiy qoida")
+
+    def test_saving_merges_old_rules_into_one(self):
+        """The extra rows go, with tombstones, so other devices drop them too."""
+        first = db.add_agent_rule("Kafolat 6 oy")
+        second = db.add_agent_rule("Yetkazib berish bepul", priority=5)
+
+        db.save_agent_rules_text("Kafolat 6 oy\nYetkazib berish bepul")
+
+        rules = db.list_agent_rules()
+        self.assertEqual(len(rules), 1)
+        kept = rules[0]["id"]
+        self.assertIn(kept, {first, second})
+        self.assertEqual(rules[0]["text"], "Kafolat 6 oy\nYetkazib berish bepul")
+        self.assertEqual(rules[0]["priority"], 0)
+        self.assertEqual(self._tombstones(), {first, second} - {kept})
+
+    def test_empty_text_removes_every_rule(self):
+        first = db.add_agent_rule("Kafolat 6 oy")
+        second = db.add_agent_rule("Yetkazib berish bepul")
+
+        self.assertTrue(db.save_agent_rules_text("   "))
+
+        self.assertEqual(db.list_agent_rules(), [])
+        self.assertEqual(self._tombstones(), {first, second})
+
+    def test_empty_text_on_an_empty_shop_changes_nothing(self):
+        self.assertFalse(db.save_agent_rules_text(""))
+
+    def test_overlong_text_is_refused(self):
+        with self.assertRaises(ValueError):
+            db.save_agent_rules_text("x" * (db.AGENT_RULE_MAX_CHARS + 1))
+        self.assertEqual(db.list_agent_rules(), [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,7 +1,7 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLabel, QPushButton,
     QStackedWidget, QTextEdit, QSplitter, QSizePolicy, QGraphicsDropShadowEffect,
-    QLineEdit, QScrollArea, QCheckBox, QApplication, QMessageBox
+    QLineEdit, QScrollArea, QCheckBox, QApplication
 )
 from PyQt6.QtCore import (
     Qt, QSettings, QSize, QTimer, QThread, pyqtSignal,
@@ -319,108 +319,6 @@ class AccountClaimWorker(QThread):
             self.finished_signal.emit("free", "")
         else:
             self.finished_signal.emit("taken", str(owner_email or ""))
-
-
-class RuleCard(QFrame):
-    """One rule, with its own edit and delete buttons.
-
-    The text lives in an editable box rather than behind an "edit" mode: a rule is
-    a sentence somebody will reword often, and making that a two-click affair for
-    no gain is worse than letting the box be typed in directly. Save only becomes
-    active once something actually changed, so the button doubles as the answer to
-    "did my edit register".
-    """
-
-    saveRequested = pyqtSignal(str, str, int)   # (rule_id, text, priority)
-    deleteRequested = pyqtSignal(str, str)      # (rule_id, text)
-
-    def __init__(self, rule, parent=None):
-        super().__init__(parent)
-        own(self)
-        self.rule_id = str(rule.get("id") or "")
-        self._original_text = str(rule.get("text") or "")
-        self._original_priority = int(rule.get("priority") or 0)
-        self._build_ui()
-
-    def _build_ui(self):
-        self.setObjectName("ruleCard")
-        self.setStyleSheet(
-            "#ruleCard{background:#ffffff;border:1px solid %s;border-radius:12px;}" % LINE
-        )
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(14, 12, 14, 12)
-        lay.setSpacing(8)
-
-        self.text_edit = QTextEdit()
-        self.text_edit.setPlainText(self._original_text)
-        self.text_edit.setObjectName("ruleText")
-        self.text_edit.setProperty("i18n_skip", True)
-        self.text_edit.setStyleSheet(
-            "#ruleText{background:transparent;border:none;color:%s;font-size:14px;}" % TEXT
-        )
-        self.text_edit.setFixedHeight(72)
-        self.text_edit.textChanged.connect(self._refresh_dirty)
-        lay.addWidget(self.text_edit)
-
-        row = QHBoxLayout()
-        row.setSpacing(8)
-
-        priority_lbl = label("Muhimlik", size=12, color=MUTED)
-        priority_lbl.setProperty("i18n_skip", True)
-        row.addWidget(priority_lbl)
-
-        self.priority_input = QLineEdit(str(self._original_priority))
-        self.priority_input.setObjectName("rulePriority")
-        self.priority_input.setProperty("i18n_skip", True)
-        self.priority_input.setFixedWidth(56)
-        self.priority_input.setToolTip(
-            "Ikki qoida bir-biriga zid bo'lsa, raqami kattasi ustun turadi."
-        )
-        self.priority_input.setStyleSheet(
-            "#rulePriority{background:%s;border:1px solid %s;border-radius:8px;"
-            "padding:4px 8px;color:%s;font-size:13px;}" % (FIELD, LINE, TEXT)
-        )
-        self.priority_input.textChanged.connect(self._refresh_dirty)
-        row.addWidget(self.priority_input)
-
-        row.addStretch()
-
-        self.save_btn = primary_button("Saqlash", height=32)
-        self.save_btn.setEnabled(False)
-        self.save_btn.clicked.connect(self._emit_save)
-        row.addWidget(self.save_btn)
-
-        self.delete_btn = secondary_button("O'chirish", height=32)
-        self.delete_btn.clicked.connect(
-            lambda: self.deleteRequested.emit(self.rule_id, self._original_text)
-        )
-        row.addWidget(self.delete_btn)
-
-        lay.addLayout(row)
-
-    def _current_priority(self):
-        """The typed priority, or the one it had if what is typed is not a number."""
-        try:
-            return int(self.priority_input.text().strip() or 0)
-        except ValueError:
-            return self._original_priority
-
-    def _refresh_dirty(self):
-        body = self.text_edit.toPlainText().strip()
-        changed = body != self._original_text or self._current_priority() != self._original_priority
-        self.save_btn.setEnabled(bool(body) and changed)
-
-    def _emit_save(self):
-        body = self.text_edit.toPlainText().strip()
-        if not body:
-            return
-        self.saveRequested.emit(self.rule_id, body, self._current_priority())
-
-    def mark_saved(self, text_value, priority):
-        """Take the saved values as the new baseline, so Save goes quiet again."""
-        self._original_text = text_value
-        self._original_priority = priority
-        self._refresh_dirty()
 
 
 class TestConnectionWorker(QThread):
@@ -745,11 +643,11 @@ class AIWidget(QWidget):
         return page
 
     def _build_rules_page(self):
-        """The rules section: what this shop tells its agent, and the editor for it.
+        """The rules section: one text box holding everything the shop tells its agent.
 
-        Rules are looked up by meaning on the server, so the shop can keep adding
-        them for years without the list ever having to be pruned to fit a prompt.
-        That is why there is no cap shown here and no ordering to maintain by hand.
+        The whole text goes into the agent's system prompt, so there is nothing
+        to split into separate rules or order by hand - the owner writes it the
+        way they would explain the shop to a new employee.
         """
         page = QFrame()
         page.setObjectName("aiPage")
@@ -767,49 +665,57 @@ class AIWidget(QWidget):
         hint.setWordWrap(True)
         hint.setText(
             f"<div style='color:{MUTED}; font-size:13px; line-height:150%;'>"
-            "Bu yerga yozganlaringizni bot mijozlarga javob berishda hisobga oladi - "
-            "masalan yetkazib berish shartlari, kafolat muddati, to'lov usullari. "
-            "Bot har savolga mos qoidalarni o'zi topib ishlatadi, shuning uchun "
-            "qancha yozsangiz ham bo'ladi. Javobi qoidalarda ham, mahsulotlar "
-            "orasida ham bo'lmasa, bot bilmasligini ochiq aytadi."
+            "Barcha qoidalarni shu bitta maydonga yozing - masalan yetkazib berish "
+            "shartlari, kafolat muddati, to'lov usullari. Yozilgan matn to'liq holda "
+            "botga beriladi va u mijozlarga shunga qarab javob beradi. Javobi "
+            "qoidalarda ham, mahsulotlar orasida ham bo'lmasa, bot bilmasligini "
+            "ochiq aytadi."
             "</div>"
         )
         hint.setProperty("i18n_skip", True)
         hint.setStyleSheet("background:transparent;border:none;")
         outer.addWidget(hint)
 
-        # The composer for a new rule.
-        add_card = QFrame()
-        add_card.setObjectName("ruleAddCard")
-        add_card.setStyleSheet(
+        rules_card = QFrame()
+        rules_card.setObjectName("ruleAddCard")
+        rules_card.setStyleSheet(
             "#ruleAddCard{background:#ffffff;border:1px solid %s;border-radius:12px;}" % LINE
         )
-        add_lay = QVBoxLayout(add_card)
-        add_lay.setContentsMargins(14, 12, 14, 12)
-        add_lay.setSpacing(8)
+        card_lay = QVBoxLayout(rules_card)
+        card_lay.setContentsMargins(14, 12, 14, 12)
+        card_lay.setSpacing(8)
 
-        self.new_rule_edit = QTextEdit()
-        self.new_rule_edit.setObjectName("ruleText")
-        self.new_rule_edit.setProperty("i18n_skip", True)
-        self.new_rule_edit.setPlaceholderText(
-            "Yangi qoida, masalan: Yetkazib berish Toshkent ichida bepul, 1-2 kun ichida."
+        self.rules_edit = QTextEdit()
+        self.rules_edit.setObjectName("ruleText")
+        self.rules_edit.setProperty("i18n_skip", True)
+        self.rules_edit.setAcceptRichText(False)
+        self.rules_edit.setPlaceholderText(
+            "Masalan:\n"
+            "Yetkazib berish Toshkent ichida bepul, 1-2 kun ichida.\n"
+            "Barcha mahsulotlarga 6 oy kafolat beriladi.\n"
+            "To'lov naqd yoki karta orqali."
         )
-        self.new_rule_edit.setStyleSheet(
+        self.rules_edit.setStyleSheet(
             "#ruleText{background:transparent;border:none;color:%s;font-size:14px;}" % TEXT
         )
-        self.new_rule_edit.setFixedHeight(72)
-        self.new_rule_edit.textChanged.connect(self._refresh_add_button)
-        add_lay.addWidget(self.new_rule_edit)
+        self.rules_edit.textChanged.connect(self._refresh_rules_save_button)
+        card_lay.addWidget(self.rules_edit, 1)
 
-        add_row = QHBoxLayout()
-        add_row.setSpacing(8)
-        add_row.addStretch()
-        self.rule_add_btn = primary_button("Qo'shish", height=34)
-        self.rule_add_btn.setEnabled(False)
-        self.rule_add_btn.clicked.connect(self._add_rule)
-        add_row.addWidget(self.rule_add_btn)
-        add_lay.addLayout(add_row)
-        outer.addWidget(add_card)
+        save_row = QHBoxLayout()
+        save_row.setSpacing(8)
+        self.rules_count_lbl = QLabel("")
+        self.rules_count_lbl.setProperty("i18n_skip", True)
+        self.rules_count_lbl.setStyleSheet(
+            f"color:{MUTED};font-size:12px;background:transparent;border:none;"
+        )
+        save_row.addWidget(self.rules_count_lbl)
+        save_row.addStretch()
+        self.rules_save_btn = primary_button("Saqlash", height=34)
+        self.rules_save_btn.setEnabled(False)
+        self.rules_save_btn.clicked.connect(self._save_rules)
+        save_row.addWidget(self.rules_save_btn)
+        card_lay.addLayout(save_row)
+        outer.addWidget(rules_card, 1)
 
         self.rules_status_lbl = QLabel("")
         self.rules_status_lbl.setProperty("i18n_skip", True)
@@ -818,114 +724,38 @@ class AIWidget(QWidget):
         )
         outer.addWidget(self.rules_status_lbl)
 
-        # The stored rules, in their own scroll area so a long list does not push
-        # the composer off the page.
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setStyleSheet("background:transparent;border:none;")
-        self.rules_container = QWidget()
-        self.rules_container.setStyleSheet("background:transparent;")
-        self.rules_list_lay = QVBoxLayout(self.rules_container)
-        self.rules_list_lay.setContentsMargins(0, 0, 0, 0)
-        self.rules_list_lay.setSpacing(10)
-        self.rules_list_lay.addStretch()
-        scroll.setWidget(self.rules_container)
-        outer.addWidget(scroll, 1)
-
+        self._saved_rules_text = ""
         self._reload_rules()
         return page
 
     # ------------------------------------------------------------------ rules
 
-    def _refresh_add_button(self):
-        self.rule_add_btn.setEnabled(bool(self.new_rule_edit.toPlainText().strip()))
+    def _refresh_rules_save_button(self):
+        current = self.rules_edit.toPlainText().strip()
+        self.rules_save_btn.setEnabled(current != self._saved_rules_text)
+        self.rules_count_lbl.setText(f"{len(current)} / {db.AGENT_RULE_MAX_CHARS}")
 
     def _reload_rules(self):
-        """Rebuild the list from the database.
-
-        A full rebuild rather than patching one card: the list is short, the cost
-        is invisible, and it keeps the order on screen exactly what the database
-        says it is after a priority change.
-        """
-        while self.rules_list_lay.count():
-            item = self.rules_list_lay.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-
+        """Put the stored rules into the box, replacing whatever is typed there."""
         try:
-            rules = db.list_agent_rules()
+            stored = db.get_agent_rules_text()
         except Exception:
-            rules = []
+            stored = ""
             self._show_rules_status("Qoidalarni o'qib bo'lmadi.", success=False)
+        self._saved_rules_text = stored.strip()
+        self.rules_edit.setPlainText(stored)
+        self._refresh_rules_save_button()
 
-        if not rules:
-            empty = label("Hali qoida qo'shilmagan.", size=13, color=MUTED)
-            empty.setProperty("i18n_skip", True)
-            self.rules_list_lay.addWidget(empty)
-
-        for rule in rules:
-            card = RuleCard(rule)
-            card.saveRequested.connect(self._save_rule)
-            card.deleteRequested.connect(self._delete_rule)
-            self.rules_list_lay.addWidget(card)
-
-        self.rules_list_lay.addStretch()
-
-    def _add_rule(self):
-        body = self.new_rule_edit.toPlainText().strip()
-        if not body:
-            return
+    def _save_rules(self):
+        body = self.rules_edit.toPlainText().strip()
         try:
-            db.add_agent_rule(body)
+            db.save_agent_rules_text(body)
         except Exception as exc:
-            self._show_rules_status(str(exc) or "Qoida qo'shilmadi.", success=False)
+            self._show_rules_status(str(exc) or "Qoidalar saqlanmadi.", success=False)
             return
-        self.new_rule_edit.clear()
-        self._reload_rules()
-        self._show_rules_status("Qoida qo'shildi.", success=True)
-
-    def _save_rule(self, rule_id, text_value, priority):
-        try:
-            found = db.update_agent_rule(rule_id, text_value=text_value, priority=priority)
-        except Exception as exc:
-            self._show_rules_status(str(exc) or "Qoida saqlanmadi.", success=False)
-            return
-        if not found:
-            # Deleted on another device while this one had it open.
-            self._reload_rules()
-            self._show_rules_status("Bu qoida topilmadi - u o'chirilgan bo'lishi mumkin.", success=False)
-            return
-        # Priority decides the order, so a changed one has to move the card.
-        self._reload_rules()
-        self._show_rules_status("Qoida saqlandi.", success=True)
-
-    def _delete_rule(self, rule_id, rule_text):
-        """Remove a rule, once the owner has confirmed which one."""
-        preview = (rule_text or "").strip()
-        if len(preview) > 120:
-            preview = preview[:120] + "..."
-        confirmed = QMessageBox.question(
-            self,
-            "Qoidani o'chirish",
-            f"Bu qoida butunlay o'chiriladi:\n\n{preview}\n\nDavom etamizmi?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if confirmed != QMessageBox.StandardButton.Yes:
-            return
-
-        try:
-            found = db.delete_agent_rule(rule_id)
-        except Exception as exc:
-            self._show_rules_status(str(exc) or "Qoida o'chirilmadi.", success=False)
-            return
-        self._reload_rules()
-        if found:
-            self._show_rules_status("Qoida o'chirildi.", success=True)
-        else:
-            self._show_rules_status("Bu qoida allaqachon o'chirilgan.", success=True)
+        self._saved_rules_text = body
+        self._refresh_rules_save_button()
+        self._show_rules_status("Qoidalar saqlandi.", success=True)
 
     def _show_rules_status(self, text, success=True):
         self.rules_status_lbl.setText(text)
