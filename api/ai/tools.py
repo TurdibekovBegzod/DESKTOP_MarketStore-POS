@@ -221,7 +221,7 @@ def _load_specs(session, target_val: str, product_ids: list[str], target_type: s
         query = """
             SELECT a.data ->> 'product_id', f.data ->> 'name', a.data ->> 'value'
             FROM user_records AS a
-            JOIN users AS u ON u.id = r.user_id
+            JOIN users AS u ON u.id = a.user_id
             JOIN user_records AS f
               ON f.user_id = a.user_id
              AND f.table_name = 'product_template_fields'

@@ -97,10 +97,18 @@ def run_tool(part: dict, tools: dict, used: dict | None = None) -> dict:
         used[name] = used.get(name, 0) + 1
 
     try:
-        return handler(**(call.get("args") or {}))
+        result = handler(**(call.get("args") or {}))
     except Exception as exc:
         logger.exception("tool %s failed", name)
         return {"error": str(exc)}
+
+    found = result.get("found") if isinstance(result, dict) else None
+    count = result.get("count") if isinstance(result, dict) else None
+    logger.info(
+        "tool %s called args=%r found=%s count=%s",
+        name, call.get("args") or {}, found, count,
+    )
+    return result
 
 
 def generate(
