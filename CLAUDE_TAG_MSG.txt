@@ -1,9 +1,10 @@
-MarketStore POS v1.7.0
+MarketStore POS v1.7.1
 
-Yangi AI bo'limi qo'shildi.
+AI bo'limidagi qoidalar endi bitta maydonda yoziladi.
 
-- Chap menyuda "AI" bo'limi paydo bo'ldi. U hozircha sinov bosqichida,
-  shuning uchun faqat tanlangan akkauntda ochiladi. Boshqa akkauntlarda
-  tugma ko'rinadi, lekin bosilmaydi.
-- Instagram ulanishlari va do'kon qoidalari bilan ishlash uchun ichki
-  qo'llab-quvvatlash qo'shildi.
+- Qoidalar sahifasida har bir qoida uchun alohida kartochka o'rniga
+  bitta katta matn maydoni bor. Hamma qoidalarni shu yerga yozib,
+  "Saqlash" tugmasini bosish kifoya.
+- Oldin alohida yozilgan qoidalar avtomatik ravishda shu maydonga
+  birlashtiriladi.
+- Yozilgan matn to'liq holda botga beriladi.

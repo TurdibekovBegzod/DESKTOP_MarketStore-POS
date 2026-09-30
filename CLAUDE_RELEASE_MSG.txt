@@ -1,20 +1,24 @@
-release: v1.7.0 AI bo'limi qo'shildi
+release: v1.7.1 qoidalar bitta matn maydonida
 
-Desktop ilovaga yangi AI bo'limi qo'shildi. U hozircha sinov bosqichida.
+AI bo'limidagi qoidalar sahifasi soddalashtirildi.
 
 Nima o'zgardi
 
-- Admin menyusida "AI" sahifasi paydo bo'ldi.
-- Sahifa hozircha faqat akbareliboy@gmail.com akkauntida ochiladi.
-  Ro'yxat main_window.py dagi AI_ALLOWED_EMAILS da turadi. Boshqa admin
-  akkauntlarda tugma kulrang va bosilmaydi, sahifaning o'zi esa umuman
-  yaratilmaydi.
-- api_client va database ga Instagram ulanishlari va do'kon qoidalari
-  uchun kerakli chaqiruvlar qo'shildi.
+- Har bir qoida uchun alohida kartochka olib tashlandi. Endi bitta katta
+  maydon bor, hamma qoidalar shu yerda turadi va bitta qator sifatida
+  saqlanadi.
+- Server qoidalarni har xabarda account_rules dan o'qib system promptga
+  qo'shadi, shuning uchun saqlangan matn sync o'tgach keyingi xabardan
+  ishlaydi.
+- Eski alohida qoidalar sahifa ochilganda birlashib ko'rinadi, saqlanganda
+  bitta qatorga aylanadi.
+- Uzunlik chegarasi 20000 belgi.
 
-Versiya 1.7.0 (build 32): version.py, installer.nsi, version_info.txt.
+Versiya 1.7.1 (build 33): version.py, installer.nsi, version_info.txt.
 
-Tekshirildi: test_agent_rules va test_instagram_connections - 32 passed,
-main_window xatosiz import bo'ladi.
+Tekshirildi: test_agent_rules va test_instagram_connections - 41 passed.
+To'liq desktop to'plami 285 passed; bitta migratsiya testi
+(test_return_timestamp_migration_backfills_existing_returns) faqat to'liq
+to'plamda yiqiladi, alohida va oldingi commitda o'tadi.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
