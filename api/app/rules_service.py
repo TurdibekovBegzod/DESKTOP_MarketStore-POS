@@ -230,6 +230,17 @@ def delete_rule(user_uid: str, local_id: str) -> bool:
         return False
 
 
+def table_is_missing(exc: Exception) -> bool:
+    """Whether this failure is "account_rules does not exist yet".
+
+    The table is created by the alembic run in the api container's CMD, so on a
+    release that adds a migration there is a window where the embedder is up and
+    the table is not. That is a normal part of a deploy, not a fault, and it is
+    worth one quiet line rather than a traceback every few seconds.
+    """
+    return "UndefinedTable" in type(exc).__name__ or "account_rules" in str(exc) and "does not exist" in str(exc)
+
+
 def pending_rules(limit: int = 200) -> list[tuple[int, str]]:
     """Rules waiting for a vector, as (id, raw_text).
 
@@ -250,8 +261,13 @@ def pending_rules(limit: int = 200) -> list[tuple[int, str]]:
                 ),
                 {"limit": max(1, int(limit))},
             ).all()
-    except Exception:
-        logger.exception("Failed to list rules awaiting embedding")
+    except Exception as exc:
+        if table_is_missing(exc):
+            # Mid-deploy: the api container has not run alembic yet. The next
+            # pass picks the work up, so this needs a line, not a traceback.
+            logger.info("account_rules is not there yet; waiting for the migration")
+        else:
+            logger.exception("Failed to list rules awaiting embedding")
         return []
     return [(row[0], row[1]) for row in rows]
 

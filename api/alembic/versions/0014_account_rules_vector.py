@@ -74,10 +74,9 @@ def upgrade() -> None:
         # sha256 of the embedded text. Compared instead of the text itself so a
         # sync over thousands of rules does not ship or compare long strings.
         sa.Column("text_hash", sa.String(length=64), nullable=False),
-        # Null until the embedder has run. A rule with no vector is invisible to
-        # search but already visible in the app - saving must not wait on a
-        # model, and a missing vector is a retry, not a lost rule.
-        sa.Column("embedding", sa.dialects.postgresql.ARRAY(sa.Float()), nullable=True),
+        # The vector itself is added by the ALTER below: pgvector's type is not
+        # one SQLAlchemy knows without the pgvector package installed, and this
+        # image does not carry it - only the embedder's does.
         sa.Column("model", sa.String(length=80), nullable=True),
         # Which rule wins when two of them say opposite things. Similarity has
         # no opinion about that, so the shop states it.
@@ -93,10 +92,14 @@ def upgrade() -> None:
         sa.UniqueConstraint("user_uid", "local_id", name="uq_account_rules_uid_local"),
     )
 
-    # ARRAY above is only what SQLAlchemy's DDL can express without the pgvector
-    # Python package being importable at migration time. The column has to be a
-    # real vector for the distance operators and HNSW to work at all.
-    op.execute(f"ALTER TABLE account_rules ALTER COLUMN embedding TYPE vector({EMBEDDING_DIM}) USING NULL")
+    # Raw DDL, because the column's type comes from the extension rather than
+    # from SQLAlchemy: expressing it through sa.Column would mean importing
+    # pgvector here, and the api image installs only what it needs to serve.
+    #
+    # Null until the embedder has run over the row. That is a normal state, not
+    # a failure - saving a rule must never wait on a model - and it means a new
+    # rule is in the app immediately while being briefly unsearchable.
+    op.execute(f"ALTER TABLE account_rules ADD COLUMN embedding vector({EMBEDDING_DIM})")
 
     # The account filter, and the reason filtered search stays correct - see the
     # module docstring. This is the index the planner is meant to choose while an

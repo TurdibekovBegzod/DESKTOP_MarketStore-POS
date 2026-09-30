@@ -172,6 +172,12 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      # Waits for the api, not just the database: account_rules is created by
+      # the alembic run in the api container's CMD, and an embedder that starts
+      # first polls a table that does not exist yet and fills the log with
+      # UndefinedTable errors on every release that adds a migration.
+      api:
+        condition: service_healthy
 
   logs:
     # Copies every container's output into a monthly archive, so the control
