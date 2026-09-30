@@ -15,6 +15,10 @@ ALLOWED_SYNC_TABLES = frozenset({
     "sale_returns", "customer_debt_movements", "activity_logs", "notification_reads",
     "stock_movements", "inventory_check_sessions", "inventory_check_items",
     "finance_manual_movements",
+    # What each shop tells its own Instagram agent. Ordinary synced rows, so a
+    # rule written on the till appears on every other device; the searchable
+    # copy with its embedding is derived from these - see rules_service.
+    "agent_rules",
 })
 
 

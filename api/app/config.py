@@ -59,7 +59,10 @@ class Settings(BaseSettings):
     # now; per-account routing needs the Instagram id to map to a user.
     shop_account_email: str | None = None
     gemini_api_key: str | None = None
-    gemini_model: str = "gemini-3.1-flash-lite"
+    # The one model this project uses. It was left behind at an older default
+    # while docker-compose passed 3.7, so a test and a deployed container
+    # disagreed about which model they were exercising.
+    gemini_model: str = "gemini-3.7-flash"
     ngrok_domain: str | None = None
     trusted_hosts: str = "localhost,127.0.0.1,testserver,api"
     # Bearer token the metrics scraper must present. The tunnel exposes every

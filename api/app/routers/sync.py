@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
@@ -9,6 +10,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
+from app import rules_service
 from app.database import SessionLocal, get_db
 from app.deps import get_current_user
 from app.events import broker
@@ -31,6 +33,8 @@ from app.schemas import (
 )
 from app.security import decode_access_token
 
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/sync", tags=["sync"])
 
@@ -187,6 +191,60 @@ def _instagram_claim_conflict(user: User, record: RecordIn) -> str | None:
     )
 
 
+def _mirror_agent_rule(user: User, record: RecordIn) -> None:
+    """Keep ``account_rules`` in step with an agent_rules row that just synced.
+
+    The rule travels through sync like any other row, so every device already
+    agrees about it. What sync cannot do is make it searchable: that needs a
+    vector, which needs a table the agent can run a distance query against.
+
+    A deletion removes the row outright rather than flagging it. The tombstone
+    that tells the shop's other devices stays in ``user_records`` where sync
+    handles it; this table then holds only rules that still exist, which is both
+    what the owner asked for and one less thing a search has to filter out.
+
+    Never raises: the rule is already stored and shared at this point. Failing
+    the push over the searchable copy would lose a save the user watched succeed,
+    so a failure here leaves the rule unsearchable and is logged.
+    """
+    if record.table_name != "agent_rules":
+        return
+
+    try:
+        if record.deleted_at is not None:
+            rules_service.delete_rule(user.uid, record.local_id)
+            return
+
+        data = record.data or {}
+        # rule_text is the column the desktop app syncs; text is accepted as well
+        # so a rule written by hand or by an older build is not silently dropped.
+        body = str(data.get("rule_text") or data.get("text") or "").strip()
+        if not body:
+            # An empty rule is how the app clears one without deleting it; there
+            # is nothing to embed and nothing worth searching.
+            rules_service.delete_rule(user.uid, record.local_id)
+            return
+
+        try:
+            priority = int(data.get("priority") or 0)
+        except (TypeError, ValueError):
+            priority = 0
+
+        rules_service.upsert_rule(
+            user_id=user.id,
+            user_uid=user.uid,
+            local_id=record.local_id,
+            raw_text=body,
+            priority=priority,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to mirror agent rule %s for account %s into the searchable table",
+            record.local_id,
+            user.uid,
+        )
+
+
 def _upsert_record(db: Session, user: User, record: RecordIn, change_seq: int) -> bool:
     """Store one row. Returns False when the sender was working from a stale copy.
 
@@ -286,6 +344,7 @@ def push(payload: PushRequest, current_user: User = Depends(get_current_user), d
             continue
         if _upsert_record(db, current_user, record, generation):
             accepted.append(record)
+            _mirror_agent_rule(current_user, record)
             continue
         # Partial success rather than a 409: the rest of the batch is perfectly
         # good, and refusing all of it would turn one stale row into a failed
@@ -356,6 +415,7 @@ def upsert_table_rows(
             continue
         _upsert_record(db, current_user, record, generation)
         accepted.append(record)
+        _mirror_agent_rule(current_user, record)
     batch = SyncBatch(user_id=current_user.id, user_uid=current_user.uid, direction="push", records_count=len(accepted), note=f"table:{table_name}")
     db.add(batch)
     event = _describe_generation(db, current_user, x_device_key, {table_name}, generation)

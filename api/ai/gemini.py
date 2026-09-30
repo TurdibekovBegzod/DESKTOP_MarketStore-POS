@@ -15,8 +15,17 @@ logger = logging.getLogger(__name__)
 
 API_ROOT = "https://generativelanguage.googleapis.com/v1beta/models"
 
-# How many times the model may ask for tools before it has to answer.
-MAX_TOOL_ROUNDS = 5
+# How many times each tool may be called in one reply. Per tool rather than one
+# shared budget: a customer asking about a product *and* two shop policies needs
+# several different tools, and a single pooled limit would let the product search
+# spend the whole allowance before the rules were ever looked up.
+MAX_CALLS_PER_TOOL = 5
+
+# How many request/response rounds the loop may take before the model has to
+# answer. Derived, not tuned: with a per-tool cap the real ceiling is the number
+# of tools, and this only has to be generous enough not to bind first. The +1
+# leaves a round for the answer itself.
+MAX_TOOL_ROUNDS = 12
 
 
 class GeminiNotConfiguredError(RuntimeError):
@@ -55,13 +64,19 @@ def extract_function_calls(payload: dict) -> list[dict]:
     return []
 
 
-def run_tool(part: dict, tools: dict) -> dict:
+def run_tool(part: dict, tools: dict, used: dict | None = None) -> dict:
     """One tool call's result, as the model should see it.
 
     Takes the whole part and reads the call out of it, so callers can keep
     passing the parts around untouched.
 
-    Failures are reported rather than raised: the model can apologise or try a
+    ``used`` counts calls per tool name across this reply. Once a tool has been
+    called MAX_CALLS_PER_TOOL times it is refused, and the refusal is returned to
+    the model as a result rather than raised - being told "you have used this one
+    up, answer with what you have" is something it can act on, where silence
+    would leave it retrying until the round limit ran out.
+
+    Other failures are reported the same way: the model can apologise or try a
     different tool, where an exception would cost the customer the whole reply.
     """
     call = part.get("functionCall") or part
@@ -69,6 +84,17 @@ def run_tool(part: dict, tools: dict) -> dict:
     handler = tools.get(name)
     if handler is None:
         return {"error": f"unknown tool: {name}"}
+
+    if used is not None:
+        if used.get(name, 0) >= MAX_CALLS_PER_TOOL:
+            logger.warning("tool %s hit its %s-call limit", name, MAX_CALLS_PER_TOOL)
+            return {
+                "error": (
+                    f"'{name}' bu javobda {MAX_CALLS_PER_TOOL} marta ishlatildi, "
+                    "boshqa chaqirilmaydi. Shu paytgacha topilgan ma'lumot bilan javob ber."
+                )
+            }
+        used[name] = used.get(name, 0) + 1
 
     try:
         return handler(**(call.get("args") or {}))
@@ -115,6 +141,11 @@ def generate(
 
     payload: dict = {}
 
+    # Calls made per tool name, for the per-tool limit in run_tool. One dict for
+    # the whole reply: the budget is per tool, not per round, so a tool called
+    # once in each of five rounds is just as spent as one called five times over.
+    used_calls: dict[str, int] = {}
+
     # Bounded on purpose: a model that keeps asking for tools would otherwise
     # hold the customer's chat open until the caller's own deadline killed it.
     for _ in range(MAX_TOOL_ROUNDS):
@@ -142,7 +173,7 @@ def generate(
                     {
                         "functionResponse": {
                             "name": (part.get("functionCall") or {}).get("name"),
-                            "response": run_tool(part, tools or {}),
+                            "response": run_tool(part, tools or {}, used_calls),
                         }
                     }
                     for part in calls
