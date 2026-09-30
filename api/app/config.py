@@ -46,12 +46,6 @@ class Settings(BaseSettings):
     # Kill switch. Off means messages are still received and logged, just not
     # answered - the way to stop the bot without touching the subscription.
     instagram_auto_reply: bool = True
-    # Shared secret for POST /ai/reply, the endpoint chat platforms such as
-    # Manychat call. Unset means the endpoint refuses every request.
-    assistant_api_key: str | None = None
-    # Sent when the model has nothing to say or is too slow. Never empty: the
-    # platform would otherwise deliver a blank message to the customer.
-    assistant_fallback_reply: str = "Rahmat! Operatorimiz tez orada javob beradi."
     # Conversation memory for the DM agent. Redis db 3; 0-2 are the Celery
     # broker, its result backend and the sync event bus.
     conversation_redis_url: str | None = "redis://localhost:6379/3"

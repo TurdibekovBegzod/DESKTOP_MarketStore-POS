@@ -181,8 +181,7 @@ def reply_in_conversation(
     """Answer one DM with the customer's own history in front of the model.
 
     The history is loaded and stored around the call rather than inside
-    ``reply_to`` so that the stateless path - the one chat platforms call - is
-    left exactly as it was.
+    ``reply_to`` so that the stateless path stays exactly as it was.
     """
     message = (text or "").strip()
     if not message:
