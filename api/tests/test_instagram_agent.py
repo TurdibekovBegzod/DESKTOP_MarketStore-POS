@@ -26,7 +26,9 @@ class ReplyToTest(unittest.TestCase):
         with patch.object(agent, "generate", return_value="Assalomu alaykum!") as generate:
             self.assertEqual(agent.reply_to("Salom"), "Assalomu alaykum!")
         self.assertEqual(generate.call_args.args[0], "Salom")
-        self.assertIs(generate.call_args.kwargs["system_instruction"], agent.SYSTEM_PROMPT)
+        self.assertTrue(
+            generate.call_args.kwargs["system_instruction"].startswith(agent.SYSTEM_PROMPT)
+        )
 
     def test_a_photo_only_dm_is_not_sent_to_the_model_at_all(self):
         with patch.object(agent, "generate") as generate:

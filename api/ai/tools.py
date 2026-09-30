@@ -567,14 +567,16 @@ def search_shop_rules(query: str = "") -> dict:
 
 
 # Name -> handler, as ai.gemini.generate expects it.
+#
+# search_shop_rules is deliberately left out: the shop's rules now go into the
+# system prompt whole (see ai.agent.system_prompt_for). The handler and its
+# declaration stay above so the tool can be switched back on by adding it here.
 TOOLS = {
     "search_products": search_products,
     "get_product_specs": get_product_specs,
-    "search_shop_rules": search_shop_rules,
 }
 
 DECLARATIONS = [
     SEARCH_PRODUCTS_DECLARATION,
     GET_PRODUCT_SPECS_DECLARATION,
-    SEARCH_SHOP_RULES_DECLARATION,
 ]

@@ -1,8 +1,9 @@
 """Storing and retrieving one account's agent rules.
 
 A rule is a sentence the shop wants its bot to know - delivery terms, warranty,
-payment, anything. Each shop owns its own set, the set grows over the years, and
-the agent is given only the few rules nearest to what the customer just asked.
+payment, anything. Each shop owns its own set, and the agent is given all of it
+in its system prompt (``list_rules`` + ``format_all_for_prompt``). The similarity
+search below is kept for when a set outgrows the prompt; nothing calls it today.
 
 Three things in here are load-bearing:
 
@@ -132,6 +133,45 @@ def search_rules(user_uid: str, question: str, limit: int = MAX_RULES) -> list[A
     return [
         AccountRule(local_id=row[0], text=row[1], priority=row[2], distance=float(row[3]))
         for row in rows
+    ]
+
+
+def list_rules(user_uid: str) -> list[AccountRule]:
+    """Every rule this account has stored, highest priority first.
+
+    This is what the agent's system prompt is built from: the whole set, not a
+    search over it. No embedding is needed, so a rule the embedder has not
+    reached yet is included all the same - the shop wrote it, so the bot knows it
+    from the next message on.
+
+    Never raises, like ``search_rules``: a failed lookup degrades to "no rules"
+    rather than costing the customer a reply.
+    """
+    account = str(user_uid or "").strip()
+    if not account:
+        return []
+
+    try:
+        with SessionLocal() as session:
+            rows = session.execute(
+                text(
+                    """
+                    SELECT local_id, raw_text, priority
+                    FROM account_rules
+                    WHERE user_uid = :user_uid
+                    ORDER BY priority DESC, created_at ASC, id ASC
+                    """
+                ),
+                {"user_uid": account},
+            ).all()
+    except Exception:
+        logger.exception("Rule listing failed for account %s", account)
+        return []
+
+    return [
+        AccountRule(local_id=row[0], text=row[1], priority=row[2], distance=0.0)
+        for row in rows
+        if (row[1] or "").strip()
     ]
 
 
@@ -331,4 +371,25 @@ def format_for_prompt(rules: list[AccountRule]) -> str:
     return (
         "DO'KON QOIDALARI (bazadagi eng o'xshash qoidalar, saralanmagan - "
         f"faqat savolga javob beradiganini ishlat):\n{lines}"
+    )
+
+
+def format_all_for_prompt(rules: list[AccountRule]) -> str:
+    """The account's whole rule set as the system prompt's closing block.
+
+    Unlike ``format_for_prompt`` this is the complete set, so the header says
+    so: every rule here is the shop's own and binding, and a question none of
+    them covers really has no answer from the shop. Order is kept as given -
+    ``list_rules`` already puts higher priority first.
+    """
+    lines = "\n".join(f"- {rule.text.strip()}" for rule in rules if (rule.text or "").strip())
+    if not lines:
+        return (
+            "DO'KON QOIDALARI: do'kon hali birorta ham qoida yozmagan. Do'kon "
+            "sharti so'ralsa, \"bu bo'yicha ma'lumotim yo'q\" de va operatorga "
+            "yo'naltir."
+        )
+    return (
+        "DO'KON QOIDALARI (do'kon egasi yozgan barcha qoidalar, muhimi "
+        f"yuqorida):\n{lines}"
     )
