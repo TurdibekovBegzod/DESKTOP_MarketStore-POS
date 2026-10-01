@@ -405,14 +405,14 @@ class PerToolCallLimitTest(unittest.TestCase):
 
     def test_a_tool_runs_up_to_its_limit_then_is_refused(self):
         calls = []
-        tools = {"get_product_specs": lambda **kw: calls.append(kw) or {"found": True}}
+        tools = {"search_products": lambda **kw: calls.append(kw) or {"found": True}}
         used = {}
 
         for _ in range(self.gemini.MAX_CALLS_PER_TOOL):
-            result = self.gemini.run_tool(self._part("get_product_specs", {"name": "x"}), tools, used)
+            result = self.gemini.run_tool(self._part("search_products", {"name": "x"}), tools, used)
             self.assertNotIn("error", result)
 
-        refused = self.gemini.run_tool(self._part("get_product_specs", {"name": "x"}), tools, used)
+        refused = self.gemini.run_tool(self._part("search_products", {"name": "x"}), tools, used)
         self.assertIn("error", refused)
         self.assertEqual(len(calls), self.gemini.MAX_CALLS_PER_TOOL)
 
@@ -420,22 +420,22 @@ class PerToolCallLimitTest(unittest.TestCase):
         """The whole point of a per-tool budget rather than a pooled one."""
         tools = {
             "search_products": lambda **kw: {"products": []},
-            "get_product_specs": lambda **kw: {"found": True},
+            "other_tool": lambda **kw: {"found": True},
         }
         used = {"search_products": self.gemini.MAX_CALLS_PER_TOOL}
 
         blocked = self.gemini.run_tool(self._part("search_products", {"name": "x"}), tools, used)
-        allowed = self.gemini.run_tool(self._part("get_product_specs", {"name": "x"}), tools, used)
+        allowed = self.gemini.run_tool(self._part("other_tool", {"name": "x"}), tools, used)
 
         self.assertIn("error", blocked)
         self.assertNotIn("error", allowed)
 
     def test_the_refusal_tells_the_model_to_answer(self):
         """A bare error would have it retrying until the round limit ran out."""
-        tools = {"get_product_specs": lambda **kw: {"found": True}}
-        used = {"get_product_specs": self.gemini.MAX_CALLS_PER_TOOL}
+        tools = {"search_products": lambda **kw: {"found": True}}
+        used = {"search_products": self.gemini.MAX_CALLS_PER_TOOL}
 
-        refused = self.gemini.run_tool(self._part("get_product_specs", {"name": "x"}), tools, used)
+        refused = self.gemini.run_tool(self._part("search_products", {"name": "x"}), tools, used)
         self.assertIn("javob ber", refused["error"])
 
     def test_rounds_leave_room_for_every_tool(self):
@@ -450,9 +450,9 @@ class PerToolCallLimitTest(unittest.TestCase):
 
     def test_counting_is_skipped_when_no_ledger_is_passed(self):
         """Callers outside the loop (and older tests) must keep working."""
-        tools = {"get_product_specs": lambda **kw: {"found": True}}
+        tools = {"search_products": lambda **kw: {"found": True}}
         for _ in range(20):
-            result = self.gemini.run_tool(self._part("get_product_specs", {"name": "x"}), tools)
+            result = self.gemini.run_tool(self._part("search_products", {"name": "x"}), tools)
             self.assertNotIn("error", result)
 
 

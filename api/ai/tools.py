@@ -56,72 +56,41 @@ def _resolve_target() -> tuple[str, str, dict]:
         return "email", email, {"email": email}
     return "", "", {}
 
-# The reply is three sentences on Instagram; more rows than this only cost
+# The reply is three sentences on Instagram; more products than this only cost
 # tokens and give the model room to pad the answer.
 MAX_RESULTS = 8
 
+# Rows read before identical ones are merged. A shop keeps one row per unit, so
+# eight rows were often one laptop five times over; reading more and merging
+# keeps the answer at MAX_RESULTS distinct products.
+MAX_ROWS = 40
+
 # What a product row may show a customer. Everything else - ids, cost, supplier,
 # the process_* columns - is either internal or useless to them, and a model
-# handed an id will sooner or later paste it into a DM.
-VISIBLE_FIELDS = ("name", "price", "currency", "stock", "unit", "category")
-
-
-GET_PRODUCT_SPECS_DECLARATION = {
-    "name": "get_product_specs",
-    "description": (
-        "Bitta mahsulotning texnik xarakteristikalarini qaytaradi (masalan "
-        "protsessor, xotira, ekran, videokarta) - qaysi maydonlar borligi "
-        "mahsulot turiga qarab farq qiladi. Mijoz aniq bir model haqida "
-        "'xarakteristikasi qanday', 'xotirasi qancha' kabi savol berganda, "
-        "avval search_products bilan topilgan nomni shu yerga ber."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "name": {
-                "type": "string",
-                "description": "Mahsulotning aniq nomi, search_products natijasidagi 'name' bilan bir xil.",
-            },
-        },
-        "required": ["name"],
-    },
-}
+# handed an id will sooner or later paste it into a DM. Only name, price and
+# stock are always present; the rest only when they say something.
+VISIBLE_FIELDS = ("name", "price", "stock", "unit", "category", "specs")
 
 
 SEARCH_PRODUCTS_DECLARATION = {
     "name": "search_products",
     "description": (
-        "Do'kon omboridagi mahsulotlarni qidiradi. Nom, kategoriya va narx "
-        "oralig'i bo'yicha filtrlash mumkin - bir nechtasini birga ishlatsa "
-        "ham bo'ladi. Narx, qoldiq, kategoriya va (mavjud bo'lsa) 'specs' "
-        "maydonida texnik xarakteristikalarni (masalan CPU, RAM) qaytaradi - "
-        "ular bor mahsulotlar uchun bularni ham darhol ayt, alohida so'ralishini "
-        "kutma. Mijoz mahsulot, narx yoki mavjudlik haqida so'raganda ishlat. "
-        "Mijoz dollar yoki yevroda gapirsa, currency ni 'USD' yoki 'EUR' qilib "
-        "ber - kurs o'zi hisoblanadi."
+        "Do'kon mahsulotlarini qidiradi. Har mahsulot: name, price (so'm), "
+        "stock, bo'lsa specs (CPU, RAM ...), unit, category."
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "name": {
-                "type": "string",
-                "description": "Mahsulot nomi yoki uning bir qismi. Bilmasang bo'sh qoldir.",
-            },
-            "category": {
-                "type": "string",
-                "description": "Kategoriya nomi, masalan 'noutbuk', 'telefon'.",
-            },
-            "barcode": {"type": "string", "description": "Shtrix-kod, aniq moslik."},
-            "price_min": {"type": "number", "description": "Eng past narx."},
-            "price_max": {"type": "number", "description": "Eng yuqori narx."},
+            "name": {"type": "string", "description": "Nom yoki uning bir qismi."},
+            "category": {"type": "string"},
+            "barcode": {"type": "string"},
+            "price_min": {"type": "number"},
+            "price_max": {"type": "number"},
             "currency": {
                 "type": "string",
-                "description": "price_min/price_max qaysi valyutada: 'UZS', 'USD' yoki 'EUR'. Default UZS.",
+                "description": "price_min/max valyutasi: UZS (default), USD, EUR.",
             },
-            "in_stock_only": {
-                "type": "boolean",
-                "description": "Faqat qoldig'i bor mahsulotlar. Default true.",
-            },
+            "in_stock_only": {"type": "boolean", "description": "Default true."},
         },
     },
 }
@@ -169,34 +138,70 @@ def _rate_to_uzs(session, target_val: str, code: str, target_type: str = "email"
     return rate if rate > 0 else None
 
 
-def _describe(row: dict, categories: dict, specs: dict) -> dict:
-    """The few fields a customer actually asked about.
+def _number(value):
+    """3060000.0 -> 3060000: a trailing .0 is a token on every price."""
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return value
 
-    ``price`` is the selling price. ``cost`` is what the shop paid and never
-    leaves this function. ``specs`` (RAM, CPU, ...) is included only when the
-    product's template actually has attribute values - most products have
-    none, and an empty dict costs the model nothing to skip over.
+
+def _describe(row: dict, categories: dict, specs: dict) -> dict:
+    """The few fields a customer actually asked about, and nothing empty.
+
+    ``price`` is the selling price and always in so'm: the desktop app stores
+    price_original * rate there, so ``price_currency`` only says what the shop
+    typed it in and is left out - next to a so'm figure it read as the wrong
+    currency. ``cost`` is what the shop paid and never leaves this function.
+
+    Every result is resent to the model on each later round of the same reply,
+    so a field that carries no information - unit "dona", no category, no
+    specs - is left out rather than sent as a default.
     """
-    category_id = row.get("category_id")
     described = {
         "name": row.get("name"),
-        "price": row.get("price"),
-        "currency": row.get("price_currency") or "UZS",
-        "stock": row.get("stock"),
-        "unit": row.get("unit") or "dona",
-        "category": categories.get(category_id),
+        "price": _number(row.get("price")),
+        "stock": _number(row.get("stock")),
     }
     product_specs = specs.get(row.get("id")) or {}
     if product_specs:
         described["specs"] = product_specs
+    unit = row.get("unit")
+    if unit and unit != "dona":
+        described["unit"] = unit
+    category = categories.get(row.get("category_id"))
+    if category:
+        described["category"] = category
     return described
+
+
+def _merge_identical(products: list[dict]) -> list[dict]:
+    """One entry per distinct product, stock added up, first-seen order kept.
+
+    Rows that differ only in id are the same thing to a customer: listing a
+    laptop five times costs five times the tokens and reads as five models.
+    """
+    merged: dict = {}
+    for product in products:
+        key = (
+            product.get("name"),
+            product.get("price"),
+            product.get("unit"),
+            tuple(sorted((product.get("specs") or {}).items())),
+        )
+        if key in merged:
+            first = merged[key]
+            if isinstance(first.get("stock"), (int, float)) and isinstance(product.get("stock"), (int, float)):
+                first["stock"] = _number(first["stock"] + product["stock"])
+        else:
+            merged[key] = dict(product)
+    return list(merged.values())
 
 
 def _load_specs(session, target_val: str, product_ids: list[str], target_type: str = "email") -> dict:
     """product_id -> {field name: value}, for every id that has any.
 
     One join instead of one query per row: a list of results can be up to
-    MAX_RESULTS products, and asking the database once scales the same
+    MAX_ROWS rows, and asking the database once scales the same
     whether that list holds one row or eight.
     """
     if not product_ids:
@@ -315,7 +320,7 @@ def search_products(
         from_sql = "FROM user_records AS r JOIN users AS u ON u.id = r.user_id"
 
     params: dict = dict(scope_params)
-    params["limit"] = MAX_RESULTS
+    params["limit"] = MAX_ROWS
 
     if barcode:
         clauses.append("r.data ->> 'barcode' = :barcode")
@@ -376,92 +381,18 @@ def search_products(
         logger.exception("product search failed: name=%r category=%r", name, category)
         return {"error": "lookup failed", "products": [], "count": 0}
 
-    products = [_describe(row, categories, specs) for row in rows if isinstance(row, dict)]
+    products = _merge_identical(
+        [_describe(row, categories, specs) for row in rows if isinstance(row, dict)]
+    )[:MAX_RESULTS]
     return {"products": products, "count": len(products)}
-
-
-def get_product_specs(name: str = "") -> dict:
-    """Technical fields for one product, looked up by its closest name match.
-
-    A shop often keeps several rows under one name - one per unit, or an old
-    sold-out row beside the new stock - and only some of them have their fields
-    filled in. Taking the single closest row used to land on one of the empty
-    ones, so the bot said it had no specs for a laptop whose specs were right
-    there. Every row tied for the closest name is considered instead, and one
-    that has specs wins, in-stock first.
-
-    Only exact ties count: a row whose name is merely close is another model,
-    and its specs would be a wrong answer, which is worse than none.
-
-    Specs come from _load_specs, the same lookup search_products uses, so the
-    two tools cannot disagree about one product.
-    """
-    target_type, target_val, scope_params = _resolve_target()
-    if not target_type:
-        return {"error": "shop account is not configured"}
-
-    name = (name or "").strip()
-    if not name:
-        return {"error": "mahsulot nomi kerak", "specs": {}}
-
-    if target_type == "uid":
-        from_sql = "FROM user_records AS r"
-        scope_sql = "r.user_uid = :user_uid"
-    else:
-        from_sql = "FROM user_records AS r JOIN users AS u ON u.id = r.user_id"
-        scope_sql = "u.email = :email"
-
-    statement = text(
-        f"""
-        SELECT r.data, similarity(COALESCE(r.data ->> 'name', ''), :name) AS score
-        {from_sql}
-        WHERE {scope_sql}
-          AND r.table_name = 'products'
-          AND r.deleted_at IS NULL
-          AND COALESCE((r.data ->> 'is_deleted')::int, 0) = 0
-          AND (r.data ->> 'name') % :name
-        ORDER BY score DESC,
-                 (COALESCE((r.data ->> 'stock')::numeric, 0) > 0) DESC
-        LIMIT :limit
-        """
-    )
-    params = {**scope_params, "name": name, "limit": MAX_RESULTS}
-
-    try:
-        with SessionLocal() as session:
-            candidates = [
-                (data, score)
-                for data, score in session.execute(statement, params).all()
-                if isinstance(data, dict)
-            ]
-            if not candidates:
-                return {"specs": {}, "found": False}
-
-            best_score = candidates[0][1]
-            tied = [data for data, score in candidates if score == best_score]
-            ids = [data.get("id") for data in tied if data.get("id")]
-            specs = _load_specs(session, target_val, ids, target_type)
-    except Exception:
-        logger.exception("product specs lookup failed: name=%r", name)
-        return {"error": "lookup failed", "specs": {}}
-
-    chosen = next((data for data in tied if specs.get(data.get("id"))), tied[0])
-    product_specs = specs.get(chosen.get("id")) or {}
-    return {
-        "name": chosen.get("name"),
-        "specs": product_specs,
-        "found": True,
-    }
 
 
 # Name -> handler, as ai.gemini.generate expects it. The shop's rules are not a
 # tool: they go into the system prompt whole (see ai.agent.system_prompt_for).
 TOOLS = {
     "search_products": search_products,
-    "get_product_specs": get_product_specs,
 }
 
 DECLARATIONS = [
     SEARCH_PRODUCTS_DECLARATION,
-    GET_PRODUCT_SPECS_DECLARATION,
 ]

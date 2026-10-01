@@ -60,30 +60,30 @@ class RunToolTest(unittest.TestCase):
             {"got": 2},
         )
 
-    def test_an_empty_specs_answer_is_logged_as_count_zero(self):
-        """The count is worked out for the log only; the model never sees it."""
-        tools = {"get_product_specs": lambda name: {"name": name, "specs": {}, "found": True}}
-        with self.assertLogs(gemini.logger, level="INFO") as logs:
-            result = gemini.run_tool(
-                {"functionCall": {"name": "get_product_specs", "args": {"name": "e14"}}}, tools
-            )
-        self.assertIn("found=True count=0", logs.output[0])
-        self.assertNotIn("count", result)
-
 
 class ToolLoopTest(unittest.TestCase):
     """The loop drives gemini.generate, so the HTTP call is what gets faked."""
 
-    def _run(self, payloads, tools):
+    def _run(self, payloads, tools, model="m"):
         with patch.object(gemini, "get_settings") as settings, patch.object(gemini.httpx, "post") as post:
             settings.return_value.gemini_api_key = "k"
-            settings.return_value.gemini_model = "m"
+            settings.return_value.gemini_model = model
             post.side_effect = [
                 unittest.mock.Mock(json=unittest.mock.Mock(return_value=p), raise_for_status=lambda: None)
                 for p in payloads
             ]
             answer = gemini.generate("savol", tools=tools, declarations=[{"name": "search_products"}])
             return answer, post
+
+    def test_a_gemini_3_model_thinks_at_low_level(self):
+        _, post = self._run([_text("Salom")], {}, model="gemini-3.7-flash")
+        config = post.call_args.kwargs["json"]["generationConfig"]
+        self.assertEqual(config["thinkingConfig"], {"thinkingLevel": "low"})
+        self.assertIn("gemini-3.7-flash:generateContent", post.call_args.args[0])
+
+    def test_an_older_model_is_not_sent_a_field_it_rejects(self):
+        _, post = self._run([_text("Salom")], {}, model="gemini-2.5-flash")
+        self.assertNotIn("thinkingConfig", post.call_args.kwargs["json"]["generationConfig"])
 
     def test_an_answer_without_tools_returns_immediately(self):
         answer, post = self._run([_text("Salom")], {})

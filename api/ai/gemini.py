@@ -104,11 +104,6 @@ def run_tool(part: dict, tools: dict, used: dict | None = None) -> dict:
 
     found = result.get("found") if isinstance(result, dict) else None
     count = result.get("count") if isinstance(result, dict) else None
-    if count is None and isinstance(result, dict) and isinstance(result.get("specs"), dict):
-        # get_product_specs carries no count of its own: handed to the model, a
-        # bare number next to a product reads as its stock. The field count is
-        # worked out here instead, so an empty answer still shows as count=0.
-        count = len(result["specs"])
     logger.info(
         "tool %s called args=%r found=%s count=%s",
         name, call.get("args") or {}, found, count,
@@ -147,6 +142,14 @@ def generate(
         # therefore generous; the reply's own length is capped in agent.py.
         "generationConfig": {"temperature": 0.4, "maxOutputTokens": 2048},
     }
+    model_name = model or settings.gemini_model
+    if model_name.startswith("gemini-3"):
+        # Thinking is billed as output, several times the input rate. Measured on
+        # the shop's own questions, "low" gave the same answers - same products,
+        # same recommendation - for about half the thinking tokens. Gemini 3
+        # only: older models reject the field, and a rejected request is a
+        # customer with no reply at all.
+        body["generationConfig"]["thinkingConfig"] = {"thinkingLevel": "low"}
     if system_instruction:
         body["systemInstruction"] = {"parts": [{"text": system_instruction}]}
     if declarations:
@@ -163,7 +166,7 @@ def generate(
     # hold the customer's chat open until the caller's own deadline killed it.
     for _ in range(MAX_TOOL_ROUNDS):
         response = httpx.post(
-            f"{API_ROOT}/{model or settings.gemini_model}:generateContent",
+            f"{API_ROOT}/{model_name}:generateContent",
             # The key travels as a header, never as ?key= - a query string ends up in
             # proxy and access logs.
             headers={"x-goog-api-key": effective_key},
@@ -202,7 +205,7 @@ def generate(
     logger.warning("tool loop hit %s rounds without a final answer", MAX_TOOL_ROUNDS)
     body.pop("tools", None)  # forced: no more tool calls, only an answer
     response = httpx.post(
-        f"{API_ROOT}/{model or settings.gemini_model}:generateContent",
+        f"{API_ROOT}/{model_name}:generateContent",
         headers={"x-goog-api-key": effective_key},
         json=body,
         timeout=timeout,

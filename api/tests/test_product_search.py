@@ -272,7 +272,20 @@ class OutputTest(unittest.TestCase):
 
     def test_only_whitelisted_fields_are_returned(self):
         result, _ = run(name="lenovo")
-        self.assertEqual(set(result["products"][0]), set(tools.VISIBLE_FIELDS))
+        self.assertLessEqual(set(result["products"][0]), set(tools.VISIBLE_FIELDS))
+        self.assertEqual(set(result["products"][0]), {"name", "price", "stock", "category"})
+
+    def test_the_price_currency_is_not_returned(self):
+        """price is always so'm; a "USD" beside it read as the wrong currency."""
+        row = dict(PRODUCT, price_currency="USD")
+        result, _ = run(name="lenovo", session=FakeSession(categories=[], products=[row]))
+        self.assertNotIn("currency", result["products"][0])
+
+    def test_a_whole_price_is_an_integer(self):
+        row = dict(PRODUCT, price=3060000.0, stock=2.0)
+        result, _ = run(name="lenovo", session=FakeSession(categories=[], products=[row]))
+        self.assertEqual(repr(result["products"][0]["price"]), "3060000")
+        self.assertEqual(repr(result["products"][0]["stock"]), "2")
 
     def test_internal_process_columns_are_not_returned(self):
         result, _ = run(name="lenovo")
@@ -282,27 +295,69 @@ class OutputTest(unittest.TestCase):
         result, _ = run(name="lenovo")
         self.assertEqual(result["products"][0]["category"], "Noutbuklar")
 
-    def test_a_product_with_no_category_still_returns(self):
+    def test_a_product_with_no_category_has_no_category_key(self):
         row = dict(PRODUCT, category_id=None)
         session = FakeSession(categories=[], products=[row])
         result, _ = run(name="lenovo", session=session)
-        self.assertIsNone(result["products"][0]["category"])
+        self.assertEqual(result["products"][0]["name"], "Lenovo IdeaPad 3")
+        self.assertNotIn("category", result["products"][0])
 
-    def test_a_missing_unit_falls_back_to_dona(self):
-        row = dict(PRODUCT)
-        row.pop("unit")
-        session = FakeSession(categories=[], products=[row])
-        result, _ = run(name="lenovo", session=session)
-        self.assertEqual(result["products"][0]["unit"], "dona")
+    def test_the_default_unit_is_left_out(self):
+        for unit in ("dona", None):
+            row = dict(PRODUCT, unit=unit)
+            result, _ = run(name="lenovo", session=FakeSession(categories=[], products=[row]))
+            self.assertNotIn("unit", result["products"][0])
+
+    def test_any_other_unit_is_kept(self):
+        row = dict(PRODUCT, unit="kg")
+        result, _ = run(name="lenovo", session=FakeSession(categories=[], products=[row]))
+        self.assertEqual(result["products"][0]["unit"], "kg")
 
     def test_nothing_found_is_a_count_of_zero_not_an_error(self):
         session = FakeSession(categories=[], products=[])
         result, _ = run(name="yo'q narsa", session=session)
         self.assertEqual(result, {"products": [], "count": 0})
 
-    def test_results_are_capped(self):
+    def test_rows_read_are_capped(self):
         _, session = run(name="lenovo")
-        self.assertEqual(product_params(session)["limit"], tools.MAX_RESULTS)
+        self.assertEqual(product_params(session)["limit"], tools.MAX_ROWS)
+
+    def test_products_returned_are_capped(self):
+        rows = [dict(PRODUCT, id=f"p{i}", name=f"Model {i}") for i in range(tools.MAX_RESULTS + 5)]
+        result, _ = run(name="model", session=FakeSession(categories=[], products=rows))
+        self.assertEqual(result["count"], tools.MAX_RESULTS)
+
+
+class MergeTest(unittest.TestCase):
+    """One row per unit in the shop is one product to the customer."""
+
+    def test_identical_rows_become_one_with_their_stock_added(self):
+        rows = [dict(PRODUCT, id=f"p{i}", stock=1) for i in range(5)]
+        result, _ = run(name="lenovo", session=FakeSession(categories=[], products=rows))
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["products"][0]["stock"], 5)
+
+    def test_a_different_price_is_a_different_product(self):
+        rows = [dict(PRODUCT, id="a", price=4_800_000), dict(PRODUCT, id="b", price=1_800_000)]
+        result, _ = run(name="lenovo", session=FakeSession(categories=[], products=rows))
+        self.assertEqual([p["price"] for p in result["products"]], [4_800_000, 1_800_000])
+
+    def test_different_specs_are_a_different_product(self):
+        rows = [dict(PRODUCT, id="a"), dict(PRODUCT, id="b")]
+        session = FakeSession(
+            categories=[], products=rows, specs=[("a", "CPU", "i5"), ("b", "CPU", "i7")]
+        )
+        result, _ = run(name="lenovo", session=session)
+        self.assertEqual([p["specs"]["CPU"] for p in result["products"]], ["i5", "i7"])
+
+    def test_order_is_kept(self):
+        rows = [
+            dict(PRODUCT, id="a", name="B model"),
+            dict(PRODUCT, id="b", name="A model"),
+            dict(PRODUCT, id="c", name="B model"),
+        ]
+        result, _ = run(name="model", session=FakeSession(categories=[], products=rows))
+        self.assertEqual([p["name"] for p in result["products"]], ["B model", "A model"])
 
     def test_a_product_with_no_attribute_rows_has_no_specs_key(self):
         result, _ = run(name="lenovo")
@@ -337,82 +392,6 @@ class StockTest(unittest.TestCase):
     def test_out_of_stock_rows_can_be_included(self):
         _, session = run(name="lenovo", in_stock_only=False)
         self.assertNotIn("'stock')::numeric, 0) > 0", product_sql(session))
-
-
-def run_specs(name, products, specs=()):
-    """Call get_product_specs; ``products`` are (row, similarity score) pairs."""
-    session = FakeSession(products=products, specs=specs)
-    with patch.object(tools, "SessionLocal", return_value=session), patch.object(
-        tools, "get_settings"
-    ) as settings:
-        settings.return_value.shop_account_email = "shop@example.com"
-        return tools.get_product_specs(name), session
-
-
-def unit(row_id, name="Lenovo Thinkpad E14", stock=1):
-    return {"id": row_id, "name": name, "stock": stock, "template_id": "tpl-1"}
-
-
-class ProductSpecsTest(unittest.TestCase):
-    def test_a_blank_name_is_refused(self):
-        result, _ = run_specs("  ", [])
-        self.assertEqual(result["specs"], {})
-        self.assertIn("error", result)
-
-    def test_no_match_is_not_found(self):
-        result, _ = run_specs("macbook", [])
-        self.assertFalse(result["found"])
-
-    def test_the_specs_of_the_closest_product_are_returned(self):
-        result, _ = run_specs(
-            "thinkpad e14",
-            [(unit("p1"), 0.8)],
-            specs=[("p1", "CPU", "i5-1135G7"), ("p1", "RAM", "16 GB")],
-        )
-        self.assertEqual(result["specs"], {"CPU": "i5-1135G7", "RAM": "16 GB"})
-
-    def test_no_bare_number_is_returned_beside_the_product(self):
-        """A count next to a product name was read by the model as its stock."""
-        result, _ = run_specs(
-            "thinkpad e14",
-            [(unit("p1"), 0.8)],
-            specs=[("p1", "CPU", "i5"), ("p1", "RAM", "8"), ("p1", "SSD", "256"), ("p1", "Ekran", "14")],
-        )
-        self.assertEqual(set(result), {"name", "specs", "found"})
-
-    def test_a_same_named_row_with_specs_beats_one_without(self):
-        # The first row is the one LIMIT 1 used to return: same name, no fields
-        # filled in. Its twin further down has them.
-        result, _ = run_specs(
-            "Lenovo Thinkpad E14",
-            [(unit("empty"), 1.0), (unit("filled"), 1.0)],
-            specs=[("filled", "CPU", "i5-1135G7")],
-        )
-        self.assertEqual(result["specs"], {"CPU": "i5-1135G7"})
-
-    def test_a_merely_similar_model_does_not_lend_its_specs(self):
-        result, _ = run_specs(
-            "Lenovo Thinkpad E14",
-            [(unit("e14"), 1.0), (unit("e15", name="Lenovo Thinkpad E15"), 0.7)],
-            specs=[("e15", "CPU", "i7-1165G7")],
-        )
-        self.assertEqual(result["name"], "Lenovo Thinkpad E14")
-        self.assertEqual(result["specs"], {})
-
-    def test_specs_do_not_depend_on_the_product_template(self):
-        row = unit("p1")
-        row["template_id"] = None
-        result, _ = run_specs("thinkpad", [(row, 0.6)], specs=[("p1", "RAM", "8 GB")])
-        self.assertEqual(result["specs"], {"RAM": "8 GB"})
-
-    def test_in_stock_rows_are_ranked_first(self):
-        _, session = run_specs("thinkpad", [(unit("p1"), 0.6)])
-        self.assertIn("'stock')::numeric, 0) > 0) DESC", product_sql(session))
-
-    def test_the_lookup_is_scoped_and_bound(self):
-        _, session = run_specs("x' OR 1=1 --", [(unit("p1"), 0.6)])
-        self.assertNotIn("OR 1=1", product_sql(session))
-        self.assertEqual(product_params(session)["email"], "shop@example.com")
 
 
 class FailureTest(unittest.TestCase):
