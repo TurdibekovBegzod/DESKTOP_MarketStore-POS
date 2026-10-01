@@ -339,6 +339,75 @@ class StockTest(unittest.TestCase):
         self.assertNotIn("'stock')::numeric, 0) > 0", product_sql(session))
 
 
+def run_specs(name, products, specs=()):
+    """Call get_product_specs; ``products`` are (row, similarity score) pairs."""
+    session = FakeSession(products=products, specs=specs)
+    with patch.object(tools, "SessionLocal", return_value=session), patch.object(
+        tools, "get_settings"
+    ) as settings:
+        settings.return_value.shop_account_email = "shop@example.com"
+        return tools.get_product_specs(name), session
+
+
+def unit(row_id, name="Lenovo Thinkpad E14", stock=1):
+    return {"id": row_id, "name": name, "stock": stock, "template_id": "tpl-1"}
+
+
+class ProductSpecsTest(unittest.TestCase):
+    def test_a_blank_name_is_refused(self):
+        result, _ = run_specs("  ", [])
+        self.assertEqual(result["specs"], {})
+        self.assertIn("error", result)
+
+    def test_no_match_is_not_found(self):
+        result, _ = run_specs("macbook", [])
+        self.assertFalse(result["found"])
+
+    def test_the_specs_of_the_closest_product_are_returned(self):
+        result, _ = run_specs(
+            "thinkpad e14",
+            [(unit("p1"), 0.8)],
+            specs=[("p1", "CPU", "i5-1135G7"), ("p1", "RAM", "16 GB")],
+        )
+        self.assertEqual(result["specs"], {"CPU": "i5-1135G7", "RAM": "16 GB"})
+        self.assertEqual(result["count"], 2)
+
+    def test_a_same_named_row_with_specs_beats_one_without(self):
+        # The first row is the one LIMIT 1 used to return: same name, no fields
+        # filled in. Its twin further down has them.
+        result, _ = run_specs(
+            "Lenovo Thinkpad E14",
+            [(unit("empty"), 1.0), (unit("filled"), 1.0)],
+            specs=[("filled", "CPU", "i5-1135G7")],
+        )
+        self.assertEqual(result["specs"], {"CPU": "i5-1135G7"})
+
+    def test_a_merely_similar_model_does_not_lend_its_specs(self):
+        result, _ = run_specs(
+            "Lenovo Thinkpad E14",
+            [(unit("e14"), 1.0), (unit("e15", name="Lenovo Thinkpad E15"), 0.7)],
+            specs=[("e15", "CPU", "i7-1165G7")],
+        )
+        self.assertEqual(result["name"], "Lenovo Thinkpad E14")
+        self.assertEqual(result["specs"], {})
+        self.assertEqual(result["count"], 0)
+
+    def test_specs_do_not_depend_on_the_product_template(self):
+        row = unit("p1")
+        row["template_id"] = None
+        result, _ = run_specs("thinkpad", [(row, 0.6)], specs=[("p1", "RAM", "8 GB")])
+        self.assertEqual(result["specs"], {"RAM": "8 GB"})
+
+    def test_in_stock_rows_are_ranked_first(self):
+        _, session = run_specs("thinkpad", [(unit("p1"), 0.6)])
+        self.assertIn("'stock')::numeric, 0) > 0) DESC", product_sql(session))
+
+    def test_the_lookup_is_scoped_and_bound(self):
+        _, session = run_specs("x' OR 1=1 --", [(unit("p1"), 0.6)])
+        self.assertNotIn("OR 1=1", product_sql(session))
+        self.assertEqual(product_params(session)["email"], "shop@example.com")
+
+
 class FailureTest(unittest.TestCase):
     def test_a_database_error_is_reported_not_raised(self):
         class Broken(FakeSession):

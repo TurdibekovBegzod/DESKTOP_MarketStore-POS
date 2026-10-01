@@ -383,10 +383,18 @@ def search_products(
 def get_product_specs(name: str = "") -> dict:
     """Technical fields for one product, looked up by its closest name match.
 
-    Fields live apart from the product row: a template (e.g. "Noutbuk") lists
-    which fields exist, and product_attributes holds each product's value for
-    one of those fields. A template with no fields, or a product with no
-    attribute rows, is not an error - most products simply have none.
+    A shop often keeps several rows under one name - one per unit, or an old
+    sold-out row beside the new stock - and only some of them have their fields
+    filled in. Taking the single closest row used to land on one of the empty
+    ones, so the bot said it had no specs for a laptop whose specs were right
+    there. Every row tied for the closest name is considered instead, and one
+    that has specs wins, in-stock first.
+
+    Only exact ties count: a row whose name is merely close is another model,
+    and its specs would be a wrong answer, which is worse than none.
+
+    Specs come from _load_specs, the same lookup search_products uses, so the
+    two tools cannot disagree about one product.
     """
     target_type, target_val, scope_params = _resolve_target()
     if not target_type:
@@ -396,107 +404,57 @@ def get_product_specs(name: str = "") -> dict:
     if not name:
         return {"error": "mahsulot nomi kerak", "specs": {}}
 
+    if target_type == "uid":
+        from_sql = "FROM user_records AS r"
+        scope_sql = "r.user_uid = :user_uid"
+    else:
+        from_sql = "FROM user_records AS r JOIN users AS u ON u.id = r.user_id"
+        scope_sql = "u.email = :email"
+
+    statement = text(
+        f"""
+        SELECT r.data, similarity(COALESCE(r.data ->> 'name', ''), :name) AS score
+        {from_sql}
+        WHERE {scope_sql}
+          AND r.table_name = 'products'
+          AND r.deleted_at IS NULL
+          AND COALESCE((r.data ->> 'is_deleted')::int, 0) = 0
+          AND (r.data ->> 'name') % :name
+        ORDER BY score DESC,
+                 (COALESCE((r.data ->> 'stock')::numeric, 0) > 0) DESC
+        LIMIT :limit
+        """
+    )
+    params = {**scope_params, "name": name, "limit": MAX_RESULTS}
+
     try:
         with SessionLocal() as session:
-            if target_type == "uid":
-                prod_query = """
-                    SELECT r.data
-                    FROM user_records AS r
-                    WHERE r.user_uid = :user_uid
-                      AND r.table_name = 'products'
-                      AND r.deleted_at IS NULL
-                      AND COALESCE((r.data ->> 'is_deleted')::int, 0) = 0
-                      AND (r.data ->> 'name') % :name
-                    ORDER BY similarity(COALESCE(r.data ->> 'name', ''), :name) DESC
-                    LIMIT 1
-                """
-                prod_params = {"user_uid": target_val, "name": name}
-            else:
-                prod_query = """
-                    SELECT r.data
-                    FROM user_records AS r
-                    JOIN users AS u ON u.id = r.user_id
-                    WHERE u.email = :email
-                      AND r.table_name = 'products'
-                      AND r.deleted_at IS NULL
-                      AND COALESCE((r.data ->> 'is_deleted')::int, 0) = 0
-                      AND (r.data ->> 'name') % :name
-                    ORDER BY similarity(COALESCE(r.data ->> 'name', ''), :name) DESC
-                    LIMIT 1
-                """
-                prod_params = {"email": target_val, "name": name}
+            candidates = [
+                (data, score)
+                for data, score in session.execute(statement, params).all()
+                if isinstance(data, dict)
+            ]
+            if not candidates:
+                return {"specs": {}, "found": False, "count": 0}
 
-            row = session.execute(text(prod_query), prod_params).scalar()
-
-            if not isinstance(row, dict):
-                return {"specs": {}, "found": False}
-
-            product_id = row.get("id")
-            template_id = row.get("template_id")
-            if not product_id or not template_id:
-                return {"name": row.get("name"), "specs": {}, "found": True}
-
-            if target_type == "uid":
-                fields_query = """
-                    SELECT r.data ->> 'id', r.data ->> 'name'
-                    FROM user_records AS r
-                    WHERE r.user_uid = :user_uid
-                      AND r.table_name = 'product_template_fields'
-                      AND r.deleted_at IS NULL
-                      AND r.data ->> 'template_id' = :template_id
-                """
-                fields_params = {"user_uid": target_val, "template_id": template_id}
-            else:
-                fields_query = """
-                    SELECT r.data ->> 'id', r.data ->> 'name'
-                    FROM user_records AS r
-                    JOIN users AS u ON u.id = r.user_id
-                    WHERE u.email = :email
-                      AND r.table_name = 'product_template_fields'
-                      AND r.deleted_at IS NULL
-                      AND r.data ->> 'template_id' = :template_id
-                """
-                fields_params = {"email": target_val, "template_id": template_id}
-
-            fields = session.execute(text(fields_query), fields_params).all()
-            field_names = {field_id: field_name for field_id, field_name in fields if field_id}
-
-            if not field_names:
-                return {"name": row.get("name"), "specs": {}, "found": True}
-
-            if target_type == "uid":
-                values_query = """
-                    SELECT r.data ->> 'field_id', r.data ->> 'value'
-                    FROM user_records AS r
-                    WHERE r.user_uid = :user_uid
-                      AND r.table_name = 'product_attributes'
-                      AND r.deleted_at IS NULL
-                      AND r.data ->> 'product_id' = :product_id
-                """
-                values_params = {"user_uid": target_val, "product_id": product_id}
-            else:
-                values_query = """
-                    SELECT r.data ->> 'field_id', r.data ->> 'value'
-                    FROM user_records AS r
-                    JOIN users AS u ON u.id = r.user_id
-                    WHERE u.email = :email
-                      AND r.table_name = 'product_attributes'
-                      AND r.deleted_at IS NULL
-                      AND r.data ->> 'product_id' = :product_id
-                """
-                values_params = {"email": target_val, "product_id": product_id}
-
-            values = session.execute(text(values_query), values_params).all()
+            best_score = candidates[0][1]
+            tied = [data for data, score in candidates if score == best_score]
+            ids = [data.get("id") for data in tied if data.get("id")]
+            specs = _load_specs(session, target_val, ids, target_type)
     except Exception:
         logger.exception("product specs lookup failed: name=%r", name)
         return {"error": "lookup failed", "specs": {}}
 
-    specs = {
-        field_names[field_id]: value
-        for field_id, value in values
-        if field_id in field_names and value
+    chosen = next((data for data in tied if specs.get(data.get("id"))), tied[0])
+    product_specs = specs.get(chosen.get("id")) or {}
+    return {
+        "name": chosen.get("name"),
+        "specs": product_specs,
+        "found": True,
+        # Logged by ai.gemini next to found, so an empty answer shows up in the
+        # logs as count=0 rather than hiding behind found=True.
+        "count": len(product_specs),
     }
-    return {"name": row.get("name"), "specs": specs, "found": True}
 
 
 SEARCH_SHOP_RULES_DECLARATION = {
