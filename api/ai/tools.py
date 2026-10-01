@@ -435,7 +435,7 @@ def get_product_specs(name: str = "") -> dict:
                 if isinstance(data, dict)
             ]
             if not candidates:
-                return {"specs": {}, "found": False, "count": 0}
+                return {"specs": {}, "found": False}
 
             best_score = candidates[0][1]
             tied = [data for data, score in candidates if score == best_score]
@@ -451,9 +451,6 @@ def get_product_specs(name: str = "") -> dict:
         "name": chosen.get("name"),
         "specs": product_specs,
         "found": True,
-        # Logged by ai.gemini next to found, so an empty answer shows up in the
-        # logs as count=0 rather than hiding behind found=True.
-        "count": len(product_specs),
     }
 
 

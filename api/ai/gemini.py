@@ -104,6 +104,11 @@ def run_tool(part: dict, tools: dict, used: dict | None = None) -> dict:
 
     found = result.get("found") if isinstance(result, dict) else None
     count = result.get("count") if isinstance(result, dict) else None
+    if count is None and isinstance(result, dict) and isinstance(result.get("specs"), dict):
+        # get_product_specs carries no count of its own: handed to the model, a
+        # bare number next to a product reads as its stock. The field count is
+        # worked out here instead, so an empty answer still shows as count=0.
+        count = len(result["specs"])
     logger.info(
         "tool %s called args=%r found=%s count=%s",
         name, call.get("args") or {}, found, count,

@@ -370,7 +370,15 @@ class ProductSpecsTest(unittest.TestCase):
             specs=[("p1", "CPU", "i5-1135G7"), ("p1", "RAM", "16 GB")],
         )
         self.assertEqual(result["specs"], {"CPU": "i5-1135G7", "RAM": "16 GB"})
-        self.assertEqual(result["count"], 2)
+
+    def test_no_bare_number_is_returned_beside_the_product(self):
+        """A count next to a product name was read by the model as its stock."""
+        result, _ = run_specs(
+            "thinkpad e14",
+            [(unit("p1"), 0.8)],
+            specs=[("p1", "CPU", "i5"), ("p1", "RAM", "8"), ("p1", "SSD", "256"), ("p1", "Ekran", "14")],
+        )
+        self.assertEqual(set(result), {"name", "specs", "found"})
 
     def test_a_same_named_row_with_specs_beats_one_without(self):
         # The first row is the one LIMIT 1 used to return: same name, no fields
@@ -390,7 +398,6 @@ class ProductSpecsTest(unittest.TestCase):
         )
         self.assertEqual(result["name"], "Lenovo Thinkpad E14")
         self.assertEqual(result["specs"], {})
-        self.assertEqual(result["count"], 0)
 
     def test_specs_do_not_depend_on_the_product_template(self):
         row = unit("p1")

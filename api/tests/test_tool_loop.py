@@ -60,6 +60,16 @@ class RunToolTest(unittest.TestCase):
             {"got": 2},
         )
 
+    def test_an_empty_specs_answer_is_logged_as_count_zero(self):
+        """The count is worked out for the log only; the model never sees it."""
+        tools = {"get_product_specs": lambda name: {"name": name, "specs": {}, "found": True}}
+        with self.assertLogs(gemini.logger, level="INFO") as logs:
+            result = gemini.run_tool(
+                {"functionCall": {"name": "get_product_specs", "args": {"name": "e14"}}}, tools
+            )
+        self.assertIn("found=True count=0", logs.output[0])
+        self.assertNotIn("count", result)
+
 
 class ToolLoopTest(unittest.TestCase):
     """The loop drives gemini.generate, so the HTTP call is what gets faked."""
