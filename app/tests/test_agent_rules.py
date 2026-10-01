@@ -109,7 +109,7 @@ class UpdateRuleTest(AgentRuleTestCase):
             db.update_agent_rule(rule_id, text_value="   ")
         self.assertEqual(db.list_agent_rules()[0]["text"], "Kafolat 6 oy")
 
-    def test_an_edit_marks_the_rule_for_re_embedding(self):
+    def test_an_edit_marks_the_rule_for_re_sync(self):
         """updated_at is what tells sync, and then the server, to look again."""
         rule_id = db.add_agent_rule("Kafolat 6 oy")
         before = db.list_agent_rules()[0]["updated_at"]
@@ -179,8 +179,8 @@ class SyncMembershipTest(AgentRuleTestCase):
 class OfflineGateTest(AgentRuleTestCase):
     """Rules are business data: writable only while the server is reachable.
 
-    A rule saved offline would sit here with no vector on the server, and the shop
-    would believe the bot was already answering by it.
+    A rule saved offline would never reach the server, and the shop would
+    believe the bot was already answering by it.
     """
 
     def setUp(self):

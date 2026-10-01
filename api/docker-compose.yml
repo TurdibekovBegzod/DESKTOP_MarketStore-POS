@@ -6,10 +6,11 @@ x-logging: &default-logging
 
 services:
   postgres:
-    # pgvector's own build of the same Postgres 16. The agent's per-account rules
-    # are searched by vector distance, and the plain postgres image has no
-    # 'vector' extension to create. Same major version and the same data
-    # directory layout, so the existing volume is read as it stands.
+    # pgvector's build of Postgres 16. Nothing uses the vector extension any
+    # more, but the data volume was last initialised under this image: switching
+    # the image changes the OS underneath, and a different glibc collation
+    # silently breaks every btree index on text. Change it only together with a
+    # REINDEX DATABASE.
     image: docker.io/pgvector/pgvector:pg16
     container_name: marketstore-postgres
     restart: unless-stopped
@@ -142,43 +143,6 @@ services:
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.7-flash}
     depends_on:
       redis:
-        condition: service_healthy
-
-  embedder:
-    # Turns saved rules into vectors. Its own service, not part of the worker:
-    # encoding takes every core it is given, and a worker busy doing that is a
-    # worker not answering Instagram DMs. Apart, an indexing run and a customer's
-    # question never compete for the same CPU.
-    build:
-      context: .
-      target: embedder
-    container_name: marketstore-embedder
-    restart: unless-stopped
-    logging: *default-logging
-    environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://marketstore:marketstore@postgres:5432/marketstore}
-      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY must be set in api/.env}
-      # How many cores torch may use. Two leaves the rest of the box to Postgres
-      # and the DM worker; raising it makes a first indexing run finish sooner at
-      # the cost of everything else running on this server.
-      EMBEDDING_THREADS: ${EMBEDDING_THREADS:-2}
-      OMP_NUM_THREADS: ${EMBEDDING_THREADS:-2}
-      MKL_NUM_THREADS: ${EMBEDDING_THREADS:-2}
-      EMBEDDER_IDLE_SECONDS: ${EMBEDDER_IDLE_SECONDS:-5}
-      EMBEDDER_ERROR_SECONDS: ${EMBEDDER_ERROR_SECONDS:-30}
-    # A ceiling, not a reservation. The model needs well under this; the limit is
-    # here so a leak or a pathological batch cannot reach the memory Postgres is
-    # relying on. It is the only service with one because it is the only one
-    # holding model weights.
-    mem_limit: ${EMBEDDER_MEM_LIMIT:-2g}
-    depends_on:
-      postgres:
-        condition: service_healthy
-      # Waits for the api, not just the database: account_rules is created by
-      # the alembic run in the api container's CMD, and an embedder that starts
-      # first polls a table that does not exist yet and fills the log with
-      # UndefinedTable errors on every release that adds a migration.
-      api:
         condition: service_healthy
 
   logs:

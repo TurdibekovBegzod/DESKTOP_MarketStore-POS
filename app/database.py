@@ -130,7 +130,7 @@ SYNC_TABLES = (
     "activity_logs",
     "notification_reads",
     # What this shop tells its Instagram agent. Synced like any other table; the
-    # server derives the searchable, embedded copy from these rows.
+    # server keeps the agent's copy of these rows.
     "agent_rules",
 )
 
@@ -978,8 +978,7 @@ class AgentRule(Base):
     """One instruction this shop gives its Instagram agent.
 
     Ordinary synced rows, so a rule written here reaches the shop's other
-    devices; the server additionally embeds them so the agent can look up the few
-    that bear on a customer's question instead of being handed the whole set.
+    devices; the server hands the whole set to the agent with every reply.
 
     No ``is_deleted`` column. A deleted rule is deleted - the row goes, and the
     tombstone carries that to the other devices - because a table of rules is
@@ -3257,8 +3256,8 @@ def add_agent_rule(text_value, priority=0):
 
     # Rules are what the bot answers customers with, so they are business data
     # and follow the same rule as the rest: changed only while the server is
-    # reachable. A rule written offline would sit here unembedded, and the shop
-    # would believe the bot was already applying it.
+    # reachable. A rule written offline would never reach the server, and the
+    # shop would believe the bot was already applying it.
     require_online()
     with session_scope() as session:
         row = AgentRule(rule_text=body, priority=int(priority or 0), updated_at=_utc_now())
@@ -3271,7 +3270,7 @@ def update_agent_rule(rule_id, text_value=None, priority=None):
     """Change one rule's text or priority. Returns whether a row was found.
 
     ``updated_at`` is always touched, because that is what tells sync - and
-    through it the server's embedder - that this rule has to be looked at again.
+    through it the server's copy - that this rule has to be looked at again.
     """
     identifier = str(rule_id or "").strip()
     if not identifier:

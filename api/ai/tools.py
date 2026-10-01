@@ -457,78 +457,8 @@ def get_product_specs(name: str = "") -> dict:
     }
 
 
-SEARCH_SHOP_RULES_DECLARATION = {
-    "name": "search_shop_rules",
-    "description": (
-        "Do'kon egasi yozgan qoidalarni qidiradi - yetkazib berish, kafolat, "
-        "to'lov, qaytarib berish, ish vaqti, chegirma, muddatli to'lov va shu "
-        "kabi do'kon shartlari. Mijoz mahsulotning o'zi emas, balki do'kon "
-        "sharti haqida so'raganda ishlat. Qidiruv ma'no bo'yicha, shuning "
-        "uchun so'rovni mijoz savolining mazmuni bilan, o'zbek tilida yoz "
-        "(masalan 'kafolat muddati', 'yetkazib berish narxi'). Natijada "
-        "qaytgan qoidalar savolga o'xshashligi bo'yicha tanlanadi va "
-        "saralanmaydi - ichida aloqasiz qoidalar ham bo'ladi, faqat savolga "
-        "javob beradiganini ishlat. Bo'sh qaytsa yoki mos qoida bo'lmasa, "
-        "do'kon bu shartni yozmagan - o'zingdan to'qima, ma'lumot yo'qligini "
-        "ayt. Bir savolda bir nechta shart so'ralsa (masalan kafolat ham, "
-        "yetkazib berish ham), har biri uchun alohida chaqir."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "query": {
-                "type": "string",
-                "description": (
-                    "Nimani qidirayotganing, o'zbekcha va mazmunli. Mijoz "
-                    "savolini qisqartirib yoz, bitta so'z bilan cheklanma."
-                ),
-            },
-        },
-        "required": ["query"],
-    },
-}
-
-
-def search_shop_rules(query: str = "") -> dict:
-    """The shop's own rules that come closest in meaning to ``query``.
-
-    Imported lazily, inside the function: app.rules_service imports this module
-    for the store context, so a module-level import here would be circular.
-
-    Returns a dict rather than raising, like the other tools - "no rules" is an
-    answer the model can act on, where an exception would cost the customer their
-    reply. ``found`` is stated explicitly so an empty list cannot be mistaken for
-    a lookup that failed.
-    """
-    from app import rules_service
-
-    ctx = get_store_context()
-    user_uid = getattr(ctx, "user_uid", None) if ctx else None
-    if not user_uid:
-        # The rules table is keyed by account and there is no email fallback for
-        # it: answering out of the wrong shop's rules is worse than not
-        # answering, so an unresolved account returns nothing.
-        return {"error": "shop account is not configured", "rules": [], "found": False}
-
-    question = (query or "").strip()
-    if not question:
-        return {"error": "qidiruv so'rovi kerak", "rules": [], "found": False}
-
-    rules = rules_service.search_rules(user_uid, question)
-    return {
-        # Highest priority first, so a contradiction is read in the order the
-        # shop meant it to be.
-        "rules": [rule.text for rule in sorted(rules, key=lambda r: -r.priority)],
-        "count": len(rules),
-        "found": bool(rules),
-    }
-
-
-# Name -> handler, as ai.gemini.generate expects it.
-#
-# search_shop_rules is deliberately left out: the shop's rules now go into the
-# system prompt whole (see ai.agent.system_prompt_for). The handler and its
-# declaration stay above so the tool can be switched back on by adding it here.
+# Name -> handler, as ai.gemini.generate expects it. The shop's rules are not a
+# tool: they go into the system prompt whole (see ai.agent.system_prompt_for).
 TOOLS = {
     "search_products": search_products,
     "get_product_specs": get_product_specs,

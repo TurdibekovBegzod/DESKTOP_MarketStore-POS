@@ -195,20 +195,11 @@ class AppRelease(Base):
 
 
 class AccountRule(Base):
-    """One shop's instruction to its Instagram agent, retrieved by meaning.
+    """One shop's instruction to its Instagram agent.
 
-    A shop writes as many of these as it likes and keeps adding over the years,
-    which is why they are searched rather than all handed to the model: the
-    agent asks for the few rules nearest to what the customer just said.
-
-    ``embedding`` stays NULL until the embedder has run over the row. That is a
-    normal state, not a failure - saving a rule must never wait on a model - and
-    it means the rule is already in the app while being briefly unsearchable.
-
-    The vector column is declared as a plain Python list here rather than
-    pgvector's SQLAlchemy type: the table is only ever read and written through
-    the SQL in ``rules_service``, so the ORM never has to parse a vector, and
-    importing this module stays free of the pgvector package.
+    The server-side copy of a synced ``agent_rules`` row, kept so the agent can
+    read one account's whole rule set into its system prompt with one query -
+    see ``rules_service``.
     """
 
     __tablename__ = "account_rules"
@@ -223,12 +214,7 @@ class AccountRule(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
     user_uid: Mapped[str] = mapped_column(ForeignKey("users.uid", ondelete="CASCADE"), index=True, nullable=False)
     raw_text: Mapped[str] = mapped_column(Text, nullable=False)
-    # sha256 of the text the current vector was built from. The embedder skips a
-    # row whose hash still matches, so an edited rule costs one embedding and an
-    # untouched account costs none.
-    text_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    model: Mapped[str | None] = mapped_column(String(80))
-    # Which rule wins when two contradict. Similarity cannot decide that.
+    # Which rule wins when two contradict.
     priority: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(

@@ -195,17 +195,17 @@ def _mirror_agent_rule(user: User, record: RecordIn) -> None:
     """Keep ``account_rules`` in step with an agent_rules row that just synced.
 
     The rule travels through sync like any other row, so every device already
-    agrees about it. What sync cannot do is make it searchable: that needs a
-    vector, which needs a table the agent can run a distance query against.
+    agrees about it. The agent reads rules from ``account_rules`` instead, where
+    one indexed query returns a whole account's set for the system prompt.
 
     A deletion removes the row outright rather than flagging it. The tombstone
     that tells the shop's other devices stays in ``user_records`` where sync
     handles it; this table then holds only rules that still exist, which is both
-    what the owner asked for and one less thing a search has to filter out.
+    what the owner asked for and one less thing a reader has to filter out.
 
     Never raises: the rule is already stored and shared at this point. Failing
-    the push over the searchable copy would lose a save the user watched succeed,
-    so a failure here leaves the rule unsearchable and is logged.
+    the push over the agent's copy would lose a save the user watched succeed,
+    so a failure here leaves the bot without that rule and is logged.
     """
     if record.table_name != "agent_rules":
         return
@@ -221,7 +221,7 @@ def _mirror_agent_rule(user: User, record: RecordIn) -> None:
         body = str(data.get("rule_text") or data.get("text") or "").strip()
         if not body:
             # An empty rule is how the app clears one without deleting it; there
-            # is nothing to embed and nothing worth searching.
+            # is nothing for the bot to apply.
             rules_service.delete_rule(user.uid, record.local_id)
             return
 

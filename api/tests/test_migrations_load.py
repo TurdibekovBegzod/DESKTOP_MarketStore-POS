@@ -152,13 +152,6 @@ class AccountRulesMigrationTest(unittest.TestCase):
         column = next(i for i, s in enumerate(statements) if "ADD COLUMN embedding" in s)
         self.assertLess(extension, column)
 
-    def test_the_vector_width_matches_the_model(self):
-        """A mismatch here is only found when the first embedding is stored."""
-        from ai import embedding
-
-        self.assertIn(f"vector({embedding.DIMENSIONS})", self.sql)
-        self.assertEqual(self.module.EMBEDDING_DIM, embedding.DIMENSIONS)
-
     def test_the_table_is_created(self):
         self.assertIn("account_rules", self.emitted["create_table"])
 
@@ -169,6 +162,28 @@ class AccountRulesMigrationTest(unittest.TestCase):
     def test_the_vector_index_is_created(self):
         self.assertIn("hnsw", self.sql)
         self.assertIn("vector_cosine_ops", self.sql)
+
+
+class DropRuleEmbeddingsMigrationTest(unittest.TestCase):
+    """0015: the embedding columns go, the rules themselves stay."""
+
+    def setUp(self):
+        self.module = _load(VERSIONS_DIR / "0015_drop_rule_embeddings.py")
+        emitted = _run(self.module, "upgrade")
+        self.sql = " ".join(" ".join(s.split()) for s in emitted["execute"])
+
+    def test_the_embedding_columns_and_index_are_dropped(self):
+        for column in ("embedding", "model", "text_hash"):
+            self.assertIn(f"DROP COLUMN IF EXISTS {column}", self.sql)
+        self.assertIn("DROP INDEX IF EXISTS ix_account_rules_embedding_hnsw", self.sql)
+
+    def test_the_rules_themselves_are_not_touched(self):
+        self.assertNotIn("raw_text", self.sql)
+        self.assertNotIn("priority", self.sql)
+        self.assertNotIn("DROP TABLE", self.sql)
+
+    def test_the_extension_is_left_installed(self):
+        self.assertNotIn("DROP EXTENSION", self.sql)
 
 
 if __name__ == "__main__":
