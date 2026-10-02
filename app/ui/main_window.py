@@ -1473,6 +1473,8 @@ class MainWindow(QMainWindow):
         # still holds the database, and the status refresh reads it.
         self.delivery_signal.connect(self._on_delivery, Qt.ConnectionType.QueuedConnection)
         db.set_write_through(self._deliver_action, after_commit=self._action_delivered)
+        # An upload whose answer was lost is settled before the next change.
+        db.set_before_action(self._settle_before_change)
         # Every entry in the activity log carries who made it, so the other
         # devices can say "Sardor sold ..." rather than "something changed".
         db.set_activity_actor(lambda: {
@@ -1623,6 +1625,7 @@ class MainWindow(QMainWindow):
         self._stop_realtime_listener()
         self._stop_sync_engine()
         db.set_write_through(None)
+        db.set_before_action(None)
         db.unregister_activity_listener(self._on_database_activity)
         app = QApplication.instance()
         if app:
@@ -2756,6 +2759,12 @@ class MainWindow(QMainWindow):
             self._engine_state = "idle"
         return answer
 
+    def _settle_before_change(self):
+        """See db.set_before_action: costs a download only while an earlier
+        upload's answer is still unknown."""
+        if self._sync_available():
+            sync_service.settle_unconfirmed(self.user)
+
     def _action_delivered(self, answer):
         """The server has the action and so does this device."""
         behind = sync_service.finish_delivery(answer)
@@ -2842,9 +2851,19 @@ class MainWindow(QMainWindow):
         # through the sync button's tooltip rather than as toasts.
         self._realtime_online = bool(online)
         if online and self._engine_worker is not None:
-            # Verify/catch up by downloading only. request_turn() never uploads
-            # pending local rows, so reconnecting cannot retry a failed send.
-            self._engine_worker.request_turn()
+            # The server is back. Catch up; and if anything of ours is still
+            # queued - a change whose upload got no answer - send it once now
+            # rather than waiting for the next change. The round downloads
+            # first, which recognises whatever of it the server already has,
+            # and it is one attempt: a failure waits for the next reconnect.
+            try:
+                pending = db.count_pending_sync_rows() > 0
+            except Exception:
+                pending = False
+            if pending:
+                self._engine_worker.request_push()
+            else:
+                self._engine_worker.request_turn()
         self._refresh_sync_status()
 
     @pyqtSlot(dict)

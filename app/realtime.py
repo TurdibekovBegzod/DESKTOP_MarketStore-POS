@@ -19,11 +19,14 @@ import api_client
 
 
 # Reconnect delays, in seconds, applied in order and then repeated at the last
-# value. Short enough to feel instant on a flaky link, long enough not to hammer
-# the tunnel while the shop's internet is genuinely down.
-RECONNECT_BACKOFF = (2, 4, 8, 15, 30)
-# Must comfortably exceed the server's 20s keepalive ping.
-READ_TIMEOUT_SECONDS = 60
+# value. While the server is down each attempt is the "is it back?" question,
+# so the last value is how soon a restarted server is noticed - and with it how
+# soon unanswered uploads are settled and the other devices catch up. An
+# attempt against a dead tunnel is answered at once, so every 10 s is cheap.
+RECONNECT_BACKOFF = (2, 4, 8, 10)
+# Must exceed the server's 20s keepalive ping; a silent stream is noticed
+# after this long.
+READ_TIMEOUT_SECONDS = 30
 
 
 class SyncEventListener(QObject):

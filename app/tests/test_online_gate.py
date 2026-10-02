@@ -232,6 +232,32 @@ class WriteThroughWindowTest(_WindowCase):
                                                     "price": 1000, "subtotal": 1000}],
                               1000, 0, 1000, "naqd")
 
+    def test_a_reconnect_sends_what_is_still_queued_once(self):
+        from unittest.mock import MagicMock
+        real, fake = self.window._engine_worker, MagicMock()
+        self.window._engine_worker = fake
+        try:
+            self.window._on_realtime_connection(True, "")
+            fake.request_turn.assert_called_once()
+            fake.request_push.assert_not_called()
+
+            with db._get_engine().begin() as conn:
+                db._write_outbox_entries(conn, {("products", str(self.product), "upsert")})
+            fake.reset_mock()
+            self.window._on_realtime_connection(True, "")
+            fake.request_push.assert_called_once()
+            fake.request_turn.assert_not_called()
+        finally:
+            self.window._engine_worker = real
+
+    def test_a_stopped_server_is_asked_again_every_ten_seconds(self):
+        import realtime
+        self.assertEqual(max(realtime.RECONNECT_BACKOFF), 10)
+        self.assertGreater(realtime.READ_TIMEOUT_SECONDS, 20)
+
+    def test_the_window_settles_unanswered_uploads_before_a_change(self):
+        self.assertEqual(db._BEFORE_ACTION, self.window._settle_before_change)
+
     def test_the_window_turns_write_through_on(self):
         self.assertEqual(self.installed_write_through, self.window._deliver_action)
         self.assertTrue(db.write_through_ready())

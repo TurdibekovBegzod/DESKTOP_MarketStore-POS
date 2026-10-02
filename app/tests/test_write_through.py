@@ -20,7 +20,7 @@ import database as db
 import sync_service
 
 
-class WriteThroughTest(unittest.TestCase):
+class _WriteThroughCase(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp(prefix="marketstore-write-through-")
         self.old_path = db.DB_PATH
@@ -75,6 +75,9 @@ class WriteThroughTest(unittest.TestCase):
                                                     "price": 1000, "subtotal": 1000}],
                               1000, 0, 1000, "naqd")
 
+
+
+class WriteThroughTest(_WriteThroughCase):
     def test_a_sale_is_one_upload_with_everything_in_it(self):
         self._sell()
 
@@ -206,6 +209,85 @@ class WriteThroughTest(unittest.TestCase):
         self.assertEqual(self.uploads, [])
         self.assertEqual(self.announced, [1])
         self.assertGreater(db.count_pending_sync_rows(), 0)
+
+
+class UnansweredUploadTest(_WriteThroughCase):
+    """The answer to an upload was lost; the server may or may not have it."""
+
+    def _sell_unanswered(self):
+        self.failure = db.DeliveryUncertain("no answer")
+        self._sell()
+        self.failure = None
+        return list(self.uploads[-1])
+
+    def _server_rows(self, keys, change=None):
+        """The rows as the server holds them after storing that upload."""
+        rows = []
+        with db._get_engine().connect() as conn:
+            for table_name, local_id in keys:
+                record = db._outbox_record(conn, table_name, local_id, "upsert", "t", None)
+                if record is None:
+                    continue
+                record = dict(record, sync_version=2)
+                if change and table_name == "products":
+                    record["data"] = dict(record["data"], **change)
+                rows.append(record)
+        return rows
+
+    def test_a_landed_upload_is_recognised_and_leaves_the_queue(self):
+        sent = self._sell_unanswered()
+        self.assertGreater(db.count_pending_sync_rows(), 0)
+        self.assertTrue(db.has_unconfirmed())
+
+        db.import_sync_records(self._server_rows(sent))
+
+        self.assertEqual(db.count_pending_sync_rows(), 0)
+        self.assertFalse(db.has_unconfirmed())
+        product_id = str(self.product)
+        self.assertEqual(db.get_known_row_version("products", product_id), 2)
+
+    def test_the_next_sale_claims_the_version_the_server_now_has(self):
+        """The stock problem: without this, sale two is refused as stale and
+        the product ends up sold twice but reduced once."""
+        sent = self._sell_unanswered()
+        db.import_sync_records(self._server_rows(sent))
+
+        self._sell()
+
+        products = [r for r in self.last_records if r["table_name"] == "products"]
+        self.assertEqual(products[0]["expected_version"], 2)
+        self.assertEqual(db.get_product_by_barcode("P1")["stock"], 3)
+
+    def test_a_row_changed_elsewhere_is_not_mistaken_for_ours(self):
+        sent = self._sell_unanswered()
+        db.import_sync_records(self._server_rows(sent, change={"name": "Boshqa qurilma"}))
+
+        # The sale rows are ours; the product is someone else's version.
+        self.assertTrue(db.has_unconfirmed())
+        queued = {key for key in db._pending_outbox_keys()}
+        self.assertIn(("products", str(self.product)), queued)
+
+    def test_an_upload_that_never_landed_is_simply_sent_again(self):
+        sent = self._sell_unanswered()
+        db.import_sync_records([])  # the server has nothing of it
+        self.assertGreater(db.count_pending_sync_rows(), 0)
+        records, _ = db.export_sync_records(incremental=True, with_watermark=True)
+        self.assertEqual({(r["table_name"], r["local_id"]) for r in records}, set(sent))
+
+    def test_settling_runs_before_the_next_change_only_while_needed(self):
+        calls = []
+        db.set_before_action(lambda: calls.append(db.has_unconfirmed()))
+        try:
+            self._sell()
+            self._sell_unanswered()
+            self._sell()
+        finally:
+            db.set_before_action(None)
+        self.assertEqual(calls, [False, False, True])
+
+    def _deliver(self, records):
+        self.last_records = records
+        return super()._deliver(records)
 
 
 class DeliveryMessagesTest(unittest.TestCase):

@@ -221,6 +221,20 @@ class DeliveryUncertain(Exception):
     """
 
 
+_BEFORE_ACTION = None
+
+
+def set_before_action(callback):
+    """Run ``callback()`` before each business action starts writing.
+
+    Used to settle uploads whose answer never came back (see
+    _settle_unconfirmed) before a new change is built on top of them. It runs
+    before the action takes the database's write lock, so it may download.
+    """
+    global _BEFORE_ACTION
+    _BEFORE_ACTION = callback
+
+
 def set_write_through(deliver, after_commit=None):
     """Send every change to the server inside its own local transaction.
 
@@ -303,6 +317,13 @@ def server_action():
 def _as_server_action(function):
     @functools.wraps(function)
     def wrapped(*args, **kwargs):
+        if not getattr(_ACTION, "depth", 0) and _BEFORE_ACTION is not None:
+            try:
+                _BEFORE_ACTION()
+            except Exception:
+                # Settling is a courtesy to the change about to be made; if it
+                # cannot reach the server, the change's own upload says so.
+                pass
         with server_action():
             return function(*args, **kwargs)
     return wrapped
@@ -2859,6 +2880,9 @@ def _deliver_before_commit(session, entries):
     try:
         answer = dict(_WRITE_THROUGH(records) or {})
     except DeliveryUncertain:
+        # Committed and left queued; remember exactly what went out, so the
+        # next download can tell whether the server has it.
+        _remember_unconfirmed(conn, records)
         return None
     sent = [(record["table_name"], record["local_id"]) for record in records]
     for table_name, local_id in sent:
@@ -2869,6 +2893,7 @@ def _deliver_before_commit(session, entries):
     # What we sent is no longer what we last downloaded; the next download
     # brings the server's version number back.
     _forget_row_versions(conn, sent)
+    _drop_settled_unconfirmed(conn)
     clause, clause_params = _unsendable_clause()
     remaining = conn.exec_driver_sql(
         f"SELECT COUNT(*) FROM sync_outbox{clause}", clause_params
@@ -3280,6 +3305,126 @@ def count_sync_quarantine():
         return int(conn.exec_driver_sql("SELECT COUNT(*) FROM sync_quarantine").scalar() or 0)
 
 
+def _record_fingerprint(record):
+    """What a row says, independent of how it travelled.
+
+    PostgreSQL's JSONB hands keys back in its own order, so they are sorted;
+    the values come back exactly as sent. A deletion is the row's absence.
+    """
+    data = record.get("data") or {}
+    deleted = bool(record.get("deleted_at")) and not data
+    body = json.dumps(data, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str)
+    return hashlib.sha256(f"{int(deleted)}|{body}".encode("utf-8")).hexdigest()
+
+
+def _ensure_unconfirmed_table(conn):
+    conn.exec_driver_sql("""
+        CREATE TABLE IF NOT EXISTS sync_unconfirmed (
+            table_name TEXT NOT NULL,
+            local_id TEXT NOT NULL,
+            fingerprint TEXT NOT NULL,
+            PRIMARY KEY (table_name, local_id, fingerprint)
+        )
+    """)
+
+
+def _remember_unconfirmed(conn, records):
+    _ensure_unconfirmed_table(conn)
+    for record in records or ():
+        conn.exec_driver_sql(
+            "INSERT OR IGNORE INTO sync_unconfirmed (table_name, local_id, fingerprint) VALUES (?, ?, ?)",
+            (record.get("table_name"), str(record.get("local_id")), _record_fingerprint(record)),
+        )
+
+
+def remember_unconfirmed(records):
+    """An upload went out and its answer did not come back."""
+    with _begin() as conn:
+        _remember_unconfirmed(conn, records)
+
+
+def _drop_settled_unconfirmed(conn):
+    """Forget what is no longer queued: it has been delivered since."""
+    _ensure_unconfirmed_table(conn)
+    _ensure_sync_outbox_table(conn)
+    conn.exec_driver_sql("""
+        DELETE FROM sync_unconfirmed WHERE NOT EXISTS (
+            SELECT 1 FROM sync_outbox o
+            WHERE o.table_name = sync_unconfirmed.table_name
+              AND o.local_id = sync_unconfirmed.local_id
+        )
+    """)
+
+
+def has_unconfirmed():
+    with _begin() as conn:
+        _ensure_unconfirmed_table(conn)
+        _drop_settled_unconfirmed(conn)
+        return bool(conn.exec_driver_sql("SELECT 1 FROM sync_unconfirmed LIMIT 1").fetchone())
+
+
+def _settle_unconfirmed(records):
+    """Recognise our own unanswered uploads among the server's rows.
+
+    An upload whose answer was lost may have been stored. If it was, the row
+    comes back in the next download carrying exactly what we sent - and with a
+    version number one past the one this device remembers. Without this, the
+    next change to that row would claim the old version, the server would
+    refuse it as stale, and the device would then take the server's copy: a
+    product sold twice would have its stock reduced once.
+
+    So a returning row that matches what we sent is ours: if nothing has
+    changed here since, it is no longer queued; if something has, the change
+    stays queued but now claims the server's current version, and goes through.
+    Rows that match nothing we sent were changed elsewhere and are left to the
+    ordinary rules.
+    """
+    with _begin() as conn:
+        _ensure_unconfirmed_table(conn)
+        _drop_settled_unconfirmed(conn)
+        sent = {}
+        for table_name, local_id, fingerprint in conn.exec_driver_sql(
+            "SELECT table_name, local_id, fingerprint FROM sync_unconfirmed"
+        ).fetchall():
+            sent.setdefault((table_name, str(local_id)), set()).add(fingerprint)
+        if not sent:
+            return set()
+        device_key = _sync_state_get(conn, "device_key") or None
+        confirmed = set()
+        for record in records or ():
+            key = (record.get("table_name"), str(record.get("local_id")))
+            server_print = _record_fingerprint(record)
+            if server_print not in sent.get(key, ()):
+                continue
+            confirmed.add(key)
+            table_name, local_id = key
+            queued = conn.exec_driver_sql(
+                "SELECT action, updated_at FROM sync_outbox WHERE table_name = ? AND local_id = ?",
+                (table_name, local_id),
+            ).fetchone()
+            local = (
+                _outbox_record(conn, table_name, local_id, queued[0], queued[1], device_key)
+                if queued else None
+            )
+            if local is None or _record_fingerprint(local) == server_print:
+                conn.exec_driver_sql(
+                    "DELETE FROM sync_outbox WHERE table_name = ? AND local_id = ?",
+                    (table_name, local_id),
+                )
+            else:
+                _remember_row_version(conn, table_name, local_id, record.get("sync_version"))
+            conn.exec_driver_sql(
+                "DELETE FROM sync_unconfirmed WHERE table_name = ? AND local_id = ?",
+                (table_name, local_id),
+            )
+        if confirmed:
+            remaining = conn.exec_driver_sql("SELECT COUNT(*) FROM sync_outbox").scalar() or 0
+            _sync_state_set(conn, "pending_change_count", str(remaining))
+            if not remaining:
+                _sync_state_set(conn, "last_dirty_at", "")
+        return confirmed
+
+
 def _pending_outbox_keys():
     """Rows changed here that the server has not been told about yet."""
     with _begin() as conn:
@@ -3313,6 +3458,7 @@ def import_sync_records(records, chunk_size=IMPORT_CHUNK_SIZE):
     # would throw away something the person just did, without a trace. Ours is
     # left alone and goes out with the next push -- where the version guard
     # decides it, rather than the order two messages happened to arrive in.
+    _settle_unconfirmed(records)
     unsent = _pending_outbox_keys()
     held = _pending_quarantined_records()
     if held:
@@ -3504,6 +3650,7 @@ def mark_sync_pushed(up_to_seq=None, tombstone_ids=None):
         _sync_state_set(conn, "last_push_at", now)
         _sync_state_set(conn, "last_dirty_at", "" if not remaining else now)
         _sync_state_set(conn, "pending_change_count", str(remaining))
+        _drop_settled_unconfirmed(conn)
 
 
 def get_app_settings(user_id=None):

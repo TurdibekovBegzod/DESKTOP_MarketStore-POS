@@ -173,6 +173,29 @@ def reconcile_after_upgrade(user):
     return result
 
 
+def _push_remembering_unanswered(token, records, **kwargs):
+    """push_sync_records, noting what went out if its answer never came back."""
+    try:
+        return api_client.push_sync_records(token, records, **kwargs)
+    except api_client.ApiOfflineError as exc:
+        if exc.kind == "uncertain":
+            db.remember_unconfirmed(records)
+        raise
+
+
+def settle_unconfirmed(user):
+    """Before a new change: find out whether earlier unanswered uploads landed.
+
+    One download, and only while such an upload is outstanding. The download's
+    import recognises our own rows (db._settle_unconfirmed), so the change that
+    follows is built on the server's current versions.
+    """
+    if not db.has_unconfirmed():
+        return False
+    pull_server_changes(user, incremental=True)
+    return True
+
+
 @_one_at_a_time
 def push_local_changes(
     user,
@@ -260,7 +283,7 @@ def push_local_changes(
         for i in range(0, len(records), batch_size):
             chunk = records[i:i + batch_size]
             try:
-                result = api_client.push_sync_records(
+                result = _push_remembering_unanswered(
                     token,
                     chunk,
                     device_key=device_key,
@@ -279,7 +302,7 @@ def push_local_changes(
                 chunk = [row for row in chunk if row.get("table_name") not in exc.tables]
                 if not chunk:
                     continue
-                result = api_client.push_sync_records(
+                result = _push_remembering_unanswered(
                     token,
                     chunk,
                     device_key=device_key,
