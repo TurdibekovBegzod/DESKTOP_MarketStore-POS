@@ -12,6 +12,7 @@ import database as db
 import sync_service
 from ui.login_dialog import LoginDialog
 from ui.main_window import MainWindow
+from ui.window_reveal import show_maximized_without_flicker
 
 
 def resource_path(relative_path):
@@ -85,14 +86,14 @@ def main():
             except Exception:
                 traceback.print_exc()
         window = MainWindow(dict(recent_user))
-        window.showMaximized()
+        show_maximized_without_flicker(window)
         sys.exit(app.exec())
 
     login = LoginDialog()
     if login.exec():
         db.touch_user_activity(login.logged_user["id"])
         window = MainWindow(login.logged_user)
-        window.showMaximized()
+        show_maximized_without_flicker(window)
         sys.exit(app.exec())
     sys.exit(0)
 

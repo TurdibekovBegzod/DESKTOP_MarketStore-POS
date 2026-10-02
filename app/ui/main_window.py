@@ -33,6 +33,7 @@ from ui.expenses_widget import ExpensesWidget
 from ui.finance_widget import FinanceWidget
 from ui.checking_widget import CheckingWidget
 from ui.corner_badge import pin_to_right_edge
+from ui.window_reveal import show_maximized_without_flicker
 from ui.ai_widget import AIWidget
 from ui.notifications_widget import NotificationsWidget
 from ui.updater_dialog import UpdaterDialog
@@ -2638,12 +2639,11 @@ class MainWindow(QMainWindow):
             worker.stop()
         if thread is not None:
             thread.quit()
-            if not thread.wait(250):
-                # A turn is still waiting on the server. Cut that request
-                # rather than hold the window open until it answers; the
-                # upload stays queued and is settled on the next run.
-                api_client.abort_open_requests()
-                thread.wait(2000)
+            # Never wait on the server: a turn caught mid-request is cut at
+            # once, and its upload stays queued for the next run. An idle
+            # worker loses nothing - its next request opens a new connection.
+            api_client.abort_open_requests()
+            thread.wait(2000)
 
     @pyqtSlot(dict)
     def _on_sync_turn_finished(self, outcome):
@@ -3310,7 +3310,7 @@ class MainWindow(QMainWindow):
         self.user["role"] = "admin"
         self._log_auth_event("main_mode")
         self.next_window = MainWindow(dict(self.user))
-        self.next_window.showMaximized()
+        show_maximized_without_flicker(self.next_window)
         self._logging_out = True
         self.close()
 
@@ -3344,7 +3344,7 @@ class MainWindow(QMainWindow):
         self.user["role"] = "cashier"
         self._log_auth_event("cashier_mode")
         self.next_window = MainWindow(dict(self.user))
-        self.next_window.showMaximized()
+        show_maximized_without_flicker(self.next_window)
         self._logging_out = True
         self.close()
 
@@ -3981,4 +3981,4 @@ class MainWindow(QMainWindow):
             if dlg.exec():
                 db.touch_user_activity(dlg.logged_user["id"])
                 self.next_window = MainWindow(dlg.logged_user)
-                self.next_window.showMaximized()
+                show_maximized_without_flicker(self.next_window)

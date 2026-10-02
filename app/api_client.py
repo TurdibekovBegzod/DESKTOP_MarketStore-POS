@@ -233,7 +233,12 @@ def _connection_for(key, connect_timeout, response_timeout):
     entry = pool.get(key)
     if entry is not None:
         connection, last_used = entry
-        if time.monotonic() - last_used < _IDLE_CONNECTION_SECONDS and connection.sock is not None:
+        # fileno() is -1 once abort_open_requests has cut the socket.
+        if (
+            time.monotonic() - last_used < _IDLE_CONNECTION_SECONDS
+            and connection.sock is not None
+            and connection.sock.fileno() != -1
+        ):
             connection.timeout = response_timeout
             connection.sock.settimeout(response_timeout)
             return connection, True
@@ -680,8 +685,9 @@ def abort_event_stream(response):
 def abort_open_requests():
     """Cut every pooled API request still waiting on the server.
 
-    For shutdown only: every connection is left unusable. A cut upload is not
-    lost - it stays queued and is matched against the server on the next run.
+    Meant for shutdown. A cut connection is never reused: the next request
+    opens a fresh one. A cut upload is not lost - it stays queued and is
+    matched against the server on the next run.
     """
     with _all_connections_lock:
         connections = list(_all_connections)

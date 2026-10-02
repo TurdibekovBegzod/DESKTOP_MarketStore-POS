@@ -139,6 +139,37 @@ class AbortOpenRequestsTest(unittest.TestCase):
         self.assertEqual(error.kind, "uncertain")
 
 
+    def test_the_next_request_after_a_cut_opens_a_fresh_connection(self):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        import api_client
+
+        class _Ok(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_GET(self):
+                body = b'{"ok": true}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _Ok)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        url = f"http://127.0.0.1:{server.server_address[1]}/api/v1"
+
+        with patch.dict(os.environ, {"MARKETSTORE_API_URL": url}):
+            self.assertEqual(api_client._request_json("/ping", method="GET"), {"ok": True})
+            api_client.abort_open_requests()
+            self.assertEqual(api_client._request_json("/ping", method="GET"), {"ok": True})
+
+
 class AbortEventStreamTest(unittest.TestCase):
     def test_a_response_without_a_socket_is_ignored(self):
         import api_client
