@@ -206,7 +206,19 @@ def _drop_connection(key):
             pass
 
 
-def _connection_for(key, timeout):
+def _split_timeout(timeout):
+    """(connect, response) seconds from either one number or a pair of them.
+
+    A pair lets a caller notice a dead link quickly - connecting takes a
+    fraction of a second when the network is there - while still giving a
+    slow server time to answer a request it has already received.
+    """
+    if isinstance(timeout, tuple):
+        return timeout[0], timeout[1]
+    return timeout, timeout
+
+
+def _connection_for(key, connect_timeout, response_timeout):
     """(connection, reused) for this thread, opening a new one when needed."""
     pool = getattr(_connections, "pool", None)
     if pool is None:
@@ -215,30 +227,33 @@ def _connection_for(key, timeout):
     if entry is not None:
         connection, last_used = entry
         if time.monotonic() - last_used < _IDLE_CONNECTION_SECONDS and connection.sock is not None:
-            connection.timeout = timeout
-            connection.sock.settimeout(timeout)
+            connection.timeout = response_timeout
+            connection.sock.settimeout(response_timeout)
             return connection, True
         _drop_connection(key)
     scheme, host, port = key
     if scheme == "https":
         connection = http.client.HTTPSConnection(
-            host, port, timeout=timeout, context=create_ssl_context()
+            host, port, timeout=connect_timeout, context=create_ssl_context()
         )
     else:
-        connection = http.client.HTTPConnection(host, port, timeout=timeout)
+        connection = http.client.HTTPConnection(host, port, timeout=connect_timeout)
     pool[key] = (connection, time.monotonic())
     return connection, False
 
 
 def _send_pooled(method, url, data, headers, timeout):
+    connect_timeout, response_timeout = _split_timeout(timeout)
     parts = urlsplit(url)
     key = (parts.scheme, parts.hostname, parts.port)
     target = parts.path + (f"?{parts.query}" if parts.query else "")
     for attempt in range(2):
-        connection, reused = _connection_for(key, timeout)
+        connection, reused = _connection_for(key, connect_timeout, response_timeout)
         try:
             if connection.sock is None:
                 connection.connect()
+                connection.timeout = response_timeout
+                connection.sock.settimeout(response_timeout)
         except BaseException as exc:
             _drop_connection(key)
             exc.request_phase = "connect"
@@ -277,7 +292,7 @@ def _send_via_proxy(method, url, data, headers, timeout):
     """
     request = Request(url, data=data, headers=headers, method=method)
     try:
-        with urlopen(request, timeout=timeout, context=create_ssl_context()) as response:
+        with urlopen(request, timeout=max(_split_timeout(timeout)), context=create_ssl_context()) as response:
             return response.status, response.headers, response.read()
     except HTTPError as exc:
         try:

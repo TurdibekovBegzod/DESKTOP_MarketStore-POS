@@ -233,14 +233,84 @@ class DeliveryMessagesTest(unittest.TestCase):
         with self.assertRaises(db.DeliveryUncertain):
             self._deliver_failing(api_client.ApiOfflineError("x", kind="uncertain"))
 
-    def test_one_request_with_a_short_timeout(self):
+    def test_one_request_with_a_quick_connect_and_a_longer_answer(self):
         with patch.object(api_client, "push_sync_records", return_value={"generation": 3}) as push, \
-             patch.object(db, "get_sync_device_key", return_value="dev"), \
              patch.object(db, "get_applied_purge_generation", return_value=0):
             sync_service.deliver_records(self.user, [{"table_name": "sales"}])
         push.assert_called_once()
-        self.assertEqual(push.call_args.kwargs["timeout"], sync_service.DELIVERY_TIMEOUT_SECONDS)
+        self.assertEqual(push.call_args.kwargs["timeout"],
+                         (sync_service.DELIVERY_CONNECT_SECONDS,
+                          sync_service.DELIVERY_RESPONSE_SECONDS))
         self.assertIsNone(push.call_args.kwargs["expected_generation"])
+
+
+class DeliveryRetryTest(unittest.TestCase):
+    """A lost answer is asked for again; it never turns into a double sale."""
+
+    user = {"id": 1, "api_access_token": "tok"}
+
+    def setUp(self):
+        self.now = 0.0
+        self.slept = []
+
+    def _clock(self):
+        return self.now
+
+    def _sleep(self, seconds):
+        self.slept.append(seconds)
+        self.now += seconds
+
+    def _deliver(self, outcomes, cost=0.5):
+        """``cost`` None: every attempt runs out its whole timeout."""
+        calls = []
+
+        def push(*_args, **kwargs):
+            calls.append(kwargs["timeout"])
+            self.now += sum(kwargs["timeout"]) if cost is None else cost
+            outcome = outcomes[len(calls) - 1]
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+
+        with patch.object(api_client, "push_sync_records", side_effect=push), \
+             patch.object(db, "get_applied_purge_generation", return_value=0):
+            try:
+                return sync_service.deliver_records(
+                    self.user, [{"table_name": "sales"}], clock=self._clock, sleep=self._sleep
+                ), calls
+            except Exception as exc:
+                exc.calls = calls
+                raise
+
+    @staticmethod
+    def _offline(kind):
+        return api_client.ApiOfflineError("x", kind=kind)
+
+    def test_a_lost_answer_is_asked_again_and_the_second_answer_counts(self):
+        answer, calls = self._deliver([self._offline("uncertain"), {"generation": 4}])
+        self.assertEqual(answer, {"generation": 4})
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(self.slept, [1])
+
+    def test_no_internet_on_the_first_try_is_said_at_once(self):
+        with self.assertRaises(db.AppError) as caught:
+            self._deliver([self._offline("internet")])
+        self.assertEqual(len(caught.exception.calls), 1)
+        self.assertEqual(self.slept, [])
+
+    def test_saved_then_the_server_went_down_is_kept_not_refused(self):
+        """The first attempt may have been stored. A later "server is down"
+        must not roll the sale back, or it is rung up twice."""
+        with self.assertRaises(db.DeliveryUncertain):
+            self._deliver([self._offline("uncertain"), self._offline("server"),
+                           self._offline("internet")])
+
+    def test_it_never_freezes_the_window_past_the_deadline(self):
+        with self.assertRaises(db.DeliveryUncertain) as caught:
+            self._deliver([self._offline("uncertain")] * 3, cost=None)
+        self.assertLessEqual(self.now, sync_service.DELIVERY_DEADLINE_SECONDS)
+        # A first attempt that ran its full time still leaves room for one more.
+        self.assertEqual(len(caught.exception.calls), 2)
 
 
 class FinishDeliveryTest(unittest.TestCase):

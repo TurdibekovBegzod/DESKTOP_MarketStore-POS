@@ -181,6 +181,19 @@ class ApiClientFailureKindTest(unittest.TestCase):
             server.server_close()
         self.assertEqual(kind, "uncertain")
 
+    def test_a_slow_answer_gets_the_answer_timeout_not_the_connect_one(self):
+        """Connect has 0.5 s, the answer 3 s: a server that takes 1.5 s to
+        answer must still be heard."""
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _SlowHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            with patch.dict(os.environ, {"MARKETSTORE_API_URL": f"http://127.0.0.1:{server.server_address[1]}/api/v1"}):
+                result = api_client._request_json("/sync/state", timeout=(0.5, 3))
+        finally:
+            server.shutdown()
+            server.server_close()
+        self.assertEqual(result["path"], "/api/v1/sync/state")
+
     def test_a_gateway_timeout_is_uncertain(self):
         with patch("api_client._send", return_value=(504, {}, b"{}")):
             self.assertEqual(self._kind("https://api.test/api/v1"), "uncertain")

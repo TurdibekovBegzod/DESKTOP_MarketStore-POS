@@ -9,6 +9,7 @@ a wrong click is recoverable.
 
 import functools
 import threading
+import time
 from datetime import datetime, timedelta
 
 import api_client
@@ -339,10 +340,19 @@ def push_local_changes(
     }
 
 
-# How long a change waits for the server before the person is told. Long enough
-# for one upload over a slow shop connection, short enough that a dead link is
-# reported while the cashier is still looking at the screen.
-DELIVERY_TIMEOUT_SECONDS = 8
+# Connecting is quick whenever the network is there, so a link that is down is
+# reported after a few seconds. An answer may legitimately take longer: the
+# server has the request by then and is only slow to reply.
+DELIVERY_CONNECT_SECONDS = 3
+DELIVERY_RESPONSE_SECONDS = 8
+# When an upload goes out and no answer comes back, it is sent again - the same
+# rows under the same ids, which the server stores once however often they
+# arrive. Most lost answers are a blip in the shop's link and the next attempt
+# gets through.
+DELIVERY_RETRY_DELAYS = (1, 2)
+# The window is frozen while a change is delivered; never longer than this.
+# Enough for a first attempt that timed out (3 + 8 s) and one more after it.
+DELIVERY_DEADLINE_SECONDS = 20
 
 NO_INTERNET_MESSAGE = (
     "Internet ishlamayapti.\n\n"
@@ -354,51 +364,70 @@ SERVER_DOWN_MESSAGE = (
 )
 
 
-def deliver_records(user, records, timeout=DELIVERY_TIMEOUT_SECONDS):
+def deliver_records(user, records, clock=time.monotonic, sleep=time.sleep):
     """Upload one action's rows before they are committed here.
 
     This upload is the action's only contact with the server: it is the check
     that the internet and the server work, and the delivery itself. Raising
     db.AppError rolls the action back, so nothing stays on this device that the
     server did not take; db.DeliveryUncertain keeps it queued (see there).
+
+    Once an attempt has gone out without an answer, the server may already
+    hold the rows. From then on no failure may roll the action back - not even
+    a later attempt that finds the server switched off - or the cashier would
+    ring the sale up again and the server would have it twice.
     """
     try:
         token = _token_for_user(user)
     except SyncError as exc:
         raise db.AppError(str(exc)) from exc
-    try:
-        return api_client.push_sync_records(
-            token,
-            records,
-            # From the records: asking the database here would open a second
-            # connection while this action's transaction holds the write lock.
-            device_key=(records[0].get("source_device_key") if records else None),
-            note=f"desktop action ({len(records)})",
-            timeout=timeout,
-            expected_generation=None,
-            applied_purge_generation=db.get_applied_purge_generation(),
-        )
-    except api_client.ApiOfflineError as exc:
-        if exc.kind == "uncertain":
+    deadline = clock() + DELIVERY_DEADLINE_SECONDS
+    unanswered = None
+    for delay in (0,) + DELIVERY_RETRY_DELAYS:
+        if delay:
+            if clock() + delay + DELIVERY_CONNECT_SECONDS >= deadline:
+                break
+            sleep(delay)
+        remaining = deadline - clock()
+        connect_seconds = min(DELIVERY_CONNECT_SECONDS, remaining)
+        # Connecting and waiting for the answer add up, so the answer only
+        # gets what connecting leaves of the deadline.
+        response_seconds = max(0.5, min(DELIVERY_RESPONSE_SECONDS, remaining - connect_seconds))
+        try:
+            return api_client.push_sync_records(
+                token,
+                records,
+                # From the records: asking the database here would open a second
+                # connection while this action's transaction holds the write lock.
+                device_key=(records[0].get("source_device_key") if records else None),
+                note=f"desktop action ({len(records)})",
+                timeout=(connect_seconds, response_seconds),
+                expected_generation=None,
+                applied_purge_generation=db.get_applied_purge_generation(),
+            )
+        except api_client.ApiOfflineError as exc:
+            if exc.kind == "uncertain" or unanswered is not None:
+                unanswered = exc
+                continue
+            if exc.kind == "server":
+                raise db.AppError(SERVER_DOWN_MESSAGE) from exc
+            raise db.AppError(NO_INTERNET_MESSAGE) from exc
+        except api_client.UnsupportedSyncTableError as exc:
+            # This server is older than this desktop. The sync engine knows how
+            # to set the unknown table aside and send the rest; leave it the rows.
             raise db.DeliveryUncertain(str(exc)) from exc
-        if exc.kind == "server":
-            raise db.AppError(SERVER_DOWN_MESSAGE) from exc
-        raise db.AppError(NO_INTERNET_MESSAGE) from exc
-    except api_client.UnsupportedSyncTableError as exc:
-        # This server is older than this desktop. The sync engine knows how to
-        # set the unknown table aside and send the rest; leave it the rows.
-        raise db.DeliveryUncertain(str(exc)) from exc
-    except api_client.RemotePurgeRequiredError as exc:
-        raise db.AppError(
-            "Account ma'lumotlari web boshqaruv panelidan o'chirilgan. "
-            "Bu qurilma yangilanmoqda - birozdan keyin qayta urinib ko'ring."
-        ) from exc
-    except api_client.ApiAuthError as exc:
-        raise db.AppError(
-            "Sessiya muddati tugagan. Dasturdan chiqib, qayta kiring."
-        ) from exc
-    except api_client.ApiClientError as exc:
-        raise db.AppError(f"Server o'zgarishni qabul qilmadi: {exc}") from exc
+        except api_client.RemotePurgeRequiredError as exc:
+            raise db.AppError(
+                "Account ma'lumotlari web boshqaruv panelidan o'chirilgan. "
+                "Bu qurilma yangilanmoqda - birozdan keyin qayta urinib ko'ring."
+            ) from exc
+        except api_client.ApiAuthError as exc:
+            raise db.AppError(
+                "Sessiya muddati tugagan. Dasturdan chiqib, qayta kiring."
+            ) from exc
+        except api_client.ApiClientError as exc:
+            raise db.AppError(f"Server o'zgarishni qabul qilmadi: {exc}") from exc
+    raise db.DeliveryUncertain(str(unanswered)) from unanswered
 
 
 def finish_delivery(answer):
