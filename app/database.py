@@ -37,6 +37,8 @@ from sqlalchemy.exc import IntegrityError, InvalidRequestError, OperationalError
 from sqlalchemy.orm import Session, declarative_base, relationship, sessionmaker
 from sqlalchemy.sql import text
 
+from reporting.sale_period import report_date_expr, report_time
+
 
 def get_app_data_dir() -> str:
     """Returns writable user data directory across Windows, Linux, macOS, or local dev."""
@@ -7036,10 +7038,19 @@ def get_sale_cost(sale_id):
         return _sale_cost(session, sale_id)
 
 
+def _sale_report_date():
+    """Local date a sale counts on; see reporting.sale_period."""
+    return report_date_expr(Sale.created_at, Sale.finalized_at)
+
+
+def _sale_report_time(sale):
+    return report_time(sale.created_at, sale.finalized_at)
+
+
 def _sales_for_date(session, date_str):
     return session.scalars(
         select(Sale)
-        .where(_date_expr(Sale.created_at) == date_str)
+        .where(_sale_report_date() == date_str)
         .where(func.coalesce(Sale.is_finalized, 0) == 1)
         .order_by(Sale.created_at.desc())
     ).all()
@@ -7082,7 +7093,7 @@ def get_cashier_report(date_str):
         rows = session.execute(
             select(Sale, User.username)
             .outerjoin(User, User.id == Sale.cashier_id)
-            .where(_date_expr(Sale.created_at) == date_str)
+            .where(_sale_report_date() == date_str)
             .where(func.coalesce(Sale.is_finalized, 0) == 1)
         ).all()
         grouped = {}
@@ -7104,7 +7115,7 @@ def get_cashier_sold_items(date_str, cashier_id=None):
             .select_from(SaleItem)
             .join(Sale, Sale.id == SaleItem.sale_id)
             .join(Product, Product.id == SaleItem.product_id)
-            .where(_date_expr(Sale.created_at) == date_str)
+            .where(_sale_report_date() == date_str)
             .where(func.coalesce(Sale.is_finalized, 0) == 1)
         )
         if cashier_id:
@@ -7161,12 +7172,12 @@ def get_overall_period_series(start_date, end_date, section_id=None):
     with session_scope() as session:
         sales = session.scalars(
             select(Sale)
-            .where(_date_expr(Sale.created_at).between(start_date, end_date))
+            .where(_sale_report_date().between(start_date, end_date))
             .where(func.coalesce(Sale.is_finalized, 0) == 1)
         ).all()
         grouped = {}
         for sale in sales:
-            label = _local_date_label(sale.created_at)
+            label = _local_date_label(_sale_report_time(sale))
             row = grouped.setdefault(label, Row(dict(
                 label=label, sales_count=0, product_count=0, revenue=0, profit=0,
                 cashier_reward=0, salary_deduction=0,
@@ -7202,12 +7213,12 @@ def get_overall_day_hourly_series(date_str, section_id=None):
     with session_scope() as session:
         sales = session.scalars(
             select(Sale)
-            .where(_date_expr(Sale.created_at) == date_str)
+            .where(_sale_report_date() == date_str)
             .where(func.coalesce(Sale.is_finalized, 0) == 1)
         ).all()
         grouped = {}
         for sale in sales:
-            label = _local_hour_label(sale.created_at)
+            label = _local_hour_label(_sale_report_time(sale))
             row = grouped.setdefault(label, Row(dict(
                 label=label, sales_count=0, product_count=0, revenue=0, profit=0,
                 cashier_reward=0, salary_deduction=0,
@@ -7357,7 +7368,7 @@ def get_cashier_period_summary(start_date, end_date, section_id=None, only_cashi
                 select(Sale)
                 .where(and_(
                     Sale.cashier_id == user.id,
-                    _date_expr(Sale.created_at).between(start_date, end_date),
+                    _sale_report_date().between(start_date, end_date),
                     func.coalesce(Sale.is_finalized, 0) == 1,
                 ))
             ).all()
@@ -7417,7 +7428,7 @@ def get_cashier_sales_details(cashier_id=None, start_date=None, end_date=None, s
             .join(Sale, Sale.id == SaleItem.sale_id)
             .outerjoin(Product, Product.id == SaleItem.product_id)
             .where(
-                _date_expr(Sale.created_at).between(start_date, end_date),
+                _sale_report_date().between(start_date, end_date),
             )
         )
         if cashier_id is not None:
@@ -7494,17 +7505,23 @@ def get_cashier_sales_details(cashier_id=None, start_date=None, end_date=None, s
 
 
 def get_cashier_salary_period_summary(start_date, end_date, section_id=None):
+    # Imported here: cashier_balance reads its models from this module.
+    from reporting.cashier_balance import balances_before
+
     with session_scope() as session:
         users = session.scalars(
             select(User).where(User.role == "cashier").order_by(User.username)
         ).all()
+        # The salary is a running balance: what earlier periods left (a minus
+        # included) carries into this one. A section has no balance of its own.
+        opening = balances_before(session, start_date) if section_id is None else {}
         rows = []
         for user in users:
             sales = session.scalars(
                 select(Sale)
                 .where(and_(
                     Sale.cashier_id == user.id,
-                    _date_expr(Sale.created_at).between(start_date, end_date),
+                    _sale_report_date().between(start_date, end_date),
                     func.coalesce(Sale.is_finalized, 0) == 1,
                 ))
             ).all()
@@ -7518,6 +7535,7 @@ def get_cashier_salary_period_summary(start_date, end_date, section_id=None):
                 cashier_reward=0.0,
                 total_salary=0.0,
                 salary_deduction=0.0,
+                opening_balance=0.0,
             ))
             for sale in sales:
                 if section_id:
@@ -7547,6 +7565,8 @@ def get_cashier_salary_period_summary(start_date, end_date, section_id=None):
                 )
                 row["salary_deduction"] = deduction
                 row["total_salary"] -= deduction
+                row["opening_balance"] = opening.get(user.id, 0.0)
+                row["total_salary"] += row["opening_balance"]
             rows.append(row)
         return sorted(rows, key=lambda r: (-r["total_salary"], -r["revenue"], r["entity_name"]))
 
@@ -7560,7 +7580,7 @@ def get_customer_period_summary(start_date, end_date):
                 select(Sale)
                 .where(and_(
                     Sale.customer_id == customer.id,
-                    _date_expr(Sale.created_at).between(start_date, end_date),
+                    _sale_report_date().between(start_date, end_date),
                     func.coalesce(Sale.is_finalized, 0) == 1,
                 ))
             ).all()
@@ -7585,13 +7605,13 @@ def get_entity_period_series(entity_type, entity_id, start_date, end_date, secti
             select(Sale)
             .where(and_(
                 column == entity_id,
-                _date_expr(Sale.created_at).between(start_date, end_date),
+                _sale_report_date().between(start_date, end_date),
                 func.coalesce(Sale.is_finalized, 0) == 1,
             ))
         ).all()
         grouped = {}
         for sale in sales:
-            label = _local_date_label(sale.created_at)
+            label = _local_date_label(_sale_report_time(sale))
             row = grouped.setdefault(label, Row(dict(
                 label=label, sales_count=0, product_count=0, revenue=0,
                 profit=0, salary=0, total_salary=0, cashier_reward=0, salary_deduction=0,
@@ -7639,13 +7659,13 @@ def get_entity_day_hourly_series(entity_type, entity_id, date_str, section_id=No
             select(Sale)
             .where(and_(
                 column == entity_id,
-                _date_expr(Sale.created_at) == date_str,
+                _sale_report_date() == date_str,
                 func.coalesce(Sale.is_finalized, 0) == 1,
             ))
         ).all()
         grouped = {}
         for sale in sales:
-            label = _local_hour_label(sale.created_at)
+            label = _local_hour_label(_sale_report_time(sale))
             row = grouped.setdefault(label, Row(dict(
                 label=label, sales_count=0, product_count=0, revenue=0,
                 profit=0, salary=0, total_salary=0, cashier_reward=0, salary_deduction=0,

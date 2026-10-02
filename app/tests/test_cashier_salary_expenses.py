@@ -277,7 +277,8 @@ class SalesDetailsExpenseRowTest(unittest.TestCase):
         self.assertEqual(widget.summary_cards["products"].text(), "1")
         # 125 000 earned - 40 000 already taken.
         self.assertIn("85,000", widget.summary_cards["salary"].text())
-        self.assertIn("85,000", widget.table.item(0, 7).text())
+        # The "Kassirga ajratildi" total is only what the sales allocated.
+        self.assertIn("125,000", widget.table.item(0, 7).text())
 
     def test_net_profit_loses_the_expense_but_not_the_reward(self):
         widget = self._widget()
