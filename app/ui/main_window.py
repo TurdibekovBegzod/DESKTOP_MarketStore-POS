@@ -2638,7 +2638,12 @@ class MainWindow(QMainWindow):
             worker.stop()
         if thread is not None:
             thread.quit()
-            thread.wait(250)
+            if not thread.wait(250):
+                # A turn is still waiting on the server. Cut that request
+                # rather than hold the window open until it answers; the
+                # upload stays queued and is settled on the next run.
+                api_client.abort_open_requests()
+                thread.wait(2000)
 
     @pyqtSlot(dict)
     def _on_sync_turn_finished(self, outcome):

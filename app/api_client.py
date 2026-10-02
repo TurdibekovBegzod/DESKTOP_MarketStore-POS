@@ -2,9 +2,11 @@ import gzip
 import http.client
 import json
 import os
+import socket
 import ssl
 import threading
 import time
+import weakref
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, getproxies, urlopen
 from urllib.parse import urlencode, urlsplit
@@ -188,6 +190,11 @@ _STALE_CONNECTION_ERRORS = (
 # loaders all talk to the API at the same time.
 _connections = threading.local()
 
+# Every pooled connection, whichever thread owns it, so shutdown can cut a
+# request that is still waiting on the server (see abort_open_requests).
+_all_connections = weakref.WeakSet()
+_all_connections_lock = threading.Lock()
+
 
 def _decode_body(raw, headers):
     """The response text, inflated when the server gzipped it."""
@@ -239,6 +246,8 @@ def _connection_for(key, connect_timeout, response_timeout):
     else:
         connection = http.client.HTTPConnection(host, port, timeout=connect_timeout)
     pool[key] = (connection, time.monotonic())
+    with _all_connections_lock:
+        _all_connections.add(connection)
     return connection, False
 
 
@@ -643,6 +652,41 @@ def open_sync_event_stream(token, since_generation=None, timeout=60):
         raise ApiOfflineError(f"Realtime ulanish ochilmadi: HTTP {exc.code}") from exc
     except (URLError, TimeoutError, OSError) as exc:
         raise ApiOfflineError("Realtime ulanish ochilmadi.") from exc
+
+
+def _cut_socket(sock):
+    """Close the OS handle under ``sock`` at once, from any thread.
+
+    ``close()`` on a response or connection cannot do this while another
+    thread is reading it: it waits for the buffer lock that the reader holds
+    until the server answers. On Windows ``shutdown()`` does not wake that
+    read either. Closing the OS handle does, immediately; ``detach()`` first
+    so Python never closes that handle number a second time. The reader then
+    fails or ends and cleans up on its own thread.
+    """
+    if sock is None:
+        return
+    try:
+        socket.close(sock.detach())
+    except (OSError, ValueError):
+        pass
+
+
+def abort_event_stream(response):
+    """Cut an open event stream without waiting for the server's next ping."""
+    _cut_socket(getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None))
+
+
+def abort_open_requests():
+    """Cut every pooled API request still waiting on the server.
+
+    For shutdown only: every connection is left unusable. A cut upload is not
+    lost - it stays queued and is matched against the server on the next run.
+    """
+    with _all_connections_lock:
+        connections = list(_all_connections)
+    for connection in connections:
+        _cut_socket(getattr(connection, "sock", None))
 
 
 def iter_sse_events(response):

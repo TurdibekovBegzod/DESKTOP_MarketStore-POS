@@ -47,9 +47,17 @@ class SyncEventListener(QObject):
         self._response_lock = threading.Lock()
 
     def stop(self):
-        """Safe to call from the GUI thread; unblocks a pending socket read."""
+        """Safe to call from the GUI thread; unblocks a pending socket read.
+
+        Never closes the response here: that would wait for the reading
+        thread, freezing the window until the server's next ping. The stream
+        is cut instead, and run() closes the response on its own thread.
+        """
         self._stop_event.set()
-        self._close_response()
+        with self._response_lock:
+            response = self._response
+        if response is not None:
+            api_client.abort_event_stream(response)
 
     def _close_response(self):
         with self._response_lock:
