@@ -11,6 +11,7 @@ from PyQt6.QtGui import QAction, QPixmap, QPainter, QIcon, QColor, QImage, QFont
 from datetime import datetime, timedelta
 from pathlib import Path
 import sys
+import time
 import traceback
 import api_client
 import database as db
@@ -55,6 +56,10 @@ if not Path(DOWN_ARROW_PATH).exists():
 SYNC_ICON_PATH = resource_path("images/sync.png")
 ACCOUNT_LOGO_ASSET_ID = "desktop_logo"
 ACCOUNT_LOGO_MAX_SIDE = 256
+# Upper bound on reusing a successful write probe. It is normally dropped as soon
+# as the action returns to the event loop; this only covers a write made from a
+# thread without one, where that moment never comes.
+WRITE_PROBE_REUSE_SECONDS = 5
 # The AI page is still being tried out, so only these accounts can open it.
 # Everyone else sees the button greyed out.
 AI_ALLOWED_EMAILS = {"akbareliboy@gmail.com"}
@@ -1443,6 +1448,8 @@ class MainWindow(QMainWindow):
         self._pending_page_refresh = None
         self._pending_server_operations = []
         self._engine_state = "idle"
+        # When the server last confirmed it takes writes; see _server_accepts_writes.
+        self._write_probe_at = None
         # None = not attempted yet, so the tooltip does not accuse the link of
         # being down during the first second of startup.
         self._realtime_online = None
@@ -2725,22 +2732,45 @@ class MainWindow(QMainWindow):
         return self._realtime_online is True and self._engine_state != "offline"
 
     def _server_accepts_writes(self):
-        """Verify the API once immediately before any local business commit."""
+        """Verify the API once per user action, before its first local write.
+
+        The database asks before every flush, and one sale flushes four or five
+        times - each of which used to be its own round trip to the server with
+        the window frozen in between. A successful answer is therefore reused
+        until control returns to the event loop, i.e. for the rest of the action
+        that asked; the next click is verified again. The live stream is still
+        checked on every write, so a dropped link refuses the very next one.
+        """
         if self._realtime_online is not True:
             return False
         token = self._realtime_token()
         if not token:
             return False
+        verified_at = self._write_probe_at
+        if (
+            verified_at is not None
+            and self._engine_state != "offline"
+            and time.monotonic() - verified_at < WRITE_PROBE_REUSE_SECONDS
+        ):
+            return True
         try:
             # GET only: this proves internet + API availability without
             # changing server or local data and performs no automatic retries.
             api_client.get_sync_state(token, timeout=3)
         except Exception:
+            self._write_probe_at = None
             self._engine_state = "offline"
             return False
         if self._engine_state == "offline":
             self._engine_state = "idle"
+        self._write_probe_at = time.monotonic()
+        if QThread.currentThread() is self.thread():
+            # Fires once the current action has returned to the event loop.
+            QTimer.singleShot(0, self._forget_write_probe)
         return True
+
+    def _forget_write_probe(self):
+        self._write_probe_at = None
 
     def _stop_realtime_listener(self):
         worker = self._realtime_worker

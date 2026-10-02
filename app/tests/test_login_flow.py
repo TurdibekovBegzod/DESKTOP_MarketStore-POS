@@ -1,32 +1,35 @@
 """Login must survive a flaky tunnel without ever accepting a wrong password."""
 
 import inspect
-import io
 import json
 import os
 import tempfile
 import unittest
 from unittest.mock import patch
-from urllib.error import HTTPError, URLError
+from urllib.error import URLError
 
 import api_client
 import database as db
 
 
 def _http_error(code, detail):
+    """What the transport hands back for an answer the server did produce."""
     body = json.dumps({"detail": detail}).encode("utf-8")
-    return HTTPError("https://example.test", code, "error", {}, io.BytesIO(body))
+    return code, {}, body
 
 
 class ApiClientAuthErrorsTest(unittest.TestCase):
     def _login_raising(self, error):
         calls = {"count": 0}
 
-        def fake_urlopen(request, timeout=None, context=None):
+        def fake_send(method, url, data, headers, timeout):
             calls["count"] += 1
-            raise error() if callable(error) else error
+            outcome = error() if callable(error) else error
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
 
-        with patch("api_client.urlopen", side_effect=fake_urlopen), \
+        with patch("api_client._send", side_effect=fake_send), \
                 patch("api_client._RETRY_BACKOFF_SECONDS", (0, 0)):
             with self.assertRaises(api_client.ApiClientError) as caught:
                 api_client.login("user@shop.uz", "123456")
@@ -62,22 +65,22 @@ class ApiClientAuthErrorsTest(unittest.TestCase):
     def test_email_is_normalised_before_it_reaches_the_server(self):
         seen = {}
 
-        def fake_urlopen(request, timeout=None, context=None):
-            seen["payload"] = json.loads(request.data.decode("utf-8"))
-            raise _http_error(401, "Invalid email or password")
+        def fake_send(method, url, data, headers, timeout):
+            seen["payload"] = json.loads(data.decode("utf-8"))
+            return _http_error(401, "Invalid email or password")
 
-        with patch("api_client.urlopen", side_effect=fake_urlopen):
+        with patch("api_client._send", side_effect=fake_send):
             with self.assertRaises(api_client.ApiClientError):
                 api_client.login("  User@Shop.UZ ", "123456")
         self.assertEqual(seen["payload"]["email"], "user@shop.uz")
 
     def test_obviously_invalid_input_never_reaches_the_network(self):
-        with patch("api_client.urlopen") as urlopen:
+        with patch("api_client._send") as send:
             for email, password in [("", "123456"), ("nope", "123456"), ("a@b.uz", "")]:
                 with self.subTest(email=email, password=password):
                     with self.assertRaises(api_client.ApiClientError):
                         api_client.login(email, password)
-            urlopen.assert_not_called()
+            send.assert_not_called()
 
 
 class NoLocalPasswordTest(unittest.TestCase):

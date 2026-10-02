@@ -173,7 +173,22 @@ def reconcile_after_upgrade(user):
 
 
 @_one_at_a_time
-def push_local_changes(user, batch_size=1000, incremental=True, force=False, guard_generation=True):
+def push_local_changes(
+    user,
+    batch_size=1000,
+    incremental=True,
+    force=False,
+    guard_generation=True,
+    server_state_known=False,
+):
+    """Upload what is queued here.
+
+    ``server_state_known`` is for a caller that downloaded in this same turn:
+    that download already applied the server's purge marker, so asking the
+    server for its state once more is a round trip that cannot tell us anything.
+    A purge that lands in between is still caught - the push itself is refused
+    with RemotePurgeRequiredError and handled below.
+    """
     if not force:
         settled = reconcile_after_upgrade(user)
         if settled is not None:
@@ -205,7 +220,7 @@ def push_local_changes(user, batch_size=1000, incremental=True, force=False, gua
         _apply_generation(int(snapshot.get("generation") or 0))
         incremental = False
     token = _token_for_user(user)
-    state = get_server_state(user)
+    state = {} if server_state_known else get_server_state(user)
     if state.get("local_purge_applied"):
         return {
             "sent": 0,
@@ -359,7 +374,7 @@ def auto_sync_turn(user, incremental=True):
         return outcome
 
     try:
-        push = push_local_changes(user, guard_generation=False)
+        push = push_local_changes(user, guard_generation=False, server_state_known=True)
     except SyncConflict:
         # Never resend an operation automatically. The current server copy is
         # downloaded by the normal remote-change path; this turn only reports

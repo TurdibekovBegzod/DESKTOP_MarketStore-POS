@@ -49,7 +49,8 @@ class SyncEngine(QObject):
     turn_failed = pyqtSignal(str)
     state_changed = pyqtSignal(str)
     conflict = pyqtSignal()
-    wake_requested = pyqtSignal()
+    # Carries how soon the worker should run, in milliseconds.
+    wake_requested = pyqtSignal(int)
 
     def __init__(self, user_provider, parent=None):
         super().__init__(parent)
@@ -88,30 +89,36 @@ class SyncEngine(QObject):
     def request_turn(self):
         """The server changed, so download once without resending local rows."""
         self._pull_requested.set()
-        self.wake_requested.emit()
+        self.wake_requested.emit(1)
 
     @pyqtSlot()
     def request_push(self):
         """A new local write gets exactly one delivery attempt."""
         self._push_requested.set()
-        self.wake_requested.emit()
+        self.wake_requested.emit(LOCAL_SETTLE_MS)
 
     def notify_local_change(self):
         """Called from whichever thread just wrote to the database.
 
         Only a flag is set, which is safe from any thread; the work itself
-        happens on this worker's own next tick.
+        happens on this worker's own next tick - LOCAL_SETTLE_MS later, so the
+        rest of the same sale is written by then and travels in the same push.
         """
         self._push_requested.set()
-        self.wake_requested.emit()
+        self.wake_requested.emit(LOCAL_SETTLE_MS)
 
-    @pyqtSlot()
-    def _wake_now(self):
-        """Re-arm an idle worker immediately, from inside its own Qt thread."""
+    @pyqtSlot(int)
+    def _wake_now(self, milliseconds=1):
+        """Re-arm an idle worker soon, from inside its own Qt thread.
+
+        Only ever brings the next tick closer: a pull asked for right away is
+        not pushed back by a local write arriving just after it.
+        """
         if self._stopping.is_set():
             return
-        if self._timer is not None and self._timer.interval() != 1:
-            self._timer.setInterval(1)
+        milliseconds = max(1, int(milliseconds))
+        if self._timer is not None and self._timer.interval() > milliseconds:
+            self._timer.setInterval(milliseconds)
 
     # -- the loop --------------------------------------------------------
     def _tick(self):

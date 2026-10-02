@@ -185,6 +185,28 @@ class AutoSyncTest(unittest.TestCase):
         self.assertIn("products", outcome["tables"])
         self.assertIsNotNone(db.get_product_by_barcode("FROM-SERVER"))
 
+    def test_a_round_sends_a_sale_without_asking_for_the_state_again(self):
+        """The download at the start of the round already brought the server's
+        state; a separate state request before the push was one more round trip
+        on every sale."""
+        db.add_product({"barcode": "MINE", "name": "Meniki", "price": 1,
+                        "cost": 1, "stock": 1, "unit": "dona"})
+        pushes = []
+
+        def fake_push(_token, records, **_kwargs):
+            pushes.append(len(records))
+            return {"saved": len(records), "batch_id": "b", "generation": 4}
+
+        with self._pull_patch([], "t1", []), \
+             patch.object(api_client, "push_sync_records", side_effect=fake_push), \
+             patch.object(api_client, "get_sync_state",
+                          return_value={"generation": 3, "purge_generation": 0}) as state:
+            outcome = sync_service.auto_sync_turn(self.owner)
+
+        state.assert_not_called()
+        self.assertEqual(len(pushes), 1)
+        self.assertGreaterEqual(outcome["pushed"], 1)
+
     def test_a_round_with_nothing_of_ours_to_send_does_not_send(self):
         pushes = []
 

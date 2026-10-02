@@ -1,5 +1,6 @@
 """Verified HTTPS configuration shared by desktop network clients."""
 
+import functools
 import os
 import ssl
 from pathlib import Path
@@ -22,7 +23,17 @@ def ca_bundle_path() -> str | None:
 
 
 def create_ssl_context() -> ssl.SSLContext:
-    cafile = ca_bundle_path()
+    """The verified context for the current CA bundle, built once per bundle.
+
+    Building one parses the whole certifi bundle, which every API call used to
+    pay for again. A context only holds settings and trusted roots, so one
+    instance is safely shared by every thread and connection.
+    """
+    return _context_for(ca_bundle_path())
+
+
+@functools.lru_cache(maxsize=4)
+def _context_for(cafile: str | None) -> ssl.SSLContext:
     context = ssl.create_default_context(cafile=cafile) if cafile else ssl.create_default_context()
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.check_hostname = True

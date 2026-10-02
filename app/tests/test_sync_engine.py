@@ -101,6 +101,22 @@ class SyncEngineTest(unittest.TestCase):
         self.assertEqual(self.engine._timer.interval(), 1)
         self.assertTrue(self.engine._pull_requested.is_set())
 
+    def test_a_local_write_waits_a_moment_so_the_whole_sale_goes_together(self):
+        self.engine._timer.setInterval(sync_engine.IDLE_INTERVAL_MS)
+
+        self.engine.notify_local_change()
+
+        self.assertEqual(self.engine._timer.interval(), sync_engine.LOCAL_SETTLE_MS)
+        self.assertTrue(self.engine._push_requested.is_set())
+
+    def test_a_local_write_never_delays_a_download_already_due(self):
+        self.engine._timer.setInterval(sync_engine.IDLE_INTERVAL_MS)
+
+        self.engine.request_turn()
+        self.engine.notify_local_change()
+
+        self.assertEqual(self.engine._timer.interval(), 1)
+
     def test_a_turn_that_changed_nothing_says_nothing(self):
         self.engine.request_turn()
         with patch.object(sync_engine.sync_service, "pull_server_changes",

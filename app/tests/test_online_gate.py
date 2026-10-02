@@ -141,6 +141,8 @@ class OnlineGateTest(unittest.TestCase):
             self.assertTrue(self.window._server_accepts_writes())
         probe.assert_called_once_with("tok", timeout=3)
 
+        # The next action is verified afresh once the first has finished.
+        self.window._forget_write_probe()
         with patch("ui.main_window.api_client.get_sync_state", side_effect=OSError("api down")):
             self.assertFalse(self.window._server_accepts_writes())
         self.assertEqual(self.window._engine_state, "offline")
@@ -152,6 +154,41 @@ class OnlineGateTest(unittest.TestCase):
                 db.add_customer("API ishlamayapti", "+99890", "blocked@example.com")
         self.assertEqual(db.get_all_customers(), [])
         self.assertEqual(db.count_pending_sync_rows(), 0)
+
+    def test_one_sale_asks_the_server_once(self):
+        """A sale flushes several times; only the first may cost a round trip."""
+        product = db.add_product({"barcode": "P3", "name": "Mahsulot", "price": 1000,
+                                  "cost": 600, "stock": 5, "unit": "dona"})
+        cashier = db.add_user("k3@example.com", role="cashier", username="K3")
+        self.window._realtime_online = True
+        self.window._engine_state = "idle"
+        db.set_online_check(self.window._server_accepts_writes)
+        with patch("ui.main_window.api_client.get_sync_state", return_value={"generation": 1}) as probe, \
+                patch("ui.main_window.QTimer.singleShot") as end_of_action:
+            db.create_sale(None, cashier, [{"product_id": product, "quantity": 1,
+                                            "price": 1000, "subtotal": 1000}],
+                           1000, 0, 1000, "naqd")
+            self.assertEqual(probe.call_count, 1)
+            # The reuse ends when the action hands control back to Qt.
+            end_of_action.assert_called_once_with(0, self.window._forget_write_probe)
+            # The next click is a new action and is verified again.
+            self.window._forget_write_probe()
+            db.add_customer("Keyingi mijoz", "+99893", "next@example.com")
+            self.assertEqual(probe.call_count, 2)
+        self.assertEqual(db.get_product_by_barcode("P3")["stock"], 4)
+
+    def test_a_dropped_stream_refuses_the_rest_of_an_action(self):
+        """Reusing the probe never outlives the live connection itself."""
+        self.window._realtime_online = True
+        self.window._engine_state = "idle"
+        with patch("ui.main_window.api_client.get_sync_state", return_value={"generation": 1}):
+            self.assertTrue(self.window._server_accepts_writes())
+        self.window._realtime_online = False
+        self.assertFalse(self.window._server_accepts_writes())
+        self.window._realtime_online = True
+        self.window._engine_state = "offline"
+        with patch("ui.main_window.api_client.get_sync_state", side_effect=OSError("api down")):
+            self.assertFalse(self.window._server_accepts_writes())
 
     def test_the_label_says_which_it_is(self):
         self.window._realtime_online = True

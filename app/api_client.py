@@ -1,9 +1,13 @@
+import gzip
+import http.client
 import json
 import os
+import ssl
+import threading
 import time
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
-from urllib.parse import urlencode
+from urllib.request import Request, getproxies, urlopen
+from urllib.parse import urlencode, urlsplit
 
 from ssl_support import create_ssl_context
 
@@ -150,60 +154,195 @@ def _build_headers(token=None, extra=None):
     return headers
 
 
+# How long an idle kept-alive connection is trusted before it is replaced. The
+# tunnel drops idle client connections on its own schedule; reusing one it has
+# already closed costs a failed attempt, so old ones are not offered at all.
+_IDLE_CONNECTION_SECONDS = 50
+
+# Errors that mean a reused connection had already been closed by the other end
+# before it read our request: the server never saw it, so sending it once more
+# on a fresh connection cannot apply anything twice.
+_STALE_CONNECTION_ERRORS = (
+    http.client.RemoteDisconnected,
+    http.client.CannotSendRequest,
+    ConnectionResetError,
+    ConnectionAbortedError,
+    BrokenPipeError,
+    ssl.SSLEOFError,
+)
+
+# One open connection per thread and server. Each API call used to open its own
+# TCP + TLS connection to the tunnel, which made every request cost several
+# round trips before a byte of it was sent. Per thread, because http.client
+# connections are not safe to share and the GUI, the sync engine and the page
+# loaders all talk to the API at the same time.
+_connections = threading.local()
+
+
+def _decode_body(raw, headers):
+    """The response text, inflated when the server gzipped it."""
+    if (headers.get("Content-Encoding") or "").lower() == "gzip":
+        raw = gzip.decompress(raw)
+    return raw.decode("utf-8")
+
+
+def _drop_connection(key):
+    pool = getattr(_connections, "pool", None) or {}
+    entry = pool.pop(key, None)
+    if entry is not None:
+        try:
+            entry[0].close()
+        except Exception:
+            pass
+
+
+def _connection_for(key, timeout):
+    """(connection, reused) for this thread, opening a new one when needed."""
+    pool = getattr(_connections, "pool", None)
+    if pool is None:
+        pool = _connections.pool = {}
+    entry = pool.get(key)
+    if entry is not None:
+        connection, last_used = entry
+        if time.monotonic() - last_used < _IDLE_CONNECTION_SECONDS and connection.sock is not None:
+            connection.timeout = timeout
+            connection.sock.settimeout(timeout)
+            return connection, True
+        _drop_connection(key)
+    scheme, host, port = key
+    if scheme == "https":
+        connection = http.client.HTTPSConnection(
+            host, port, timeout=timeout, context=create_ssl_context()
+        )
+    else:
+        connection = http.client.HTTPConnection(host, port, timeout=timeout)
+    pool[key] = (connection, time.monotonic())
+    return connection, False
+
+
+def _send_pooled(method, url, data, headers, timeout):
+    parts = urlsplit(url)
+    key = (parts.scheme, parts.hostname, parts.port)
+    target = parts.path + (f"?{parts.query}" if parts.query else "")
+    for attempt in range(2):
+        connection, reused = _connection_for(key, timeout)
+        try:
+            connection.request(method, target, body=data, headers=headers)
+            response = connection.getresponse()
+            raw = response.read()
+        except _STALE_CONNECTION_ERRORS:
+            _drop_connection(key)
+            if reused and attempt == 0:
+                continue
+            raise
+        except BaseException:
+            # A timeout or a half-read answer leaves the connection in an
+            # unknown state; the next call must not inherit it.
+            _drop_connection(key)
+            raise
+        if response.will_close:
+            _drop_connection(key)
+        else:
+            _connections.pool[key] = (connection, time.monotonic())
+        return response.status, response.headers, raw
+    raise http.client.RemoteDisconnected("connection closed")
+
+
+def _send_via_proxy(method, url, data, headers, timeout):
+    """urllib's path, kept for a machine that must reach the API through a proxy.
+
+    http.client knows nothing about the system proxy settings urllib reads, and
+    a shop behind a proxy is better served by a slower request than none.
+    """
+    request = Request(url, data=data, headers=headers, method=method)
+    try:
+        with urlopen(request, timeout=timeout, context=create_ssl_context()) as response:
+            return response.status, response.headers, response.read()
+    except HTTPError as exc:
+        try:
+            raw = exc.read()
+        except OSError:
+            raw = b""
+        return exc.code, exc.headers or {}, raw
+
+
+def _send(method, url, data, headers, timeout):
+    """(status, headers, raw body) for one request; raises OSError if unreachable."""
+    if getproxies().get(urlsplit(url).scheme):
+        return _send_via_proxy(method, url, data, headers, timeout)
+    return _send_pooled(method, url, data, headers, timeout)
+
+
+def _raise_for_status(code, body):
+    try:
+        detail = json.loads(body).get("detail") if body else None
+    except (json.JSONDecodeError, AttributeError):
+        detail = None
+    if code == 409 and isinstance(detail, dict) and detail.get("code") == "sync_conflict":
+        raise SyncConflictError(
+            "Serverdagi ma'lumot boshqa qurilmada o'zgargan.",
+            server_generation=detail.get("server_generation"),
+            expected_generation=detail.get("expected_generation"),
+        )
+    if code == 409 and isinstance(detail, dict) and detail.get("code") == "remote_purge_required":
+        raise RemotePurgeRequiredError(
+            "Account ma'lumotlari web boshqaruv panelidan o'chirilgan.",
+            purge_generation=detail.get("purge_generation"),
+        )
+    detail_text = _format_api_detail(detail)
+    if code == 409:
+        raise ApiClientError(detail_text or "Bu email allaqachon ro'yxatdan o'tgan. Iltimos, 'Login' orqali kiring.")
+    if code == 403 and detail_text and "tasdiqlanmagan" in detail_text.lower():
+        raise ApiVerificationRequiredError(detail_text)
+    if code in (401, 403):
+        raise ApiAuthError(detail_text or "Email yoki parol noto'g'ri.")
+    if code == 422:
+        refused = _unsupported_tables(detail)
+        if refused:
+            raise UnsupportedSyncTableError(
+                "Server bu jadvallarni qabul qilmaydi: " + ", ".join(sorted(refused)),
+                tables=refused,
+            )
+    if code in (400, 422, 429):
+        raise ApiClientError(detail_text or "So'rov qabul qilinmadi. Ma'lumotlarni tekshiring.")
+    if code in _SERVER_UNAVAILABLE_CODES:
+        # A tunnel/gateway answer, not an application answer: treat it as
+        # "server is down" so the caller can retry or fall back offline.
+        raise ApiOfflineError(
+            f"Server hozir javob bermayapti (HTTP {code}). Birozdan keyin urinib ko'ring."
+        )
+    raise ApiClientError(detail_text or f"Server xatosi: HTTP {code}")
+
+
 def _single_request_json(path, payload=None, token=None, timeout=10, method=None, headers=None):
     data = None
     request_headers = _build_headers(token, headers)
+    # A full pull is ~3 MB of JSON and ~0.4 MB gzipped. Without this header the
+    # API sends it raw, and over the tunnel each 500-row page took seconds.
+    request_headers.setdefault("Accept-Encoding", "gzip")
     if payload is not None:
         data = json.dumps(payload).encode("utf-8")
         request_headers["Content-Type"] = "application/json"
     http_method = method or ("POST" if payload is not None else "GET")
 
-    request = Request(f"{_api_base_url()}{path}", data=data, headers=request_headers, method=http_method)
     try:
-        with urlopen(request, timeout=timeout, context=create_ssl_context()) as response:
-            body = response.read().decode("utf-8")
-            return json.loads(body) if body else {}
-    except HTTPError as exc:
-        try:
-            body = exc.read().decode("utf-8")
-            detail = json.loads(body).get("detail") if body else None
-        except (UnicodeDecodeError, json.JSONDecodeError, OSError):
-            detail = None
-        if exc.code == 409 and isinstance(detail, dict) and detail.get("code") == "sync_conflict":
-            raise SyncConflictError(
-                "Serverdagi ma'lumot boshqa qurilmada o'zgargan.",
-                server_generation=detail.get("server_generation"),
-                expected_generation=detail.get("expected_generation"),
-            ) from exc
-        if exc.code == 409 and isinstance(detail, dict) and detail.get("code") == "remote_purge_required":
-            raise RemotePurgeRequiredError(
-                "Account ma'lumotlari web boshqaruv panelidan o'chirilgan.",
-                purge_generation=detail.get("purge_generation"),
-            ) from exc
-        detail_text = _format_api_detail(detail)
-        if exc.code == 409:
-            raise ApiClientError(detail_text or "Bu email allaqachon ro'yxatdan o'tgan. Iltimos, 'Login' orqali kiring.") from exc
-        if exc.code == 403 and detail_text and "tasdiqlanmagan" in detail_text.lower():
-            raise ApiVerificationRequiredError(detail_text) from exc
-        if exc.code in (401, 403):
-            raise ApiAuthError(detail_text or "Email yoki parol noto'g'ri.") from exc
-        if exc.code == 422:
-            refused = _unsupported_tables(detail)
-            if refused:
-                raise UnsupportedSyncTableError(
-                    "Server bu jadvallarni qabul qilmaydi: " + ", ".join(sorted(refused)),
-                    tables=refused,
-                ) from exc
-        if exc.code in (400, 422, 429):
-            raise ApiClientError(detail_text or "So'rov qabul qilinmadi. Ma'lumotlarni tekshiring.") from exc
-        if exc.code in _SERVER_UNAVAILABLE_CODES:
-            # A tunnel/gateway answer, not an application answer: treat it as
-            # "server is down" so the caller can retry or fall back offline.
-            raise ApiOfflineError(
-                f"Server hozir javob bermayapti (HTTP {exc.code}). Birozdan keyin urinib ko'ring."
-            ) from exc
-        raise ApiClientError(detail_text or f"Server xatosi: HTTP {exc.code}") from exc
-    except (URLError, TimeoutError, OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        status, response_headers, raw = _send(
+            http_method, f"{_api_base_url()}{path}", data, request_headers, timeout
+        )
+    except (URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
+        raise ApiOfflineError("Internet yoki server bilan aloqa yo'q. Iltimos, internet ulanishingizni tekshiring.") from exc
+    try:
+        body = _decode_body(raw, response_headers)
+    except (OSError, UnicodeDecodeError) as exc:
+        if status < 400:
+            raise ApiOfflineError("Internet yoki server bilan aloqa yo'q. Iltimos, internet ulanishingizni tekshiring.") from exc
+        # An unreadable error page still says what the status says.
+        body = ""
+    if status >= 400:
+        _raise_for_status(status, body)
+    try:
+        return json.loads(body) if body else {}
+    except json.JSONDecodeError as exc:
         raise ApiOfflineError("Internet yoki server bilan aloqa yo'q. Iltimos, internet ulanishingizni tekshiring.") from exc
 
 
@@ -506,7 +645,7 @@ def pull_sync_records(
     cursor = 0
     cursor_supported = False
     # Medium batches keep first paint fast without turning a large account into
-    # dozens of HTTPS round trips. Responses are gzip-compressed by the API.
+    # dozens of HTTPS round trips. Each page arrives gzipped (_single_request_json).
     page_size = 500
     while True:
         query = {
