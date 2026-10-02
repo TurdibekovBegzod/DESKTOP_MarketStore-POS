@@ -3966,6 +3966,9 @@ class MainWindow(QMainWindow):
             self._log_auth_event("logout")
             db.clear_user_activity(self.user.get("id"))
             self.close()
+            # Signing out leaves no shop figures behind on this machine; the
+            # next sign-in loads from the server as on a first start.
+            db.discard_server_cache()
             from ui.login_dialog import LoginDialog
             dlg = LoginDialog()
             if dlg.exec():

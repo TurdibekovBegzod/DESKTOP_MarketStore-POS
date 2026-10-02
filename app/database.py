@@ -66,12 +66,18 @@ ACCOUNT_SESSION_PATH = os.path.join(DATA_DIR, "account_session.json")
 LOCAL_PREFERENCES_PATH = os.path.join(DATA_DIR, "local_preferences.json")
 DB_PATH = LEGACY_DB_PATH
 
-# Business rows are a disposable session cache. PostgreSQL remains the durable
-# copy; a new process starts from the API again. Tests and explicit storage
-# roots keep their ordinary file databases so isolation fixtures stay useful.
+# Business rows are a cache of the server's. PostgreSQL remains the durable
+# copy; the cache only spares a launch from downloading everything again. It is
+# kept between launches and brought up to date by change number (see
+# sync_service.validate_server_cache), and dropped on sign-out. Tests and
+# explicit storage roots keep their ordinary file databases so isolation
+# fixtures stay useful.
 REMOTE_DATA_MODE = os.environ.get("MARKETSTORE_DATA_MODE", "server").strip().lower() != "local"
-_SESSION_DB_ROOT = tempfile.mkdtemp(prefix="marketstore-pos-session-")
-atexit.register(lambda: shutil.rmtree(_SESSION_DB_ROOT, ignore_errors=True))
+_SESSION_DB_ROOT = os.path.join(DATA_DIR, "server_cache")
+# Whole-copy snapshots taken before a destructive sync action still never
+# outlive the process in server mode.
+_SESSION_TMP_ROOT = tempfile.mkdtemp(prefix="marketstore-pos-session-")
+atexit.register(lambda: shutil.rmtree(_SESSION_TMP_ROOT, ignore_errors=True))
 
 # Expenses filed under this category are taken out of the selected cashier's
 # salary instead of being a plain shop expense.
@@ -611,6 +617,74 @@ def activate_account_database(user_uid, email=None, allow_legacy_import=False, s
     )
 
 
+def discard_server_cache():
+    """Delete the active server cache from disk - on sign-out, so a shop's
+    figures do not stay on a machine nobody is signed in to."""
+    global DB_PATH, _ENGINE, _ENGINE_PATH, _SessionLocal
+    if not is_remote_session_cache():
+        return False
+    path = DB_PATH
+    if _ENGINE is not None:
+        _ENGINE.dispose()
+    _ENGINE = None
+    _ENGINE_PATH = None
+    _SessionLocal = None
+    removed = False
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        try:
+            os.remove(path + suffix)
+            removed = True
+        except OSError:
+            pass
+    return removed
+
+
+def local_table_counts(tables):
+    """Rows held here per table, leaving out what is still waiting to be sent."""
+    counts = {}
+    with _begin() as conn:
+        pending = {}
+        if _has_table(conn, "sync_outbox"):
+            for table_name, count in conn.exec_driver_sql(
+                "SELECT table_name, COUNT(*) FROM sync_outbox GROUP BY table_name"
+            ).fetchall():
+                pending[table_name] = int(count)
+        for table_name in tables:
+            if table_name not in SYNC_TABLES or not _has_table(conn, table_name):
+                continue
+            total = conn.exec_driver_sql(
+                f"SELECT COUNT(*) FROM {_quote_identifier(table_name)}"
+            ).scalar() or 0
+            counts[table_name] = (int(total), pending.get(table_name, 0))
+    return counts
+
+
+def reset_server_cache():
+    """Start the cache over: no synced rows, every reading position at zero.
+
+    The next start-up then loads like a first one - small tables at once,
+    each page's tables when it is opened.
+    """
+    wipe_sync_tables(keep_local_only=True)
+    with _begin() as conn:
+        _sync_state_set(conn, "pull_cursor", "0")
+        _sync_state_set(conn, "pull_cursor_initialized", "0")
+        _sync_state_set(conn, "pull_watermark", "")
+        _sync_state_set(conn, "server_generation", "0")
+        for table_name in SYNC_TABLES:
+            _sync_state_set(conn, f"table_cursor:{table_name}", "0")
+            _sync_state_set(conn, f"table_cursor_initialized:{table_name}", "0")
+        _sync_state_set(conn, "last_dirty_at", "")
+        _sync_state_set(conn, "pending_change_count", "0")
+        _sync_state_set(conn, "server_bootstrap_required", "1")
+
+
+def protected_user_count():
+    """The signed-in account's own user rows, which are never sent anywhere."""
+    with _begin() as conn:
+        return len(_protected_user_ids(conn))
+
+
 def retire_persistent_account_database(path):
     """Remove a reconciled legacy business database, never the live cache."""
     if not path:
@@ -667,7 +741,8 @@ def retire_persistent_account_database(path):
 
 
 def is_remote_session_cache():
-    """Whether the active SQLite file is this process' disposable API cache."""
+    """Whether the active SQLite file is the server cache rather than a local
+    database of record."""
     if not REMOTE_DATA_MODE or not DB_PATH or DB_PATH == ":memory:":
         return False
     try:
@@ -3803,7 +3878,7 @@ def _active_backup_dir():
     # Server mode must not leave business snapshots on disk after the process
     # exits. Explicit local/test databases retain the old backup behaviour.
     if is_remote_session_cache():
-        return os.path.join(_SESSION_DB_ROOT, "backups")
+        return os.path.join(_SESSION_TMP_ROOT, "backups")
     return BACKUP_DIR
 
 
@@ -4312,11 +4387,13 @@ def ensure_reference_rows():
     return created
 
 
-def wipe_sync_tables():
+def wipe_sync_tables(keep_local_only=False):
     """Empty every synced table, keeping the signed-in account's own user row.
 
     Deleting that row would take its ``user_settings`` (including the API token)
     with it via the cascade and lock the user out of their own account.
+    ``keep_local_only`` leaves this device's own tables (a stocktake in
+    progress) alone - for rebuilding the server cache, not erasing an account.
     """
     _sync_suspend_token = suspend_sync()
     _sync_suspend_token.__enter__()
@@ -4339,7 +4416,7 @@ def wipe_sync_tables():
             # Device-local tables are not in the loop above, but erasing an
             # account has to clear them too -- otherwise a finished stocktake
             # outlives the data it counted.
-            for table_name in LOCAL_ONLY_TABLES:
+            for table_name in () if keep_local_only else LOCAL_ONLY_TABLES:
                 if table_name == "local_barcode_issues":
                     # Codes already handed out stay out of circulation: the
                     # labels are on the shelves whatever happens to the account.

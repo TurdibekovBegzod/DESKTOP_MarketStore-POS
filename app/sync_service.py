@@ -901,9 +901,75 @@ def bootstrap_remote_session(user):
     return result
 
 
+@_one_at_a_time
+def validate_server_cache(user):
+    """Bring a cache kept from an earlier launch up to date, or start it over.
+
+    The cache only ever moved forward by change number, which cannot skip a
+    row. What it cannot see on its own is the server going somewhere else
+    while this device was off: an erased account, a database restored from a
+    backup, a copy replaced wholesale. Those are checked here, once per
+    launch, and any of them sends the cache back to empty - the next pages
+    then load exactly as on a first start.
+
+    Rows still waiting to be sent are this device's own work: with any of them
+    queued nothing is thrown away, and the check waits for the next launch.
+    """
+    if not db.is_remote_session_cache() or db.is_server_bootstrap_required():
+        return {"cache": "fresh"}
+    if not db.is_pull_cursor_initialized():
+        # A file without a reading position never finished its first load.
+        db.mark_server_bootstrap_required()
+        return {"cache": "reset", "reason": "never_loaded"}
+    if db.count_pending_sync_rows() > 0:
+        return {"cache": "kept", "skipped": "pending_changes"}
+    token = _token_for_user(user)
+    state = api_client.get_sync_state(token)
+    if apply_server_control(state).get("purged"):
+        db.reset_server_cache()
+        return {"cache": "reset", "reason": "purge"}
+    if int(state.get("generation") or 0) < db.get_sync_generation():
+        # The server's history is behind what this device has already seen:
+        # it was restored from a backup or rebuilt.
+        db.reset_server_cache()
+        return {"cache": "reset", "reason": "server_behind"}
+
+    pulled = pull_server_changes(user, incremental=True)
+
+    loaded = [name for name in db.SYNC_TABLES if db.is_table_pull_cursor_initialized(name)]
+    if loaded:
+        summary = api_client.get_sync_summary(token)
+        live = {
+            str(item.get("table_name")): int(item.get("records_count") or 0)
+            - int(item.get("deleted_count") or 0)
+            for item in summary.get("tables") or []
+        }
+        # Only a shortfall counts. This device holds rows of its own that the
+        # server need not have - the owner's user row, the default currencies,
+        # the "Kassir" expense category, whatever init_db seeds next - so more
+        # rows here is normal. Fewer means rows were missed, and only a fresh
+        # start is certain to bring them. (Rows the server has dropped without a
+        # trace only come from replacing the server with a whole copy, which a
+        # server-mode device cannot do; an erased account arrives as a purge.)
+        for table_name, (held, _pending) in db.local_table_counts(loaded).items():
+            if held < live.get(table_name, 0):
+                db.reset_server_cache()
+                return {"cache": "reset", "reason": f"count:{table_name}"}
+    return {
+        "cache": "kept",
+        "received": int(pulled.get("received") or 0),
+        "imported": int(pulled.get("imported") or 0),
+        "tables": pulled.get("tables") or [],
+    }
+
+
 def synchronize_account_storage(user):
     if db.is_server_reseed_required():
         return {"direction": "push", **push_local_changes(user, force=True)}
+    if db.is_remote_session_cache() and not db.is_server_bootstrap_required():
+        checked = validate_server_cache(user)
+        if checked.get("cache") != "reset":
+            return {"direction": "cache", **checked}
     if db.is_server_bootstrap_required():
         if db.is_remote_session_cache():
             return {"direction": "pull", **bootstrap_remote_session(user)}

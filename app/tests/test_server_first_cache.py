@@ -54,7 +54,15 @@ class ServerFirstCacheTest(unittest.TestCase):
         )
         return activation, dict(owner, api_access_token="token")
 
-    def test_business_rows_are_disposable_but_interface_preferences_survive(self):
+    def _restart(self):
+        if db._ENGINE is not None:
+            db._ENGINE.dispose()
+        db._ENGINE = None
+        db._ENGINE_PATH = None
+        db._SessionLocal = None
+        return self._open()
+
+    def test_business_rows_survive_a_restart_and_go_on_sign_out(self):
         activation, owner = self._open()
         self.assertTrue(activation["session_cache"])
         self.assertTrue(db.is_remote_session_cache())
@@ -62,27 +70,34 @@ class ServerFirstCacheTest(unittest.TestCase):
         self.assertFalse(os.path.exists(db.account_database_path("acct-remote", email="owner@example.com")))
 
         db.add_product({
-            "barcode": "LOCAL-ONLY",
-            "name": "Local only",
+            "barcode": "CACHED",
+            "name": "Cached",
             "price": 10,
             "cost": 5,
             "stock": 1,
             "unit": "dona",
         })
         db.save_app_settings({"theme": "green", "language": "en"}, owner["id"])
-        self.assertEqual(len(db.get_all_products()), 1)
 
-        db._ENGINE.dispose()
-        db._ENGINE = None
-        db._ENGINE_PATH = None
-        db._SessionLocal = None
-        db._SESSION_DB_ROOT = os.path.join(self.root, "session-b")
-        self._open()
+        # A restart keeps the cache: nothing has to be downloaded again.
+        activation, owner = self._restart()
+        self.assertFalse(activation["database_created"])
+        self.assertEqual([row["barcode"] for row in db.get_all_products()], ["CACHED"])
 
+        # Signing out removes it; preferences are not business data and stay.
+        self.assertTrue(db.discard_server_cache())
+        activation, owner = self._restart()
+        self.assertTrue(activation["database_created"])
         self.assertEqual(db.get_all_products(), [])
         settings = db.get_app_settings()
         self.assertEqual(settings["theme"], "green")
         self.assertEqual(settings["language"], "en")
+
+    def test_snapshots_of_the_cache_never_outlive_the_process(self):
+        self._open()
+        self.assertFalse(
+            os.path.abspath(db._active_backup_dir()).startswith(os.path.abspath(db._SESSION_DB_ROOT))
+        )
 
     def test_login_bootstrap_and_pages_use_filtered_server_batches(self):
         _activation, owner = self._open()
