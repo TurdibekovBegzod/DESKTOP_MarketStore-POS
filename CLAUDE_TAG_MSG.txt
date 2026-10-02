@@ -1,8 +1,8 @@
-MarketStore POS v1.7.4
+MarketStore POS v1.7.5
 
-Dastur tez yopiladi.
+Ochilish va yopish silliqroq.
 
-- Yopishda oyna serverning keyingi javobini kutib 20 s gacha qotib
-  turardi. Endi ulanish darhol uziladi va dastur bir zumda yopiladi.
-- Yopish paytida serverga yuborilayotgan o'zgarish yo'qolmaydi: keyingi
-  ishga tushishda server bilan solishtirib yuboriladi.
+- Dastur ochilganda oyna endi pirpiramaydi: avval kichik va oq bo'lib
+  chiqib, keyin to'liq ekranga sakramaydi - darhol tayyor holda ko'rinadi.
+- Yopishda sinxronizatsiya serverga yuborayotgan bo'lsa ham kutilmaydi.
+  Yuborilayotgan o'zgarish yo'qolmaydi: keyingi ishga tushishda yuboriladi.

@@ -1,16 +1,16 @@
-release: v1.7.4 dastur tez yopiladi
+release: v1.7.5 ochilishda oyna pirpiramaydi, yopishda kutilmaydi
 
 Nima o'zgardi
 
-- Yopishda oyna serverning keyingi ping'ini kutib 20 s gacha qotib
-  turardi. Real vaqt oqimi va javob kutayotgan so'rovlar endi darhol
-  uziladi.
-- Yopish paytida yuborilayotgan o'zgarish yo'qolmaydi: navbatda qoladi va
-  keyingi ishga tushishda server bilan solishtiriladi.
+- Ochilish: oyna avval oddiy o'lchamda, oq bo'sh holda chiqib, keyin
+  to'liq ekranga sakrardi. Endi u to'liq ekranda chizilgandan keyingina
+  bir qadamda ko'rinadi.
+- Yopish: sinxronizatsiya ishchisi serverga so'rov yuborayotgan bo'lsa ham
+  kutilmaydi; so'rov darhol uziladi, o'zgarish navbatda qoladi.
 
-Versiya 1.7.4 (build 36): version.py, installer.nsi, version_info.txt.
+Versiya 1.7.5 (build 37): version.py, installer.nsi, version_info.txt.
 
-Tekshirildi: test_fast_shutdown 3/3; to'liq desktop to'plami - faqat
-oldindan osilib qoladigan test_online_gate.
+Tekshirildi: test_window_reveal 2/2, test_fast_shutdown 4/4; to'liq desktop
+to'plami - faqat oldindan osilib qoladigan test_online_gate.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
