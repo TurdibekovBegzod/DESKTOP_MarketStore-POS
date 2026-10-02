@@ -1,24 +1,16 @@
-release: v1.7.3 kassir oyligi doimiy qoldiq, keyingi oyda yakunlangan sotuv shu oyga
+release: v1.7.4 dastur tez yopiladi
 
 Nima o'zgardi
 
-- Kassir oyligi endi har hafta yoki oy boshida noldan boshlanmaydi:
-  oldingi qoldiq + shu davr oyligi - shu davr kassir xarajatlari. Minus
-  keyingi oylarga o'tadi, xarajat bo'lmasa plyusda o'sadi.
-- "Oylik" kartasida faqat yakuniy raqam, tafsiloti tooltip'da.
-- O'tgan oyda sotilib keyingi oyda yakunlangan sotuv hisobotda yakunlangan
-  kuniga tushadi; o'sha oyda yakunlangani o'z kunida qoladi.
-- Sotuv tafsilotidagi "Kassirga ajratildi" jami faqat sotuv mukofotlari.
-- Menyudagi qizil nuqta, raqam va yangilanish belgisi panel sudralganda
-  chet bilan birga silliq suriladi.
-- v1.7.2 dan keyingi sinxronizatsiya ishlari ham shu versiyada: har
-  o'zgarish bitta so'rov, server keshi saqlanadi, javobsiz push qayta
-  yuboriladi va serverga yetgani taniladi.
+- Yopishda oyna serverning keyingi ping'ini kutib 20 s gacha qotib
+  turardi. Real vaqt oqimi va javob kutayotgan so'rovlar endi darhol
+  uziladi.
+- Yopish paytida yuborilayotgan o'zgarish yo'qolmaydi: navbatda qoladi va
+  keyingi ishga tushishda server bilan solishtiriladi.
 
-Versiya 1.7.3 (build 35): version.py, installer.nsi, version_info.txt.
+Versiya 1.7.4 (build 36): version.py, installer.nsi, version_info.txt.
 
-Tekshirildi: desktop to'plami - faqat oldindan yiqiladigan test_api_client
-(1 ta, tarmoq turi) va test_online_gate (osilib qoladi), ikkalasi bu
-o'zgarishlarsiz ham shunday.
+Tekshirildi: test_fast_shutdown 3/3; to'liq desktop to'plami - faqat
+oldindan osilib qoladigan test_online_gate.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
