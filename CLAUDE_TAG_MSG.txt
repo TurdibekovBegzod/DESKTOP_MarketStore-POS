@@ -1,8 +1,11 @@
-MarketStore POS v1.7.2
+MarketStore POS v1.7.3
 
-Sof foyda hisobi o'zgardi.
+Kassir oyligi va hisobotlar.
 
-- Kassirga yozilgan xarajat endi sof foydadan ayriladi. U avvalgidek
-  kassir oyligidan ham ayriladi va sotuv tafsilotida ko'rinadi.
-- Sotish yakunlanganda kassirga ajratilgan summa endi sof foydadan
-  ayrilmaydi, faqat kassir oyligiga qo'shiladi.
+- Kassir oyligi endi doimiy qoldiq: minus keyingi oylarga o'tadi va yangi
+  oyliklar uni yopguncha ayirilaveradi, xarajat bo'lmasa plyusda o'sadi.
+- "Oylik" kartasida faqat yakuniy raqam; qizil izoh olib tashlandi.
+- O'tgan oyda sotilib shu oyda yakunlangan sotuv shu oy hisobiga tushadi.
+- "Kassirga ajratildi" jami faqat sotuv mukofotlari, xarajat ayirilmaydi.
+- Menyudagi belgilar panel sudralganda silliq suriladi.
+- Sinxronizatsiya tezroq va ishonchliroq.

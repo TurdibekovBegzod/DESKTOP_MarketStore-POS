@@ -1,19 +1,24 @@
-release: v1.7.2 sof foyda kassir xarajatini ayiradi
-
-Sof foyda hisobi o'zgardi, jadval va kartochkalar avvalgidek qoldi.
+release: v1.7.3 kassir oyligi doimiy qoldiq, keyingi oyda yakunlangan sotuv shu oyga
 
 Nima o'zgardi
 
-- Kassirga yozilgan xarajat endi sof foydadan ayriladi. U avvalgidek
-  kassir oyligidan ham ayriladi va sotuv tafsilotida qator bo'lib turadi.
-- Sotish yakunlanganda kassirga ajratilgan summa endi sof foydadan
-  ayrilmaydi, faqat kassir oyligiga qo'shiladi.
-- Sotuv tafsilotlari: foyda - kassir xarajatlari. Hisobotlar: foyda -
-  barcha xarajatlar; bitta kassir tanlanganda faqat o'sha kassirning
-  xarajatlari.
+- Kassir oyligi endi har hafta yoki oy boshida noldan boshlanmaydi:
+  oldingi qoldiq + shu davr oyligi - shu davr kassir xarajatlari. Minus
+  keyingi oylarga o'tadi, xarajat bo'lmasa plyusda o'sadi.
+- "Oylik" kartasida faqat yakuniy raqam, tafsiloti tooltip'da.
+- O'tgan oyda sotilib keyingi oyda yakunlangan sotuv hisobotda yakunlangan
+  kuniga tushadi; o'sha oyda yakunlangani o'z kunida qoladi.
+- Sotuv tafsilotidagi "Kassirga ajratildi" jami faqat sotuv mukofotlari.
+- Menyudagi qizil nuqta, raqam va yangilanish belgisi panel sudralganda
+  chet bilan birga silliq suriladi.
+- v1.7.2 dan keyingi sinxronizatsiya ishlari ham shu versiyada: har
+  o'zgarish bitta so'rov, server keshi saqlanadi, javobsiz push qayta
+  yuboriladi va serverga yetgani taniladi.
 
-Versiya 1.7.2 (build 34): version.py, installer.nsi, version_info.txt.
+Versiya 1.7.3 (build 35): version.py, installer.nsi, version_info.txt.
 
-Tekshirildi: to'liq desktop to'plami 288 passed.
+Tekshirildi: desktop to'plami - faqat oldindan yiqiladigan test_api_client
+(1 ta, tarmoq turi) va test_online_gate (osilib qoladi), ikkalasi bu
+o'zgarishlarsiz ham shunday.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
