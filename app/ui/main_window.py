@@ -32,6 +32,7 @@ from ui.supplier_debts_widget import SupplierDebtsWidget
 from ui.expenses_widget import ExpensesWidget
 from ui.finance_widget import FinanceWidget
 from ui.checking_widget import CheckingWidget
+from ui.corner_badge import pin_to_right_edge
 from ui.ai_widget import AIWidget
 from ui.notifications_widget import NotificationsWidget
 from ui.updater_dialog import UpdaterDialog
@@ -1505,8 +1506,6 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         if hasattr(self, "toast_manager"):
             self.toast_manager.reposition()
-        self._position_release_dot()
-        self._position_pending_sales_badge()
 
     def show_toast(self, message, title=None, level="success", duration_ms=4000):
         if hasattr(self, "toast_manager"):
@@ -1872,6 +1871,7 @@ class MainWindow(QMainWindow):
         self.release_dot_lbl.setFixedSize(16, 16)
         self.release_dot_lbl.setStyleSheet(self._counter_badge_style())
         self.release_dot_lbl.hide()
+        pin_to_right_edge(self.release_dot_lbl, right=6, top=6)
 
         user_lay.addWidget(self.user_menu_btn)
         sb_layout.addWidget(self.user_frame)
@@ -2066,6 +2066,8 @@ class MainWindow(QMainWindow):
                 border-radius: 5px;
             """)
             self.products_pending_dot_lbl.hide()
+            # Leave the right edge to NavGroupButton's expand/collapse arrow.
+            pin_to_right_edge(self.products_pending_dot_lbl, right=34, top=15)
         nav_layout.addWidget(group_btn)
         self.nav_group_buttons[group_key] = group_btn
 
@@ -2088,6 +2090,7 @@ class MainWindow(QMainWindow):
                 self.finalize_sales_badge_lbl.setFixedHeight(16)
                 self.finalize_sales_badge_lbl.setStyleSheet(self._counter_badge_style())
                 self.finalize_sales_badge_lbl.hide()
+                pin_to_right_edge(self.finalize_sales_badge_lbl, right=8, top=10)
             child_layout.addWidget(btn)
             self.nav_buttons[child_key] = btn
         nav_layout.addWidget(child_frame)
@@ -2212,23 +2215,11 @@ class MainWindow(QMainWindow):
             badge.setText(text)
             badge.setStyleSheet(self._counter_badge_style())
         button.setToolTip(f"{self.labels.get('finalize_sales', 'Sotishni yakunlash')}: {text}")
-        self._position_pending_sales_badge()
         badge.show()
         badge.raise_()
         if group_dot is not None:
             group_dot.show()
             group_dot.raise_()
-
-    def _position_pending_sales_badge(self):
-        badge = getattr(self, "finalize_sales_badge_lbl", None)
-        button = getattr(self, "nav_buttons", {}).get("finalize_sales")
-        if badge is not None and button is not None:
-            badge.move(max(button.width() - badge.width() - 8, 0), 10)
-        group_dot = getattr(self, "products_pending_dot_lbl", None)
-        group_button = getattr(self, "nav_group_buttons", {}).get("products_group")
-        if group_dot is not None and group_button is not None:
-            # Leave the right edge to NavGroupButton's expand/collapse arrow.
-            group_dot.move(max(group_button.width() - group_dot.width() - 34, 0), 15)
 
     def _sync_nav_group_icon_colors(self, button=None):
         theme = THEMES.get(self.settings.get("theme"), THEMES["dark_blue"])
@@ -3003,16 +2994,8 @@ class MainWindow(QMainWindow):
         self.user_menu_btn.setToolTip(tooltip.replace("{v}", version))
         self.release_dot_lbl.setText(str(count))
         self.release_dot_lbl.setStyleSheet(self._counter_badge_style())
-        self._position_release_dot()
         self.release_dot_lbl.show()
         self.release_dot_lbl.raise_()
-
-    def _position_release_dot(self):
-        if not hasattr(self, "release_dot_lbl"):
-            return
-        width = self.user_menu_btn.width() or self.sidebar.width() - 24
-        badge_width = self.release_dot_lbl.width() or 16
-        self.release_dot_lbl.move(max(width - badge_width - 6, 0), 6)
 
     def _apply_remote_assets(self, generation=None, checked_generation=None):
         if self._sync_busy():

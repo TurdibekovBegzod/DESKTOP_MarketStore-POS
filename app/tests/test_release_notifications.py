@@ -54,13 +54,12 @@ class ReleaseBadgeTest(unittest.TestCase):
         self.window_cls = MainWindow
 
         class _Sidebar:
-            """Only what _refresh_release_badge and _position_release_dot use."""
+            """Only what _refresh_release_badge uses."""
 
             labels = {"release_badge_tooltip": "Yangi versiya mavjud: {v}"}
             pending_release_count = MainWindow.pending_release_count
             _counter_badge_style = MainWindow._counter_badge_style
             _refresh_release_badge = MainWindow._refresh_release_badge
-            _position_release_dot = MainWindow._position_release_dot
 
             def __init__(self):
                 self.user_menu_btn = QPushButton()
