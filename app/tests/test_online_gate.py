@@ -13,13 +13,14 @@ from unittest.mock import patch
 
 from PyQt6.QtWidgets import QApplication
 
+import api_client
 import database as db
 
 
 _app = QApplication.instance() or QApplication([])
 
 
-class OnlineGateTest(unittest.TestCase):
+class _WindowCase(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp(prefix="marketstore-online-")
         self.old_path = db.DB_PATH
@@ -35,13 +36,18 @@ class OnlineGateTest(unittest.TestCase):
         )
         from ui.main_window import MainWindow
         self.window = MainWindow(self.owner)
+        self.installed_write_through = db._WRITE_THROUGH
         self.window._realtime_online = True
-        # Ordinary record-gate tests must not contact a real API.
+        # Ordinary record-gate tests must not contact a real API. They cover
+        # the advance check, which only guards changes while write-through is
+        # off; WriteThroughWindowTest below covers the normal path.
         db.set_online_check(self.window._is_online)
+        db.set_write_through(None)
 
     def tearDown(self):
         self.window.close()
         db.set_online_check(None)
+        db.set_write_through(None)
         if db._ENGINE is not None:
             db._ENGINE.dispose()
         db._ENGINE = None
@@ -51,6 +57,8 @@ class OnlineGateTest(unittest.TestCase):
         db._ACTIVE_ACCOUNT_UID = self.old_uid
         shutil.rmtree(self.root, ignore_errors=True)
 
+
+class OnlineGateTest(_WindowCase):
     def test_a_live_stream_means_online(self):
         self.window._realtime_online = True
         self.assertTrue(self.window._is_online())
@@ -201,6 +209,71 @@ class OnlineGateTest(unittest.TestCase):
 
         self.assertNotEqual(online_text, offline_text)
         self.assertIn(offline_text.lower(), ("offline", "офлайн"))
+
+
+class WriteThroughWindowTest(_WindowCase):
+    """The window's normal path: one upload per change, which is the check."""
+
+    def setUp(self):
+        super().setUp()
+        db.mark_upgrade_reconcile_complete()
+        db.mark_identity_reset_complete()
+        db.mark_server_reseed_complete()
+        self.product = db.add_product({"barcode": "W1", "name": "Mahsulot", "price": 1000,
+                                       "cost": 600, "stock": 5, "unit": "dona"})
+        self.cashier = db.add_user("kw@example.com", role="cashier", username="KW")
+        db.mark_sync_pushed()
+        db.set_online_check(self.window._server_accepts_writes)
+        db.set_write_through(self.window._deliver_action,
+                             after_commit=self.window._action_delivered)
+
+    def _sell(self):
+        return db.create_sale(None, self.cashier, [{"product_id": self.product, "quantity": 1,
+                                                    "price": 1000, "subtotal": 1000}],
+                              1000, 0, 1000, "naqd")
+
+    def test_the_window_turns_write_through_on(self):
+        self.assertEqual(self.installed_write_through, self.window._deliver_action)
+        self.assertTrue(db.write_through_ready())
+
+    def test_a_sale_is_one_request_and_no_state_probe(self):
+        with patch("sync_service.api_client.push_sync_records",
+                   return_value={"saved": 5, "generation": 1, "rejected": []}) as push, \
+             patch("ui.main_window.api_client.get_sync_state") as probe:
+            self._sell()
+        push.assert_called_once()
+        probe.assert_not_called()
+        self.assertEqual(db.get_product_by_barcode("W1")["stock"], 4)
+        self.assertEqual(db.count_pending_sync_rows(), 0)
+
+    def test_no_internet_is_said_and_nothing_is_kept(self):
+        error = api_client.ApiOfflineError("x", kind="internet")
+        with patch("sync_service.api_client.push_sync_records", side_effect=error):
+            with self.assertRaises(db.AppError) as refused:
+                self._sell()
+        self.assertIn("Internet ishlamayapti", str(refused.exception))
+        self.assertEqual(db.get_product_by_barcode("W1")["stock"], 5)
+        self.assertEqual(db.get_product_sales_archive(""), [])
+        self.assertEqual(db.count_pending_sync_rows(), 0)
+
+    def test_a_down_server_is_said_and_nothing_is_kept(self):
+        error = api_client.ApiOfflineError("x", kind="server")
+        with patch("sync_service.api_client.push_sync_records", side_effect=error):
+            with self.assertRaises(db.AppError) as refused:
+                self._sell()
+        self.assertIn("server hozir ishlamayapti", str(refused.exception))
+        self.assertEqual(db.get_product_by_barcode("W1")["stock"], 5)
+        self.assertEqual(db.count_pending_sync_rows(), 0)
+
+    def test_the_next_change_tries_again_after_a_failure(self):
+        error = api_client.ApiOfflineError("x", kind="internet")
+        with patch("sync_service.api_client.push_sync_records", side_effect=error):
+            with self.assertRaises(db.AppError):
+                self._sell()
+        with patch("sync_service.api_client.push_sync_records",
+                   return_value={"saved": 5, "generation": 1, "rejected": []}):
+            self._sell()
+        self.assertEqual(db.get_product_by_barcode("W1")["stock"], 4)
 
 
 if __name__ == "__main__":

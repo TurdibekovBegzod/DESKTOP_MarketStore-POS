@@ -339,6 +339,90 @@ def push_local_changes(
     }
 
 
+# How long a change waits for the server before the person is told. Long enough
+# for one upload over a slow shop connection, short enough that a dead link is
+# reported while the cashier is still looking at the screen.
+DELIVERY_TIMEOUT_SECONDS = 8
+
+NO_INTERNET_MESSAGE = (
+    "Internet ishlamayapti.\n\n"
+    "O'zgarish saqlanmadi. Internet ulanishini tekshirib, qayta urinib ko'ring."
+)
+SERVER_DOWN_MESSAGE = (
+    "Server bilan ulanish yo'q - server hozir ishlamayapti.\n\n"
+    "O'zgarish saqlanmadi. Birozdan keyin qayta urinib ko'ring."
+)
+
+
+def deliver_records(user, records, timeout=DELIVERY_TIMEOUT_SECONDS):
+    """Upload one action's rows before they are committed here.
+
+    This upload is the action's only contact with the server: it is the check
+    that the internet and the server work, and the delivery itself. Raising
+    db.AppError rolls the action back, so nothing stays on this device that the
+    server did not take; db.DeliveryUncertain keeps it queued (see there).
+    """
+    try:
+        token = _token_for_user(user)
+    except SyncError as exc:
+        raise db.AppError(str(exc)) from exc
+    try:
+        return api_client.push_sync_records(
+            token,
+            records,
+            # From the records: asking the database here would open a second
+            # connection while this action's transaction holds the write lock.
+            device_key=(records[0].get("source_device_key") if records else None),
+            note=f"desktop action ({len(records)})",
+            timeout=timeout,
+            expected_generation=None,
+            applied_purge_generation=db.get_applied_purge_generation(),
+        )
+    except api_client.ApiOfflineError as exc:
+        if exc.kind == "uncertain":
+            raise db.DeliveryUncertain(str(exc)) from exc
+        if exc.kind == "server":
+            raise db.AppError(SERVER_DOWN_MESSAGE) from exc
+        raise db.AppError(NO_INTERNET_MESSAGE) from exc
+    except api_client.UnsupportedSyncTableError as exc:
+        # This server is older than this desktop. The sync engine knows how to
+        # set the unknown table aside and send the rest; leave it the rows.
+        raise db.DeliveryUncertain(str(exc)) from exc
+    except api_client.RemotePurgeRequiredError as exc:
+        raise db.AppError(
+            "Account ma'lumotlari web boshqaruv panelidan o'chirilgan. "
+            "Bu qurilma yangilanmoqda - birozdan keyin qayta urinib ko'ring."
+        ) from exc
+    except api_client.ApiAuthError as exc:
+        raise db.AppError(
+            "Sessiya muddati tugagan. Dasturdan chiqib, qayta kiring."
+        ) from exc
+    except api_client.ApiClientError as exc:
+        raise db.AppError(f"Server o'zgarishni qabul qilmadi: {exc}") from exc
+
+
+def finish_delivery(answer):
+    """Bookkeeping once a delivered action has committed here.
+
+    Returns True when another device wrote since our last download. Every push
+    advances the account's counter by exactly one, so an answer of known + 1
+    means ours was the only change and the counter can be adopted as seen.
+    Anything higher means someone else's change is in between: adopting the
+    number would make its own announcement look old and be ignored, so the
+    counter is left alone and the caller asks for a download instead.
+    """
+    try:
+        generation = int(answer.get("generation") or 0)
+    except (TypeError, ValueError):
+        return False
+    if not generation:
+        return False
+    if generation == db.get_sync_generation() + 1:
+        _apply_generation(generation)
+        return False
+    return True
+
+
 @_one_at_a_time
 def auto_sync_turn(user, incremental=True):
     """One round of automatic synchronisation: take first, then give.

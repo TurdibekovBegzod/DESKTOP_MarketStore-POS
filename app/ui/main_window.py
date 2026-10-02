@@ -1416,6 +1416,9 @@ class ToastManager(QWidget):
 
 class MainWindow(QMainWindow):
     activity_signal = pyqtSignal(str, str, str, str, str, str)
+    # A change's upload finished: "ok", "failed" or "uncertain". Emitted from
+    # whichever thread wrote; the slot runs on the GUI thread.
+    delivery_signal = pyqtSignal(str)
 
     def __init__(self, user):
         super().__init__()
@@ -1464,6 +1467,12 @@ class MainWindow(QMainWindow):
         self._start_live_sync()
         # All business records are writable only while the server link is live.
         db.set_online_check(self._server_accepts_writes)
+        # And every change is uploaded before it is kept here: that one upload
+        # is both the connection check and the delivery.
+        # Queued: the upload's outcome arrives while the change's transaction
+        # still holds the database, and the status refresh reads it.
+        self.delivery_signal.connect(self._on_delivery, Qt.ConnectionType.QueuedConnection)
+        db.set_write_through(self._deliver_action, after_commit=self._action_delivered)
         # Every entry in the activity log carries who made it, so the other
         # devices can say "Sardor sold ..." rather than "something changed".
         db.set_activity_actor(lambda: {
@@ -1613,6 +1622,7 @@ class MainWindow(QMainWindow):
             self._save_user_activity(force=True)
         self._stop_realtime_listener()
         self._stop_sync_engine()
+        db.set_write_through(None)
         db.unregister_activity_listener(self._on_database_activity)
         app = QApplication.instance()
         if app:
@@ -2731,8 +2741,49 @@ class MainWindow(QMainWindow):
         """True only while both the live server link and sync API are healthy."""
         return self._realtime_online is True and self._engine_state != "offline"
 
+    def _deliver_action(self, records):
+        """Upload one action's rows; see db.set_write_through."""
+        try:
+            answer = sync_service.deliver_records(self.user, records)
+        except db.DeliveryUncertain:
+            self.delivery_signal.emit("uncertain")
+            raise
+        except Exception:
+            self._engine_state = "offline"
+            self.delivery_signal.emit("failed")
+            raise
+        if self._engine_state == "offline":
+            self._engine_state = "idle"
+        return answer
+
+    def _action_delivered(self, answer):
+        """The server has the action and so does this device."""
+        behind = sync_service.finish_delivery(answer)
+        if (behind or answer.get("rejected")) and self._engine_worker is not None:
+            # Somebody else wrote in between, or changed those rows first;
+            # take their version.
+            self._engine_worker.request_turn()
+        self.delivery_signal.emit("ok")
+
+    @pyqtSlot(str)
+    def _on_delivery(self, outcome):
+        self._refresh_sync_status()
+        if outcome == "uncertain":
+            self.show_toast(
+                "Server javobi kelmadi. O'zgarish saqlandi va server javob "
+                "berishi bilan avtomatik yuboriladi.",
+                title="Server javob bermadi",
+                level="warning",
+                duration_ms=8000,
+            )
+
     def _server_accepts_writes(self):
         """Verify the API once per user action, before its first local write.
+
+        With write-through on (the normal case) there is nothing to ask in
+        advance: the action's own upload is the check, and a failed upload rolls
+        the action back. The probe below only guards the one-off migrations
+        that still upload whole copies through the sync engine.
 
         The database asks before every flush, and one sale flushes four or five
         times - each of which used to be its own round trip to the server with
@@ -2741,6 +2792,8 @@ class MainWindow(QMainWindow):
         that asked; the next click is verified again. The live stream is still
         checked on every write, so a dropped link refuses the very next one.
         """
+        if db.write_through_ready():
+            return True
         if self._realtime_online is not True:
             return False
         token = self._realtime_token()

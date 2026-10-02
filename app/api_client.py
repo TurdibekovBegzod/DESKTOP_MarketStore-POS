@@ -30,7 +30,17 @@ class ApiClientError(Exception):
 
 
 class ApiOfflineError(ApiClientError):
-    """Raised when the server could not be reached at all (no internet/tunnel)."""
+    """Raised when the server could not be reached at all (no internet/tunnel).
+
+    ``kind`` says which side failed, so the person can be told what to fix:
+    "internet" - this machine never reached the tunnel; "server" - the tunnel
+    answered but the shop's server behind it did not; "uncertain" - the request
+    went out and no answer came back, so the server may have applied it.
+    """
+
+    def __init__(self, message, kind="internet"):
+        super().__init__(message)
+        self.kind = kind
 
 
 class ApiAuthError(ApiClientError):
@@ -227,18 +237,29 @@ def _send_pooled(method, url, data, headers, timeout):
     for attempt in range(2):
         connection, reused = _connection_for(key, timeout)
         try:
+            if connection.sock is None:
+                connection.connect()
+        except BaseException as exc:
+            _drop_connection(key)
+            exc.request_phase = "connect"
+            raise
+        sent = False
+        try:
             connection.request(method, target, body=data, headers=headers)
+            sent = True
             response = connection.getresponse()
             raw = response.read()
-        except _STALE_CONNECTION_ERRORS:
+        except _STALE_CONNECTION_ERRORS as exc:
             _drop_connection(key)
             if reused and attempt == 0:
                 continue
+            exc.request_phase = "response" if sent else "send"
             raise
-        except BaseException:
+        except BaseException as exc:
             # A timeout or a half-read answer leaves the connection in an
             # unknown state; the next call must not inherit it.
             _drop_connection(key)
+            exc.request_phase = "response" if sent else "send"
             raise
         if response.will_close:
             _drop_connection(key)
@@ -271,6 +292,19 @@ def _send(method, url, data, headers, timeout):
     if getproxies().get(urlsplit(url).scheme):
         return _send_via_proxy(method, url, data, headers, timeout)
     return _send_pooled(method, url, data, headers, timeout)
+
+
+def _failure_kind(exc):
+    """Which side a transport failure points at; see ApiOfflineError.kind."""
+    phase = getattr(exc, "request_phase", None)
+    if phase == "response":
+        return "uncertain"
+    reason = exc.reason if isinstance(exc, URLError) and isinstance(exc.reason, BaseException) else exc
+    if isinstance(reason, ConnectionRefusedError):
+        # Something answered at that address and turned us away: the network
+        # works, the service does not.
+        return "server"
+    return "internet"
 
 
 def _raise_for_status(code, body):
@@ -307,9 +341,12 @@ def _raise_for_status(code, body):
         raise ApiClientError(detail_text or "So'rov qabul qilinmadi. Ma'lumotlarni tekshiring.")
     if code in _SERVER_UNAVAILABLE_CODES:
         # A tunnel/gateway answer, not an application answer: treat it as
-        # "server is down" so the caller can retry or fall back offline.
+        # "server is down" so the caller can retry or fall back offline. A
+        # gateway timeout is the one where the server may still have finished
+        # the work after the gateway gave up waiting.
         raise ApiOfflineError(
-            f"Server hozir javob bermayapti (HTTP {code}). Birozdan keyin urinib ko'ring."
+            f"Server hozir javob bermayapti (HTTP {code}). Birozdan keyin urinib ko'ring.",
+            kind="uncertain" if code == 504 else "server",
         )
     raise ApiClientError(detail_text or f"Server xatosi: HTTP {code}")
 
@@ -330,7 +367,10 @@ def _single_request_json(path, payload=None, token=None, timeout=10, method=None
             http_method, f"{_api_base_url()}{path}", data, request_headers, timeout
         )
     except (URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
-        raise ApiOfflineError("Internet yoki server bilan aloqa yo'q. Iltimos, internet ulanishingizni tekshiring.") from exc
+        raise ApiOfflineError(
+            "Internet yoki server bilan aloqa yo'q. Iltimos, internet ulanishingizni tekshiring.",
+            kind=_failure_kind(exc),
+        ) from exc
     try:
         body = _decode_body(raw, response_headers)
     except (OSError, UnicodeDecodeError) as exc:

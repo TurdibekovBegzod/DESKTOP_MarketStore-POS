@@ -1,5 +1,6 @@
 import base64
 import atexit
+import functools
 import gzip
 import hashlib
 import json
@@ -32,7 +33,7 @@ from sqlalchemy import (
     select,
     update,
 )
-from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.exc import IntegrityError, InvalidRequestError, OperationalError
 from sqlalchemy.orm import Session, declarative_base, relationship, sessionmaker
 from sqlalchemy.sql import text
 
@@ -189,6 +190,116 @@ def _announce_local_change():
         except Exception:
             # Telling somebody about a write must never undo the write.
             continue
+
+
+# Who sends a change to the server before it is committed here; see
+# set_write_through. None keeps the older behaviour - commit locally, let the
+# sync engine upload afterwards - which is what tests and the login screen use.
+_WRITE_THROUGH = None
+_WRITE_THROUGH_DONE = None
+
+# One user action - a sale with its stock movements and its activity entry - is
+# one local transaction and one upload. The functions that write in several
+# steps run inside server_action(); every session_scope() inside it shares one
+# session, each step on its own SAVEPOINT.
+_ACTION = threading.local()
+
+
+class DeliveryUncertain(Exception):
+    """The upload went out but its answer never came back.
+
+    The server may well have saved it. Rolling back here would make the cashier
+    ring the sale up again and the server would then hold it twice, so the
+    change is committed and stays queued instead: the next upload repeats it
+    under the same ids, which the server applies once.
+    """
+
+
+def set_write_through(deliver, after_commit=None):
+    """Send every change to the server inside its own local transaction.
+
+    ``deliver(records)`` uploads and returns the server's answer; raising rolls
+    the local transaction back, so nothing is kept that the server did not take.
+    Raising DeliveryUncertain commits and leaves the rows queued.
+    ``after_commit(answer)`` runs once the local commit has landed.
+    """
+    global _WRITE_THROUGH, _WRITE_THROUGH_DONE
+    _WRITE_THROUGH = deliver
+    _WRITE_THROUGH_DONE = after_commit
+
+
+def write_through_ready():
+    """Whether the next change will be checked by its own upload.
+
+    The one-off migrations - a server reseed, the identity reset, the first
+    settlement after the upgrade - send whole copies through the sync engine,
+    so while one of them is owed, changes go the old way.
+    """
+    if _WRITE_THROUGH is None:
+        return False
+    try:
+        with _get_engine().connect() as conn:
+            return not _write_through_blocked(conn)
+    except Exception:
+        return False
+
+
+def _write_through_blocked(conn):
+    return (
+        _sync_state_get(conn, "server_reseed_required") == "1"
+        or _sync_state_int(conn, "identity_reset_required", 0) == 1
+        or _sync_state_int(conn, "upgrade_reconcile_required", 0) == 1
+    )
+
+
+def _current_action():
+    return _ACTION.state if getattr(_ACTION, "depth", 0) else None
+
+
+@contextmanager
+def server_action():
+    """Run the enclosed writes as one transaction and one upload."""
+    if getattr(_ACTION, "depth", 0):
+        _ACTION.depth += 1
+        try:
+            yield
+        finally:
+            _ACTION.depth -= 1
+        return
+    _ACTION.depth = 1
+    _ACTION.state = state = {"session": None}
+    try:
+        yield
+    except BaseException:
+        _ACTION.depth = 0
+        _ACTION.state = None
+        session = state["session"]
+        if session is not None:
+            session.rollback()
+            session.close()
+        raise
+    _ACTION.depth = 0
+    _ACTION.state = None
+    session = state["session"]
+    if session is not None:
+        try:
+            _commit_session(session)
+        except OperationalError as exc:
+            session.rollback()
+            _raise_database_busy(exc)
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+
+def _as_server_action(function):
+    @functools.wraps(function)
+    def wrapped(*args, **kwargs):
+        with server_action():
+            return function(*args, **kwargs)
+    return wrapped
 
 
 def set_online_check(callback):
@@ -761,23 +872,18 @@ def _session_factory():
 
 @contextmanager
 def session_scope():
+    action = _current_action()
+    if action is not None and not _is_flushing(action):
+        with _action_session_scope(action) as session:
+            yield session
+        return
+    # Outside an action - or called from a flush listener of the action's own
+    # session (the online check reads the token there), where a SAVEPOINT
+    # cannot be opened. Those calls only read, so a session of their own is fine.
     session = _session_factory()()
-    announce_change = False
     try:
         yield session
-        if session.new or session.dirty or session.deleted or session.info.get("has_writes"):
-            # Flush first so the after_flush listener has collected everything,
-            # then write the outbox on the same connection, then commit once.
-            # Data and queue now land together or not at all.
-            session.flush()
-            announce_change = _flush_session_outbox(session)
-            session.commit()
-            if announce_change:
-                # Wake sync only after both the data and its outbox entry are
-                # durable. The worker can now read exactly what committed.
-                _announce_local_change()
-        else:
-            session.rollback()
+        _commit_session(session)
     except OperationalError as exc:
         session.rollback()
         _raise_database_busy(exc)
@@ -786,6 +892,99 @@ def session_scope():
         raise
     finally:
         session.close()
+
+
+def _is_flushing(action):
+    session = action["session"]
+    return session is not None and bool(getattr(session, "_flushing", False))
+
+
+def _action_session(action):
+    session = action["session"]
+    if session is None:
+        session = action["session"] = _session_factory()()
+        # A real outer transaction first. pysqlite only opens one before the
+        # first INSERT/UPDATE, so without this the first SAVEPOINT would start
+        # the transaction itself - and releasing it would commit everything.
+        # IMMEDIATE, because an action reads before it writes: a deferred
+        # transaction that read, while the sync engine committed something,
+        # cannot then start writing - WAL refuses that at once with "database is
+        # locked", without waiting. Taking the write lock up front makes other
+        # writers queue behind the action instead.
+        session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+    return session
+
+
+@contextmanager
+def _begin():
+    """engine.begin() - except inside a server_action, where it is the action's
+    own connection. The action holds SQLite's write lock until it commits, so a
+    helper that wrote on a connection of its own (the device key, the sync
+    state) would wait for that lock for the full busy timeout. Joined, it is
+    simply part of the action, and undone with it.
+    """
+    action = _current_action()
+    if action is not None:
+        yield _action_session(action).connection()
+        return
+    with _get_engine().begin() as conn:
+        yield conn
+
+
+@contextmanager
+def _action_session_scope(action):
+    """One step of a server_action: the shared session, on its own SAVEPOINT."""
+    session = _action_session(action)
+    queued = set(session.info.get("sync_outbox_entries") or ())
+    step = session.begin_nested()
+    try:
+        yield session
+        if session.new or session.dirty or session.deleted:
+            session.flush()
+        step.commit()
+    except Exception as exc:
+        # Also after a failed flush, when SQLAlchemy has already deactivated the
+        # step: it still has to be rolled back to its SAVEPOINT explicitly, or
+        # every later step of the action fails with PendingRollbackError.
+        try:
+            step.rollback()
+        except InvalidRequestError:
+            pass
+        # What the undone step queued was undone with it; sending its deletes
+        # would erase rows that still exist here.
+        session.info["sync_outbox_entries"] = queued
+        if isinstance(exc, OperationalError):
+            _raise_database_busy(exc)
+        raise
+
+
+def _commit_session(session):
+    """Commit a session's writes - after the server has taken them, if asked to.
+
+    Flush first so the after_flush listener has collected everything, then
+    write the outbox on the same connection, then (write-through) upload, then
+    commit once. Data and queue land together or not at all, and with
+    write-through they do not land here unless the server has them.
+    """
+    if not (
+        session.new or session.dirty or session.deleted or session.info.get("has_writes")
+    ):
+        session.rollback()
+        return
+    session.flush()
+    entries = _flush_session_outbox(session)
+    answer = _deliver_before_commit(session, entries)
+    session.commit()
+    if answer is not None:
+        if _WRITE_THROUGH_DONE is not None:
+            try:
+                _WRITE_THROUGH_DONE(answer)
+            except Exception:
+                pass
+    elif entries:
+        # Wake sync only after both the data and its outbox entry are durable.
+        # The worker can now read exactly what committed.
+        _announce_local_change()
 
 
 def _raise_database_busy(exc):
@@ -1759,7 +1958,7 @@ def _record_dangling_references(conn):
 
 def get_dangling_reference_report():
     """What the identity migration found pointing at rows we do not hold."""
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         row = conn.exec_driver_sql(
             "SELECT value FROM sync_state WHERE key='identity_dangling_refs'"
         ).fetchone()
@@ -2419,7 +2618,7 @@ def _bind_account_identity(user_uid, email):
     normalized_email = _normalize_email(email)
     if not normalized_email:
         raise AppError("Online account emaili topilmadi.")
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         stored_email = _normalize_email(_sync_state_get(conn, "account_email"))
         stored_uid = _sync_state_get(conn, "account_user_uid")
         if stored_email and stored_email != normalized_email:
@@ -2433,27 +2632,27 @@ def _bind_account_identity(user_uid, email):
 
 
 def mark_server_bootstrap_required():
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         _sync_state_set(conn, "server_bootstrap_required", "1")
 
 
 def mark_server_bootstrap_complete():
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         _sync_state_set(conn, "server_bootstrap_required", "0")
 
 
 def is_server_bootstrap_required():
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         return _sync_state_get(conn, "server_bootstrap_required") == "1"
 
 
 def is_server_reseed_required():
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         return _sync_state_get(conn, "server_reseed_required") == "1"
 
 
 def mark_server_reseed_complete():
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         _sync_state_set(conn, "server_reseed_required", "0")
 
 
@@ -2466,7 +2665,7 @@ def _sync_state_int(conn, key, default=0):
 
 
 def get_sync_device_key():
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         key = _sync_state_get(conn, "device_key")
         if not key:
             key = "desktop-" + secrets.token_hex(12)
@@ -2539,7 +2738,7 @@ def _flush_session_outbox(session):
     """
     entries = session.info.get("sync_outbox_entries")
     if not entries or _is_sync_suspended():
-        return False
+        return set()
     connection = session.connection()
     _write_outbox_entries(connection, entries)
     _sync_state_set(connection, "last_dirty_at", _utc_now())
@@ -2549,7 +2748,97 @@ def _flush_session_outbox(session):
         str(_sync_state_int(connection, "pending_change_count") + len(entries)),
     )
     session.info["sync_outbox_entries"] = set()
-    return True
+    return set(entries)
+
+
+def _deliver_before_commit(session, entries):
+    """Upload this transaction's queued rows; None when nothing was delivered.
+
+    Reads go through the session's own connection: the rows are not committed
+    yet, and another connection would neither see them nor be allowed to write
+    while this one holds the lock.
+    """
+    if not entries or _WRITE_THROUGH is None or _is_sync_suspended():
+        return None
+    conn = session.connection()
+    if _write_through_blocked(conn):
+        return None
+    undeliverable = get_unsendable_tables()
+    device_key = _sync_state_get(conn, "device_key")
+    if not device_key:
+        # Created here, on this connection: get_sync_device_key() would write
+        # on its own and wait for the lock this transaction is holding.
+        device_key = "desktop-" + secrets.token_hex(12)
+        _sync_state_set(conn, "device_key", device_key)
+    now = _utc_now()
+    records = []
+    for table_name, local_id, action in sorted(entries):
+        if table_name not in SYNC_TABLES or table_name in undeliverable:
+            continue
+        record = _outbox_record(conn, table_name, local_id, action, now, device_key)
+        if record is not None:
+            records.append(record)
+    if not records:
+        return None
+    _attach_expected_versions(conn, records)
+    try:
+        answer = dict(_WRITE_THROUGH(records) or {})
+    except DeliveryUncertain:
+        return None
+    sent = [(record["table_name"], record["local_id"]) for record in records]
+    for table_name, local_id in sent:
+        conn.exec_driver_sql(
+            "DELETE FROM sync_outbox WHERE table_name = ? AND local_id = ?",
+            (table_name, str(local_id)),
+        )
+    # What we sent is no longer what we last downloaded; the next download
+    # brings the server's version number back.
+    _forget_row_versions(conn, sent)
+    clause, clause_params = _unsendable_clause()
+    remaining = conn.exec_driver_sql(
+        f"SELECT COUNT(*) FROM sync_outbox{clause}", clause_params
+    ).scalar() or 0
+    if _has_table(conn, "sync_tombstones"):
+        remaining += conn.exec_driver_sql(
+            f"SELECT COUNT(*) FROM sync_tombstones{clause}", clause_params
+        ).scalar() or 0
+    _sync_state_set(conn, "last_push_at", now)
+    _sync_state_set(conn, "last_dirty_at", "" if not remaining else now)
+    _sync_state_set(conn, "pending_change_count", str(remaining))
+    answer["sent"] = len(records)
+    return answer
+
+
+def _outbox_record(conn, table_name, local_id, action, queued_at, device_key):
+    """One queued change as the server's push endpoint takes it, or None."""
+    if not _has_table(conn, table_name):
+        return None
+    if action == "delete":
+        return {
+            "table_name": table_name,
+            "local_id": str(local_id),
+            "data": {},
+            "local_updated_at": queued_at,
+            "deleted_at": queued_at,
+            "source_device_key": device_key,
+        }
+    quoted = _quote_identifier(table_name)
+    pk_col = _sync_primary_key_column(table_name)
+    row = conn.exec_driver_sql(
+        f"SELECT * FROM {quoted} WHERE {pk_col} = ?", (local_id,)
+    ).mappings().first()
+    if not row:
+        return None
+    data = dict(row)
+    local_updated_at = data.get("updated_at") or data.get("created_at") or queued_at or _utc_now()
+    return {
+        "table_name": table_name,
+        "local_id": str(local_id),
+        "data": data,
+        "local_updated_at": str(local_updated_at) if local_updated_at else _utc_now(),
+        "deleted_at": str(data.get("deleted_at")) if data.get("deleted_at") else None,
+        "source_device_key": device_key,
+    }
 
 
 def get_sync_status(with_record_count=False):
@@ -2559,7 +2848,7 @@ def get_sync_status(with_record_count=False):
     expensive for the once-a-second status refresh, so it is only totalled when
     a caller actually needs the number.
     """
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         _ensure_sync_outbox_table(conn)
         last_dirty = _sync_state_get(conn, "last_dirty_at")
         last_push = _sync_state_get(conn, "last_push_at")
@@ -2627,7 +2916,7 @@ def export_sync_records(incremental=False, with_watermark=False):
     records = []
     max_seq = None
     tombstone_ids = []
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         _ensure_sync_outbox_table(conn)
 
         # Incremental mode: only export records that were created, modified or deleted
@@ -2648,32 +2937,11 @@ def export_sync_records(incremental=False, with_watermark=False):
                     # Kept in the queue for a newer server; sending it now would
                     # make the API refuse this whole batch.
                     continue
-                if action == "delete":
-                    records.append({
-                        "table_name": table_name,
-                        "local_id": str(local_id),
-                        "data": {},
-                        "local_updated_at": item["updated_at"],
-                        "deleted_at": item["updated_at"],
-                        "source_device_key": device_key,
-                    })
-                else:
-                    quoted = _quote_identifier(table_name)
-                    pk_col = _sync_primary_key_column(table_name)
-                    row = conn.exec_driver_sql(
-                        f"SELECT * FROM {quoted} WHERE {pk_col} = ?", (local_id,)
-                    ).mappings().first()
-                    if row:
-                        data = dict(row)
-                        local_updated_at = data.get("updated_at") or data.get("created_at") or item["updated_at"] or now
-                        records.append({
-                            "table_name": table_name,
-                            "local_id": str(local_id),
-                            "data": data,
-                            "local_updated_at": str(local_updated_at) if local_updated_at else now,
-                            "deleted_at": str(data.get("deleted_at")) if data.get("deleted_at") else None,
-                            "source_device_key": device_key,
-                        })
+                record = _outbox_record(
+                    conn, table_name, local_id, action, item["updated_at"] or now, device_key
+                )
+                if record is not None:
+                    records.append(record)
             if _has_table(conn, "sync_tombstones"):
                 tombstones = conn.exec_driver_sql(
                     "SELECT table_name, local_id, deleted_at FROM sync_tombstones"
@@ -2859,7 +3127,7 @@ def _known_row_versions(conn, table_name=None):
 
 
 def get_known_row_version(table_name, local_id):
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         _ensure_sync_versions_table(conn)
         row = conn.exec_driver_sql(
             "SELECT version FROM sync_versions WHERE table_name = ? AND local_id = ?",
@@ -2869,7 +3137,7 @@ def get_known_row_version(table_name, local_id):
 
 
 def forget_row_versions(pairs):
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         _forget_row_versions(conn, pairs)
 
 
@@ -2921,7 +3189,7 @@ def _release_quarantined_record(conn, table_name, local_id):
 
 def get_sync_quarantine(limit=50):
     """Records this device could not apply, newest first."""
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         _ensure_sync_quarantine_table(conn)
         rows = conn.exec_driver_sql(
             "SELECT table_name, local_id, reason, attempts, first_seen_at, last_seen_at "
@@ -2932,14 +3200,14 @@ def get_sync_quarantine(limit=50):
 
 
 def count_sync_quarantine():
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         _ensure_sync_quarantine_table(conn)
         return int(conn.exec_driver_sql("SELECT COUNT(*) FROM sync_quarantine").scalar() or 0)
 
 
 def _pending_outbox_keys():
     """Rows changed here that the server has not been told about yet."""
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         _ensure_sync_outbox_table(conn)
         rows = conn.exec_driver_sql("SELECT table_name, local_id FROM sync_outbox").fetchall()
     return {(row[0], str(row[1])) for row in rows}
@@ -2947,7 +3215,7 @@ def _pending_outbox_keys():
 
 def _pending_quarantined_records():
     """What was set aside earlier, to be tried again with the next download."""
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         _ensure_sync_quarantine_table(conn)
         rows = conn.exec_driver_sql("SELECT payload FROM sync_quarantine").fetchall()
     records = []
@@ -3122,7 +3390,7 @@ def mark_sync_pushed(up_to_seq=None, tombstone_ids=None):
     queued after that - a sale rung up while the upload was in flight - stays
     queued for the next push instead of being deleted unsent.
     """
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         now = _utc_now()
         _ensure_sync_outbox_table(conn)
         undeliverable = sorted(get_unsendable_tables())
@@ -3502,7 +3770,7 @@ def delete_account_asset(asset_id):
 def has_pending_sync_for_table(table_name):
     if table_name not in SYNC_TABLES:
         return False
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         _ensure_sync_outbox_table(conn)
         outbox = conn.exec_driver_sql(
             "SELECT 1 FROM sync_outbox WHERE table_name=? LIMIT 1",
@@ -3520,7 +3788,7 @@ def has_pending_sync_for_table(table_name):
 
 
 def has_seen_server_account_assets():
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         return _sync_state_get(conn, "account_assets_server_seen") == "1"
 
 
@@ -3541,7 +3809,7 @@ def _active_backup_dir():
 
 def get_sync_generation():
     """Server change counter as of our last successful push/pull."""
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         return _sync_state_int(conn, "server_generation", 0)
 
 
@@ -3550,7 +3818,7 @@ def set_sync_generation(value):
         generation = int(value)
     except (TypeError, ValueError):
         return
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         _sync_state_set(conn, "server_generation", str(generation))
 
 
@@ -3561,7 +3829,7 @@ def get_ledger_baseline():
     a return used to overwrite the amount it reduced, so those sales cannot be
     recomputed from their own history. Everything after it can.
     """
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         row = conn.exec_driver_sql(
             "SELECT value FROM sync_state WHERE key='ledger_baseline_at'"
         ).fetchone()
@@ -3589,7 +3857,7 @@ def set_unsendable_tables(tables):
         current = sorted(_UNSENDABLE_TABLES)
     if changed:
         try:
-            with _get_engine().begin() as conn:
+            with _begin() as conn:
                 _sync_state_set(conn, "unsendable_tables", ",".join(current))
         except Exception:
             pass
@@ -3618,7 +3886,7 @@ def count_pending_sync_rows():
     holds real work, and trusting the counter would leave that work unsent
     with nothing to show for it.
     """
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         _ensure_sync_outbox_table(conn)
         clause, params = _unsendable_clause()
         total = conn.exec_driver_sql(f"SELECT COUNT(*) FROM sync_outbox{clause}", params).scalar() or 0
@@ -3637,7 +3905,7 @@ def record_sync_failure(error):
     off -- which is precisely how a broken sync went unnoticed.
     """
     try:
-        with _get_engine().begin() as conn:
+        with _begin() as conn:
             _sync_state_set(conn, "last_sync_error", f"{type(error).__name__}: {error}"[:400])
             _sync_state_set(conn, "last_sync_error_at", _utc_now())
     except Exception:
@@ -3652,7 +3920,7 @@ def record_sync_success(outcome=None):
                 f"olindi={int(outcome.get('pulled') or 0)} "
                 f"yuborildi={int(outcome.get('pushed') or 0)}"
             )
-        with _get_engine().begin() as conn:
+        with _begin() as conn:
             _sync_state_set(conn, "last_sync_ok_at", _utc_now())
             _sync_state_set(conn, "last_sync_summary", summary)
             _sync_state_set(conn, "last_sync_error", "")
@@ -3662,7 +3930,7 @@ def record_sync_success(outcome=None):
 
 def get_sync_health():
     """What the automatic sync has been doing, for the status panel."""
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         def value(key):
             row = conn.exec_driver_sql(
                 "SELECT value FROM sync_state WHERE key=?", (key,)
@@ -3683,7 +3951,7 @@ def get_pull_watermark():
     always has been able to -- the client simply never asked, so every download
     was a full copy of the account. This is the moment to ask from.
     """
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         row = conn.exec_driver_sql(
             "SELECT value FROM sync_state WHERE key='pull_watermark'"
         ).fetchone()
@@ -3694,7 +3962,7 @@ def set_pull_watermark(value):
     """Only ever moved after a download that kept everything it was given."""
     if not value:
         return
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         _sync_state_set(conn, "pull_watermark", str(value))
 
 
@@ -3708,7 +3976,7 @@ def get_pull_cursor():
     stayed invisible forever. Two devices sat online side by side showing
     completely different data because of it.
     """
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         return _sync_state_int(conn, "pull_cursor", 0)
 
 
@@ -3720,7 +3988,7 @@ def set_pull_cursor(value):
         return
     if number < 0:
         return
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         initialized = _sync_state_get(conn, "pull_cursor_initialized") == "1"
         if initialized and number <= _sync_state_int(conn, "pull_cursor", 0):
             return
@@ -3729,12 +3997,12 @@ def set_pull_cursor(value):
 
 
 def is_pull_cursor_initialized():
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         return _sync_state_get(conn, "pull_cursor_initialized") == "1"
 
 
 def clear_pull_cursor():
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         _sync_state_set(conn, "pull_cursor", "0")
         _sync_state_set(conn, "pull_cursor_initialized", "0")
 
@@ -3742,14 +4010,14 @@ def clear_pull_cursor():
 def get_table_pull_cursor(table_name):
     if table_name not in SYNC_TABLES:
         return 0
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         return _sync_state_int(conn, f"table_cursor:{table_name}", 0)
 
 
 def is_table_pull_cursor_initialized(table_name):
     if table_name not in SYNC_TABLES:
         return False
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         return _sync_state_get(conn, f"table_cursor_initialized:{table_name}") == "1"
 
 
@@ -3763,7 +4031,7 @@ def set_table_pull_cursor(table_name, value):
     if number < 0:
         return
     key = f"table_cursor:{table_name}"
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         initialized_key = f"table_cursor_initialized:{table_name}"
         initialized = _sync_state_get(conn, initialized_key) == "1"
         if not initialized or number > _sync_state_int(conn, key, 0):
@@ -3792,7 +4060,7 @@ def queue_rows_absent_from_server(server_keys):
         known.add((str(table_name), str(local_id)))
     queued = 0
     entries = []
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         for table_name in SYNC_TABLES:
             if not _has_table(conn, table_name):
                 continue
@@ -3812,13 +4080,13 @@ def queue_rows_absent_from_server(server_keys):
 
 
 def clear_pull_watermark():
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         _sync_state_set(conn, "pull_watermark", "")
 
 
 def get_last_pull_stats():
     """What the most recent download had to leave behind."""
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         row = conn.exec_driver_sql(
             "SELECT value FROM sync_state WHERE key='last_pull_tables'"
         ).fetchone()
@@ -3840,29 +4108,29 @@ def is_upgrade_reconcile_required():
     be uploaded again. The first sync after the upgrade therefore takes the
     server's copy as the truth rather than merging into it.
     """
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         return _sync_state_int(conn, "upgrade_reconcile_required", 0) == 1
 
 
 def mark_upgrade_reconcile_complete():
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         _sync_state_set(conn, "upgrade_reconcile_required", "0")
 
 
 def is_identity_reset_required():
     """True while the server still holds rows keyed by the old integers."""
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         return _sync_state_int(conn, "identity_reset_required", 0) == 1
 
 
 def mark_identity_reset_complete():
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         _sync_state_set(conn, "identity_reset_required", "0")
 
 
 def get_applied_purge_generation():
     """Newest server purge that this local account database has applied."""
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         return _sync_state_int(conn, "applied_purge_generation", 0)
 
 
@@ -3872,7 +4140,7 @@ def mark_remote_change(generation, tables=None, device_key=None, changed_at=None
         generation = int(generation)
     except (TypeError, ValueError):
         return
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         if generation <= _sync_state_int(conn, "server_generation", 0):
             return
         _sync_state_set(conn, "remote_generation", str(generation))
@@ -3882,7 +4150,7 @@ def mark_remote_change(generation, tables=None, device_key=None, changed_at=None
 
 
 def clear_remote_change():
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         _sync_state_set(conn, "remote_generation", "0")
         _sync_state_set(conn, "remote_tables", "")
         _sync_state_set(conn, "remote_device_key", "")
@@ -3890,7 +4158,7 @@ def clear_remote_change():
 
 
 def get_remote_change():
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         known = _sync_state_int(conn, "server_generation", 0)
         remote = _sync_state_int(conn, "remote_generation", 0)
         tables = (_sync_state_get(conn, "remote_tables") or "").split(",")
@@ -3907,7 +4175,7 @@ def get_remote_change():
 def count_sync_records():
     """Number of rows across every synced table in the local database."""
     total = 0
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         for table_name in SYNC_TABLES:
             if not _has_table(conn, table_name):
                 continue
@@ -3927,7 +4195,7 @@ def create_local_backup(tag="presync"):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     target = os.path.join(backup_dir, f"{account}.{tag}_{timestamp}.db")
     try:
-        with _get_engine().begin() as conn:
+        with _begin() as conn:
             conn.exec_driver_sql("PRAGMA wal_checkpoint(FULL)")
     except Exception:
         pass
@@ -3965,14 +4233,14 @@ def set_known_release(version, tag=None, published_at=None):
     version = str(version or "").strip()
     if not version:
         return
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         _sync_state_set(conn, "latest_release_version", version)
         _sync_state_set(conn, "latest_release_tag", str(tag or ""))
         _sync_state_set(conn, "latest_release_at", str(published_at or ""))
 
 
 def get_known_release():
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         return Row(
             version=_sync_state_get(conn, "latest_release_version") or "",
             tag=_sync_state_get(conn, "latest_release_tag") or "",
@@ -3993,7 +4261,7 @@ def _protected_user_ids(conn):
 
 def clear_sync_outbox():
     """Drop queued local changes (used when the user chooses the server copy)."""
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         _ensure_sync_outbox_table(conn)
         conn.exec_driver_sql("DELETE FROM sync_outbox")
         if _has_table(conn, "sync_tombstones"):
@@ -4053,7 +4321,7 @@ def wipe_sync_tables():
     _sync_suspend_token = suspend_sync()
     _sync_suspend_token.__enter__()
     try:
-        with _get_engine().begin() as conn:
+        with _begin() as conn:
             protected = _protected_user_ids(conn)
             # Children first: SYNC_TABLES is ordered parents-first for import.
             for table_name in reversed(SYNC_TABLES):
@@ -4128,7 +4396,7 @@ def apply_remote_purge(purge_generation, server_generation=None):
     removed_records = count_sync_records()
     wipe_sync_tables()
     removed_artifacts = _remove_account_purge_artifacts()
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         _sync_state_set(conn, "applied_purge_generation", str(purge_generation))
         _sync_state_set(conn, "server_generation", str(max(server_generation, purge_generation)))
         _sync_state_set(conn, "remote_generation", "0")
@@ -4155,7 +4423,7 @@ def replace_local_from_records(records):
     wipe_sync_tables()
     imported = import_sync_records(records)
     ensure_reference_rows()
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         _sync_state_set(conn, "last_dirty_at", "")
         _sync_state_set(conn, "pending_change_count", "0")
         _sync_state_set(conn, "server_bootstrap_required", "0")
@@ -4738,7 +5006,7 @@ def take_new_remote_activities(limit=5):
         device_key = get_sync_device_key()
     except Exception:
         device_key = ""
-    with _get_engine().begin() as conn:
+    with _begin() as conn:
         row = conn.exec_driver_sql(
             "SELECT value FROM sync_state WHERE key='activity_seen_at'"
         ).fetchone()
@@ -4764,12 +5032,12 @@ def take_new_remote_activities(limit=5):
         )) for row in rows]
     newest = max((row["created_at"] or "" for row in fresh), default=None)
     if newest:
-        with _get_engine().begin() as conn:
+        with _begin() as conn:
             _sync_state_set(conn, "activity_seen_at", newest)
     elif seen_at is None:
         # First look on a device that has nothing yet: start the marker now so
         # the whole existing history is not announced later.
-        with _get_engine().begin() as conn:
+        with _begin() as conn:
             _sync_state_set(conn, "activity_seen_at", _utc_now())
     return fresh[-limit:] if limit else fresh
 
@@ -8408,3 +8676,24 @@ def get_notifications_data(threshold=None, user_id=None):
             "pending_sync_count": pending,
         },
     }
+
+
+# Each of these writes its data and then its activity entry - two transactions,
+# two uploads, and a window between them where the second could fail after the
+# first had already been kept. As one action they are one transaction and one
+# upload: the sale and its feed entry reach the server together or not at all.
+for _name in (
+    "add_product_section", "update_product_section", "delete_product_section",
+    "restore_product_section", "restore_product", "add_product", "update_product",
+    "delete_product", "put_product_in_process", "update_product_process",
+    "clear_product_process", "reduce_product_process", "add_stock",
+    "start_inventory_check", "finish_inventory_check", "create_sale", "finalize_sale",
+    "finalize_all_pending_sales", "add_supplier", "update_supplier", "delete_supplier",
+    "add_supplier_debt", "pay_supplier_debt", "add_debtor", "update_debtor",
+    "delete_debtor", "add_debtor_debt", "pay_debtor_debt", "add_expense_category",
+    "update_expense_category", "delete_expense_category", "add_expense",
+    "update_expense", "delete_expense", "log_login", "add_user", "update_user",
+    "delete_user",
+):
+    globals()[_name] = _as_server_action(globals()[_name])
+del _name

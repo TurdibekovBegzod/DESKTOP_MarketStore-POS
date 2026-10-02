@@ -1,8 +1,10 @@
 import gzip
 import json
 import os
+import socket
 import ssl
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import MagicMock, patch
@@ -126,6 +128,62 @@ class ApiClientConnectionReuseTest(unittest.TestCase):
             api_client._request_json("/health", timeout=2)
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+
+class _SlowHandler(_Handler):
+    def do_GET(self):
+        time.sleep(1.5)
+        super().do_GET()
+
+
+class ApiClientFailureKindTest(unittest.TestCase):
+    """Which side failed decides what the person is told."""
+
+    def setUp(self):
+        self.proxies = patch("api_client.getproxies", return_value={})
+        self.proxies.start()
+        api_client._connections.pool = {}
+
+    def tearDown(self):
+        for key in list(getattr(api_client._connections, "pool", {}) or {}):
+            api_client._drop_connection(key)
+        self.proxies.stop()
+
+    def _kind(self, base, timeout=2):
+        with patch.dict(os.environ, {"MARKETSTORE_API_URL": base}):
+            with self.assertRaises(api_client.ApiOfflineError) as caught:
+                api_client._request_json("/sync/state", timeout=timeout)
+        return caught.exception.kind
+
+    def test_an_unknown_host_is_the_internet(self):
+        self.assertEqual(self._kind("http://no-such-host.invalid/api/v1"), "internet")
+
+    def test_a_refused_connection_is_the_server(self):
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+        listener.close()
+        self.assertEqual(self._kind(f"http://127.0.0.1:{port}/api/v1"), "server")
+
+    def test_a_tunnel_without_its_server_is_the_server(self):
+        for code in (404, 502, 503):
+            with self.subTest(code=code):
+                with patch("api_client._send", return_value=(code, {}, b"{}")):
+                    self.assertEqual(self._kind("https://api.test/api/v1"), "server")
+
+    def test_no_answer_after_sending_is_uncertain(self):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _SlowHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            kind = self._kind(f"http://127.0.0.1:{server.server_address[1]}/api/v1", timeout=0.5)
+        finally:
+            server.shutdown()
+            server.server_close()
+        self.assertEqual(kind, "uncertain")
+
+    def test_a_gateway_timeout_is_uncertain(self):
+        with patch("api_client._send", return_value=(504, {}, b"{}")):
+            self.assertEqual(self._kind("https://api.test/api/v1"), "uncertain")
 
 
 class ApiClientPullTest(unittest.TestCase):
