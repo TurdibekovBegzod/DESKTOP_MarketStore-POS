@@ -1,6 +1,8 @@
 name: Deploy API
 
 # Every push to main that touches the server is tested and then rolled out.
+# Only the API's own tests gate it: the desktop app has its own workflow
+# (desktop_tests.yml), so a red desktop test never holds back a server fix.
 # Nothing is torn down: `docker compose up -d --build` replaces only the
 # containers that changed, so postgres and redis - and their data - stay up.
 on:
@@ -54,30 +56,6 @@ jobs:
             echo "### API testlar"
             echo '```'
             tail -n 80 /tmp/api-tests.log
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-          exit $status
-
-      - name: Install desktop dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq libegl1 libgl1 libxkbcommon0 libdbus-1-3 libfontconfig1
-          # pyinstaller is only needed to package the .exe, not to run tests.
-          grep -v '^pyinstaller' app/requirements.txt > /tmp/app-test-requirements.txt
-          pip install -r /tmp/app-test-requirements.txt
-
-      - name: Run desktop tests
-        working-directory: app
-        env:
-          QT_QPA_PLATFORM: offscreen
-        run: |
-          set -o pipefail
-          status=0
-          python -m pytest tests -q 2>&1 | tee /tmp/desktop-tests.log || status=$?
-          {
-            echo "### Desktop testlar"
-            echo '```'
-            tail -n 80 /tmp/desktop-tests.log
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           exit $status
