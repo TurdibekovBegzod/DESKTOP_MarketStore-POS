@@ -92,6 +92,9 @@ services:
       SHOP_ACCOUNT_EMAIL: ${SHOP_ACCOUNT_EMAIL:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.7-flash}
+      # ManyChat webhook answers inline in this container; the worker never sees it.
+      MANYCHAT_WEBHOOK_TOKEN: ${MANYCHAT_WEBHOOK_TOKEN:-}
+      MANYCHAT_ACCOUNT_EMAIL: ${MANYCHAT_ACCOUNT_EMAIL:-akbareliboy@gmail.com}
       LOG_ARCHIVE_DIR: /var/log/marketstore
       LOG_POLL_SECONDS: ${LOG_POLL_SECONDS:-2}
       LOG_RETENTION_MONTHS: ${LOG_RETENTION_MONTHS:-0}

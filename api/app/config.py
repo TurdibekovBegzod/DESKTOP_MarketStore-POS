@@ -53,6 +53,13 @@ class Settings(BaseSettings):
     # now; per-account routing needs the Instagram id to map to a user.
     shop_account_email: str | None = None
     gemini_api_key: str | None = None
+    # ManyChat webhook. Unlike the Instagram callback it is not routed by the
+    # sender's account: every message it receives is answered out of this one
+    # shop's products and rules, and nobody else's. The token is ours to invent
+    # and goes into ManyChat's request as "Authorization: Bearer <token>"; unset
+    # means the endpoint answers 503 rather than serving unauthenticated callers.
+    manychat_webhook_token: str | None = None
+    manychat_account_email: str = "akbareliboy@gmail.com"
     # The one model this project uses. It was left behind at an older default
     # while docker-compose passed 3.7, so a test and a deployed container
     # disagreed about which model they were exercising.
